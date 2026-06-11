@@ -32,6 +32,7 @@ impl Adapter for CodexAdapter {
             Some("thread.started") => vec![AgentEvent::SessionStarted {
                 session_id: v["thread_id"].as_str().unwrap_or_default().to_string(),
                 provider: Provider::Codex,
+                // TODO(Task 9): check whether real thread.started carries a model field; populate if present.
                 model: None,
             }],
             Some("item.completed") => {
@@ -43,6 +44,7 @@ impl Adapter for CodexAdapter {
                     Some("reasoning") => vec![AgentEvent::Thinking {
                         text: item["text"].as_str().unwrap_or_default().to_string(),
                     }],
+                    // TODO(M2): real codex may emit file-change items — inspect Task 9 recording and map them to AgentEvent::FileChanged instead of the catch-all.
                     Some(other) => vec![AgentEvent::ToolCall {
                         name: other.to_string(),
                         detail: item.to_string(),
@@ -151,6 +153,19 @@ mod tests {
         assert_eq!(args.last().unwrap(), "hi");
     }
 
+    #[test]
+    fn usage_sums_cached_tokens() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":40,"cached_input_tokens":100,"output_tokens":6}}"#;
+        let events = CodexAdapter.parse_line(line);
+        assert!(matches!(
+            &events[0],
+            AgentEvent::Usage {
+                input_tokens: 140,
+                output_tokens: 6
+            }
+        ));
+    }
+
     /// Runs only when real fixtures have been recorded via script/record_fixtures.sh.
     #[test]
     fn parses_recorded_real_output_if_present() {
@@ -167,6 +182,10 @@ mod tests {
             return;
         }
         let events = parse_all(&raw);
+        assert!(matches!(
+            events.first(),
+            Some(AgentEvent::SessionStarted { .. })
+        ));
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::Message { .. })));
