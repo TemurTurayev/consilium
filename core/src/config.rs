@@ -77,20 +77,20 @@ impl Default for Config {
                 conductor: RoleConfig {
                     effort: Some("high".into()),
                     mode: Some("attached".into()),
-                    ..RoleConfig::new(Provider::Claude, "fable-5")
+                    ..RoleConfig::new(Provider::Claude, "claude-fable-5")
                 },
                 chairman: RoleConfig {
                     effort: Some("high".into()),
-                    ..RoleConfig::new(Provider::Claude, "fable-5")
+                    ..RoleConfig::new(Provider::Claude, "claude-fable-5")
                 },
                 workers: vec![
                     RoleConfig::new(Provider::Codex, "gpt-5.4"),
-                    RoleConfig::new(Provider::Gemini, "gemini-3-pro"),
+                    RoleConfig::new(Provider::Gemini, "gemini-3-pro-preview"),
                 ],
                 reviewer: RoleConfig::new(Provider::Codex, "gpt-5.4"),
                 supervisor: RoleConfig {
                     intervention_threshold: Some("medium".into()),
-                    ..RoleConfig::new(Provider::Gemini, "gemini-3-pro")
+                    ..RoleConfig::new(Provider::Gemini, "gemini-3-pro-preview")
                 },
             },
             quota: QuotaConfig::default(),
