@@ -9,6 +9,10 @@ pub fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
+/// SQLite-backed quota store.
+///
+/// `Connection` is `Send` but **not `Sync`**. For concurrent access in M3
+/// (axum, multi-task), wrap in `Arc<Mutex<QuotaStore>>` or use a connection pool.
 pub struct QuotaStore {
     conn: Connection,
 }
@@ -36,6 +40,10 @@ impl QuotaStore {
             )",
             [],
         )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_provider_ts ON usage_log(provider, ts)",
+            [],
+        )?;
         Ok(Self { conn })
     }
 
@@ -55,9 +63,13 @@ impl QuotaStore {
         output_tokens: u64,
         ts: i64,
     ) -> anyhow::Result<()> {
+        let input_i64 = i64::try_from(input_tokens)
+            .map_err(|_| anyhow::anyhow!("input_tokens overflows i64: {input_tokens}"))?;
+        let output_i64 = i64::try_from(output_tokens)
+            .map_err(|_| anyhow::anyhow!("output_tokens overflows i64: {output_tokens}"))?;
         self.conn.execute(
             "INSERT INTO usage_log (ts, provider, input_tokens, output_tokens) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![ts, provider.as_str(), input_tokens as i64, output_tokens as i64],
+            rusqlite::params![ts, provider.as_str(), input_i64, output_i64],
         )?;
         Ok(())
     }
@@ -70,6 +82,9 @@ impl QuotaStore {
             rusqlite::params![provider.as_str(), since_unix],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        if input < 0 || output < 0 {
+            anyhow::bail!("usage_log contains negative token sums; db may be corrupt");
+        }
         Ok((input as u64, output as u64))
     }
 }
