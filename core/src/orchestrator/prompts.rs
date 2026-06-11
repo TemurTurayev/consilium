@@ -46,7 +46,9 @@ pub fn diff_review(diff: &str) -> String {
         "Review this diff for real problems: bugs, security issues, broken edge \
          cases, misleading naming. Do not invent style nitpicks. Then output EXACTLY \
          one JSON code block:\n```json\n{{\"findings\":[{{\"severity\":\"critical|important|minor\",\"file\":\"path\",\"description\":\"...\"}}]}}\n```\n\
-         Empty findings array means the diff is clean.\n\nDiff:\n```diff\n{diff}\n```"
+         Empty findings array means the diff is clean.\n\n\
+         The diff is delimited by <diff> tags (tags chosen so backtick fences \
+         inside the diff cannot break the structure):\n<diff>\n{diff}\n</diff>"
     )
 }
 
