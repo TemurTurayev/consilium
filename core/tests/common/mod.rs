@@ -53,6 +53,10 @@ impl Adapter for ScriptedAdapter {
         "sh"
     }
     fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+        debug_assert!(
+            !self.script.lines().any(|l| l == "CONSILIUM_EOF"),
+            "ScriptedAdapter: script contains the literal heredoc delimiter 'CONSILIUM_EOF' as a standalone line; output will be truncated"
+        );
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(format!(
             "sleep {}; cat <<'CONSILIUM_EOF'\n{}\nCONSILIUM_EOF",
