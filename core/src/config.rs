@@ -104,12 +104,11 @@ impl Config {
         let Some(path) = path else {
             return Ok(Config::default());
         };
-        if !path.exists() {
-            return Ok(Config::default());
+        match std::fs::read_to_string(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(e) => Err(e.into()),
+            Ok(raw) => serde_json::from_str(&raw).map_err(Into::into),
         }
-        let raw = std::fs::read_to_string(path)?;
-        let cfg = serde_json::from_str(&raw)?;
-        Ok(cfg)
     }
 }
 
