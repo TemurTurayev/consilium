@@ -5,16 +5,23 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p core/tests/fixtures/{claude,codex,gemini}/recorded
 
-claude -p 'Reply with exactly: ok' --output-format stream-json --verbose \
-  > core/tests/fixtures/claude/recorded/basic.jsonl 2>/dev/null \
-  && echo "claude: recorded" || echo "claude: FAILED"
+record() {
+  local name="$1" dest="$2"; shift 2
+  local tmp; tmp=$(mktemp)
+  if "$@" > "$tmp" 2> >(cat >&2); then
+    mv "$tmp" "$dest"
+    echo "$name: recorded"
+  else
+    echo "$name: FAILED" >&2
+    rm -f "$tmp"
+  fi
+}
 
-codex exec --json 'Reply with exactly: ok' \
-  > core/tests/fixtures/codex/recorded/basic.jsonl 2>/dev/null \
-  && echo "codex: recorded" || echo "codex: FAILED (not installed?)"
-
-gemini -p 'Reply with exactly: ok' --output-format json \
-  > core/tests/fixtures/gemini/recorded/basic.json 2>/dev/null \
-  && echo "gemini: recorded" || echo "gemini: FAILED"
+record claude core/tests/fixtures/claude/recorded/basic.jsonl \
+  claude -p 'Reply with exactly: ok' --output-format stream-json --verbose
+record codex core/tests/fixtures/codex/recorded/basic.jsonl \
+  codex exec --json 'Reply with exactly: ok'
+record gemini core/tests/fixtures/gemini/recorded/basic.json \
+  gemini -p 'Reply with exactly: ok' --output-format json
 
 echo "Now diff recorded vs synthetic fixtures; update parsers if formats drifted."

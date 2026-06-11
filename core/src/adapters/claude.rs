@@ -14,7 +14,8 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn build_command(&self, req: &RunRequest) -> Command {
-        let mut cmd = Command::new("claude");
+        let mut cmd = Command::new(self.cli_binary());
+        // --verbose is required for stream-json to emit the system/init line
         cmd.arg("-p")
             .arg(&req.prompt)
             .arg("--output-format")
@@ -61,8 +62,12 @@ impl Adapter for ClaudeAdapter {
             Some("result") => {
                 let mut events = Vec::new();
                 if let Some(u) = v.get("usage") {
+                    // M1 counts all input-side tokens together; M2 quota-$ conversion will split by cache rate.
+                    let input = u["input_tokens"].as_u64().unwrap_or(0)
+                        + u["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+                        + u["cache_read_input_tokens"].as_u64().unwrap_or(0);
                     events.push(AgentEvent::Usage {
-                        input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+                        input_tokens: input,
                         output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
                     });
                 }
@@ -145,10 +150,24 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.contains(&"--output-format".to_string()));
-        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"]));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"sonnet".to_string()));
+    }
+
+    #[test]
+    fn usage_sums_cache_tokens() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"abc123","usage":{"input_tokens":6,"cache_creation_input_tokens":100,"cache_read_input_tokens":10,"output_tokens":6}}"#;
+        let events = ClaudeAdapter.parse_line(line);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Usage {
+                input_tokens: 116,
+                output_tokens: 6
+            }
+        )));
     }
 
     /// Runs only when real fixtures have been recorded via script/record_fixtures.sh.
@@ -162,11 +181,18 @@ mod tests {
             eprintln!("skipped: no recorded fixture");
             return;
         };
+        if raw.trim().is_empty() {
+            eprintln!("skipped: empty recorded fixture");
+            return;
+        }
         let events = parse_all(&raw);
         assert!(matches!(
             events.first(),
             Some(AgentEvent::SessionStarted { .. })
         ));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Message { .. })));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Usage { .. })));
         assert!(events
             .iter()
