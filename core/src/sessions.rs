@@ -64,7 +64,9 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
         .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", adapter.cli_binary()))?;
     let stdout = child.stdout.take().expect("stdout piped above");
     let stderr = child.stderr.take().expect("stderr piped above");
+    tracing::info!(session = %id, provider = adapter.provider().as_str(), "session spawned");
 
+    let task_id = id.clone();
     tokio::spawn(async move {
         let stderr_task = tokio::spawn(drain_stderr(stderr));
         let mut full_output = String::new();
@@ -90,6 +92,7 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
         let stderr_tail = stderr_task.await.unwrap_or_default();
         match child.wait().await {
             Ok(status) if !status.success() => {
+                tracing::warn!(session = %task_id, %status, "session process exited non-zero");
                 let mut error = format!("process exited with {status}");
                 if !stderr_tail.trim().is_empty() {
                     error.push_str(&format!("; stderr tail: {}", stderr_tail.trim()));

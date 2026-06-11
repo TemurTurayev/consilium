@@ -71,6 +71,12 @@ impl QuotaStore {
             "INSERT INTO usage_log (ts, provider, input_tokens, output_tokens) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![ts, provider.as_str(), input_i64, output_i64],
         )?;
+        tracing::debug!(
+            provider = provider.as_str(),
+            input_tokens,
+            output_tokens,
+            "usage recorded"
+        );
         Ok(())
     }
 
