@@ -27,6 +27,13 @@ enum Command {
     Quota,
 }
 
+fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
+    let home = std::env::var("HOME")?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".consilium")
+        .join("usage.db"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -63,9 +70,55 @@ async fn main() -> anyhow::Result<()> {
             model,
             prompt,
         } => {
-            println!("run: not implemented yet ({provider}, {model:?}, {prompt})");
+            use consilium::adapters::{
+                claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter, Adapter,
+                RunRequest,
+            };
+            use consilium::event::{AgentEvent, Provider};
+            use std::sync::Arc;
+
+            let provider: Provider = provider.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let adapter: Arc<dyn Adapter> = match provider {
+                Provider::Claude => Arc::new(ClaudeAdapter),
+                Provider::Codex => Arc::new(CodexAdapter),
+                Provider::Gemini => Arc::new(GeminiAdapter),
+            };
+            let req = RunRequest {
+                prompt,
+                model,
+                cwd: std::env::current_dir()?,
+            };
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+
+            let mut handle = consilium::sessions::spawn(adapter, req)?;
+            println!("session: {}", handle.id);
+            while let Some(ev) = handle.events.recv().await {
+                match &ev {
+                    AgentEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        store.record(provider, *input_tokens, *output_tokens)?;
+                        println!("[usage] in={input_tokens} out={output_tokens}");
+                    }
+                    AgentEvent::Message { text } => println!("[message] {text}"),
+                    AgentEvent::ToolCall { name, .. } => println!("[tool] {name}"),
+                    AgentEvent::Completed { .. } => println!("[completed]"),
+                    AgentEvent::Failed { error } => println!("[failed] {error}"),
+                    other => println!("[event] {other:?}"),
+                }
+            }
         }
-        Command::Quota => println!("quota: not implemented yet"),
+        Command::Quota => {
+            use consilium::event::Provider;
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let since = consilium::quota::unix_now() - 5 * 3600;
+            println!("usage in the last 5h window:");
+            for p in [Provider::Claude, Provider::Codex, Provider::Gemini] {
+                let (input, output) = store.totals_since(p, since)?;
+                println!("  {:8} in={input:>8} out={output:>8}", p.as_str());
+            }
+        }
     }
     Ok(())
 }
