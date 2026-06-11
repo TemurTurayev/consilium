@@ -16,7 +16,7 @@ pub struct RoleConfig {
 }
 
 impl RoleConfig {
-    fn new(provider: Provider, model: &str) -> Self {
+    pub(crate) fn new(provider: Provider, model: &str) -> Self {
         Self {
             provider,
             model: model.into(),

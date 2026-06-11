@@ -14,7 +14,8 @@ pub fn adapter_for(role: &RoleConfig) -> Arc<dyn Adapter> {
     }
 }
 
-/// Builds the RunRequest for a role. `effort` is intentionally NOT applied yet:
+/// Builds the RunRequest for a role. Primary consumer: M2b conduct/supervisor
+/// (council/review inline their requests). `effort` is intentionally NOT applied yet:
 /// per-CLI effort flags are unverified — TODO(M2b): map after checking real CLIs.
 pub fn request_for(role: &RoleConfig, prompt: String, cwd: PathBuf) -> RunRequest {
     RunRequest {
