@@ -1,35 +1,12 @@
 //! Integration tests for the SessionManager (real process spawning).
-//!
-//! NOTE: `tests/fake_cli_output.jsonl` is a copy of
-//! `tests/fixtures/claude/basic_session.jsonl` and must stay in sync with it —
-//! if the Claude fixture changes, re-copy it here.
+
+mod common;
+use common::ScriptedAdapter;
 
 use consilium::adapters::{Adapter, RunRequest};
 use consilium::event::{AgentEvent, Provider};
 use consilium::sessions;
 use std::sync::Arc;
-
-/// Fake adapter: "CLI" is `cat <fixture>`, parsing delegates to the Claude parser.
-struct FakeAdapter {
-    fixture: std::path::PathBuf,
-}
-
-impl Adapter for FakeAdapter {
-    fn provider(&self) -> Provider {
-        Provider::Claude
-    }
-    fn cli_binary(&self) -> &'static str {
-        "cat"
-    }
-    fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("cat");
-        cmd.arg(&self.fixture);
-        cmd
-    }
-    fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
-        consilium::adapters::claude::ClaudeAdapter.parse_line(line)
-    }
-}
 
 /// Fake adapter whose process exits non-zero without output.
 struct CrashingAdapter;
@@ -66,9 +43,16 @@ async fn collect(mut handle: sessions::SessionHandle) -> Vec<AgentEvent> {
 
 #[tokio::test]
 async fn streams_events_from_process_in_order() {
-    let fixture =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_cli_output.jsonl");
-    let handle = sessions::spawn(Arc::new(FakeAdapter { fixture }), req()).unwrap();
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude/basic_session.jsonl");
+    let script =
+        std::fs::read_to_string(&fixture_path).expect("failed to read basic_session.jsonl fixture");
+    let adapter = ScriptedAdapter {
+        provider: Provider::Claude,
+        script,
+        delay_secs: 0,
+    };
+    let handle = sessions::spawn(Arc::new(adapter), req()).unwrap();
     let events = collect(handle).await;
     assert!(matches!(
         events.first(),

@@ -1,3 +1,0 @@
-{"type":"system","subtype":"init","session_id":"abc123","model":"claude-fable-5","tools":[]}
-{"type":"assistant","message":{"id":"msg_01","role":"assistant","content":[{"type":"text","text":"ok"}]},"session_id":"abc123"}
-{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"abc123","usage":{"input_tokens":42,"output_tokens":5}}
