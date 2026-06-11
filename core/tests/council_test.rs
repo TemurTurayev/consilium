@@ -55,6 +55,59 @@ async fn full_council_flow_with_scripted_members() {
 }
 
 #[tokio::test]
+async fn transcript_preserves_review_attribution() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    // Both members answer AND review with the same scripted text: "scorer"
+    // emits a valid scores block (parsed), "prose" emits plain prose (null).
+    let members = vec![
+        CouncilMember {
+            label: "scorer".into(),
+            adapter: Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                "```json\n{\"scores\":[{\"agent\":\"A\",\"score\":7,\"justification\":\"fine\"}]}\n```",
+            )),
+            model: None,
+        },
+        CouncilMember {
+            label: "prose".into(),
+            adapter: Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Gemini,
+                "I simply prefer the first answer, no numbers from me.",
+            )),
+            model: None,
+        },
+    ];
+    let chairman = Arc::new(ScriptedAdapter::ok_with_text(Provider::Claude, "done"));
+
+    let outcome = run_council(
+        "q",
+        members,
+        chairman,
+        None,
+        &store,
+        std::env::temp_dir(),
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+
+    let scores = outcome.transcript["scores"].as_array().unwrap();
+    assert_eq!(scores.len(), 2);
+    let scorer_entry = scores
+        .iter()
+        .find(|e| e["member"] == "scorer")
+        .expect("scorer entry present");
+    assert!(!scorer_entry["parsed"].is_null());
+    assert_eq!(scorer_entry["parsed"][0]["score"], 7);
+    let prose_entry = scores
+        .iter()
+        .find(|e| e["member"] == "prose")
+        .expect("prose entry present");
+    assert!(prose_entry["parsed"].is_null());
+    assert_eq!(outcome.transcript["reviews"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn council_fails_when_all_members_fail() {
     let store = QuotaStore::open_in_memory().unwrap();
     let members = vec![CouncilMember {

@@ -27,21 +27,11 @@ struct ScoresEnvelope {
     scores: Vec<Score>,
 }
 
-/// Extracts a `{"scores":[...]}` JSON object from model output: first tries
-/// fenced ```json blocks, then the first `{...}` containing `"scores"`.
+/// Extracts a `{"scores":[...]}` JSON object from model output via the shared
+/// lenient extractor (fenced ```json block preferred, then a bounded scan).
 /// Returns None on any parse failure — councils tolerate sloppy reviewers.
 pub fn parse_scores(text: &str) -> Option<Vec<Score>> {
-    let candidate = if let Some(start) = text.find("```json") {
-        let rest = &text[start + 7..];
-        let end = rest.find("```")?;
-        rest[..end].trim().to_string()
-    } else {
-        let start = text.find('{')?;
-        text[start..].trim().to_string()
-    };
-    serde_json::from_str::<ScoresEnvelope>(&candidate)
-        .ok()
-        .map(|e| e.scores)
+    super::json_extract::extract_json_object::<ScoresEnvelope>(text).map(|e| e.scores)
 }
 
 #[derive(Debug)]
@@ -214,6 +204,19 @@ mod tests {
     fn malformed_output_yields_none() {
         assert!(parse_scores("no json here at all").is_none());
         assert!(parse_scores("```json\n{\"broken\": tru\n```").is_none());
+    }
+
+    #[test]
+    fn parses_bare_json_with_trailing_prose() {
+        let text =
+            r#"{"scores":[{"agent":"A","score":6,"justification":"meh"}]} and that's my review."#;
+        assert_eq!(parse_scores(text).unwrap()[0].score, 6);
+    }
+
+    #[test]
+    fn parses_json_after_stray_braces() {
+        let text = r#"I think {agent A} wins. {"scores":[{"agent":"A","score":9,"justification":"strong"}]}"#;
+        assert_eq!(parse_scores(text).unwrap()[0].score, 9);
     }
 
     /// Guard against drift between the prompt template's embedded JSON example
