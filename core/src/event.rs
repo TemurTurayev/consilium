@@ -39,13 +39,29 @@ pub enum AgentEvent {
         provider: Provider,
         model: Option<String>,
     },
-    Thinking { text: String },
-    Message { text: String },
-    ToolCall { name: String, detail: String },
-    FileChanged { path: String },
-    Usage { input_tokens: u64, output_tokens: u64 },
-    Completed { result: Option<String> },
-    Failed { error: String },
+    Thinking {
+        text: String,
+    },
+    Message {
+        text: String,
+    },
+    ToolCall {
+        name: String,
+        detail: String,
+    },
+    FileChanged {
+        path: String,
+    },
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    Completed {
+        result: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[cfg(test)]
@@ -62,9 +78,15 @@ mod tests {
 
     #[test]
     fn agent_event_serializes_with_snake_case_tag() {
-        let ev = AgentEvent::Usage { input_tokens: 10, output_tokens: 2 };
+        let ev = AgentEvent::Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+        };
         let json = serde_json::to_string(&ev).unwrap();
-        assert_eq!(json, r#"{"type":"usage","input_tokens":10,"output_tokens":2}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"usage","input_tokens":10,"output_tokens":2}"#
+        );
     }
 
     #[test]
