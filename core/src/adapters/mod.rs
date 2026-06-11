@@ -1,6 +1,6 @@
 pub mod claude;
-// pub mod codex;   // Task 5
-// pub mod gemini;  // Task 6
+pub mod codex; // Task 5
+               // pub mod gemini;  // Task 6
 
 use crate::event::{AgentEvent, Provider};
 use std::path::PathBuf;

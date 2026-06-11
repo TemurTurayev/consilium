@@ -1,0 +1,178 @@
+use super::{Adapter, RunRequest};
+use crate::event::{AgentEvent, Provider};
+use tokio::process::Command;
+
+pub struct CodexAdapter;
+
+impl Adapter for CodexAdapter {
+    fn provider(&self) -> Provider {
+        Provider::Codex
+    }
+
+    fn cli_binary(&self) -> &'static str {
+        "codex"
+    }
+
+    fn build_command(&self, req: &RunRequest) -> Command {
+        let mut cmd = Command::new(self.cli_binary());
+        cmd.arg("exec").arg("--json");
+        if let Some(model) = &req.model {
+            cmd.arg("-m").arg(model);
+        }
+        cmd.arg(&req.prompt);
+        cmd.current_dir(&req.cwd);
+        cmd
+    }
+
+    fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            return Vec::new();
+        };
+        match v["type"].as_str() {
+            Some("thread.started") => vec![AgentEvent::SessionStarted {
+                session_id: v["thread_id"].as_str().unwrap_or_default().to_string(),
+                provider: Provider::Codex,
+                model: None,
+            }],
+            Some("item.completed") => {
+                let item = &v["item"];
+                match item["type"].as_str() {
+                    Some("agent_message") => vec![AgentEvent::Message {
+                        text: item["text"].as_str().unwrap_or_default().to_string(),
+                    }],
+                    Some("reasoning") => vec![AgentEvent::Thinking {
+                        text: item["text"].as_str().unwrap_or_default().to_string(),
+                    }],
+                    Some(other) => vec![AgentEvent::ToolCall {
+                        name: other.to_string(),
+                        detail: item.to_string(),
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            Some("turn.completed") => {
+                let mut events = Vec::new();
+                if let Some(u) = v.get("usage") {
+                    // M1 counts all input-side tokens together; M2 quota-$ conversion will split by cache rate.
+                    let input = u["input_tokens"].as_u64().unwrap_or(0)
+                        + u["cached_input_tokens"].as_u64().unwrap_or(0);
+                    events.push(AgentEvent::Usage {
+                        input_tokens: input,
+                        output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+                    });
+                }
+                events.push(AgentEvent::Completed { result: None });
+                events
+            }
+            Some("turn.failed") | Some("error") => vec![AgentEvent::Failed {
+                error: v["error"]["message"]
+                    .as_str()
+                    .or(v["message"].as_str())
+                    .unwrap_or("unknown error")
+                    .to_string(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{AgentEvent, Provider};
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/codex/basic_session.jsonl");
+
+    fn parse_all(raw: &str) -> Vec<AgentEvent> {
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .flat_map(|l| CodexAdapter.parse_line(l))
+            .collect()
+    }
+
+    #[test]
+    fn parses_basic_session_fixture() {
+        let events = parse_all(FIXTURE);
+        assert!(
+            matches!(&events[0], AgentEvent::SessionStarted { provider: Provider::Codex, session_id, .. } if session_id == "th_1")
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "command_execution")
+        ));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Message { text } if text == "ok")));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Usage {
+                input_tokens: 40,
+                output_tokens: 6
+            }
+        )));
+        assert!(matches!(
+            events.last().unwrap(),
+            AgentEvent::Completed { .. }
+        ));
+    }
+
+    #[test]
+    fn turn_failed_maps_to_failed() {
+        let line = r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#;
+        let events = CodexAdapter.parse_line(line);
+        assert!(
+            matches!(&events[0], AgentEvent::Failed { error } if error == "usage limit reached")
+        );
+    }
+
+    #[test]
+    fn garbage_line_yields_no_events() {
+        assert!(CodexAdapter.parse_line("???").is_empty());
+        assert!(CodexAdapter
+            .parse_line(r#"{"type":"unknown.kind"}"#)
+            .is_empty());
+    }
+
+    #[test]
+    fn build_command_uses_exec_json() {
+        let req = RunRequest {
+            prompt: "hi".into(),
+            model: Some("gpt-5.4".into()),
+            cwd: std::env::temp_dir(),
+        };
+        let cmd = CodexAdapter.build_command(&req);
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "exec");
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.4"]));
+        assert_eq!(args.last().unwrap(), "hi");
+    }
+
+    /// Runs only when real fixtures have been recorded via script/record_fixtures.sh.
+    #[test]
+    fn parses_recorded_real_output_if_present() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/codex/recorded/basic.jsonl"
+        );
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            eprintln!("skipped: no recorded fixture");
+            return;
+        };
+        if raw.trim().is_empty() {
+            eprintln!("skipped: empty recorded fixture");
+            return;
+        }
+        let events = parse_all(&raw);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Message { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Usage { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Completed { .. })));
+    }
+}
