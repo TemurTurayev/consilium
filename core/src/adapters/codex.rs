@@ -16,6 +16,10 @@ impl Adapter for CodexAdapter {
     fn build_command(&self, req: &RunRequest) -> Command {
         let mut cmd = Command::new(self.cli_binary());
         cmd.arg("exec").arg("--json");
+        // codex refuses to run outside a trusted/git directory; council and
+        // review may legitimately run anywhere (claude/gemini have no such
+        // restriction), so opt out uniformly.
+        cmd.arg("--skip-git-repo-check");
         if let Some(model) = &req.model {
             cmd.arg("-m").arg(model);
         }
@@ -150,6 +154,7 @@ mod tests {
             .collect();
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.4"]));
         assert_eq!(args.last().unwrap(), "hi");
     }
