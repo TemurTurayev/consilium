@@ -16,8 +16,9 @@ Named after the medical *consilium*: specialists from different fields gathering
 
 | Milestone | Scope | State |
 |---|---|---|
-| **M1 — Engine foundation** | CLI adapters, session manager, quota store, `doctor`/`run`/`quota` commands | ✅ Done — 37 tests, verified E2E |
-| **M2 — Orchestration** | `council` (anonymized peer review), `conduct` (conductor/workers), `review`, `auto` pipeline, supervisor | 🚧 Next |
+| **M1 — Engine foundation** | CLI adapters, session manager, quota store, `doctor`/`run`/`quota` commands | ✅ Done — verified E2E |
+| **M2a — Deliberation** | `council` (anonymized peer review → chairman synthesis), `review` (diff audit with CI exit codes) | ✅ Done — 72 tests, verified on live providers |
+| **M2b — Execution** | `conduct` (conductor/workers), `auto` pipeline, supervisor, quota-aware routing | 🚧 Next |
 | **M3 — Server & UI** | axum + WebSocket server, MCP attached mode, React web UI, quota dashboards | Planned |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
@@ -33,7 +34,19 @@ cargo build --release
 cargo run -q -- doctor                                    # check agent CLIs
 cargo run -q -- run --provider gemini "Reply with: ok"    # single-agent smoke run
 cargo run -q -- quota                                     # usage in the last 5h window
+
+# The flagship: convene a council — workers answer independently, cross-review
+# each other anonymously, the chairman synthesizes the best answer.
+cargo run -q -- council "Async Rust: when is spawning a task per request wrong?"
+
+# Audit a diff with the reviewer role. Exit codes: 0 clean/minor,
+# 2 critical findings, 3 reviewer output unparseable (fails closed).
+git diff | cargo run -q -- review --diff-file /dev/stdin
 ```
+
+Every deliberation writes a full JSON transcript to `~/.consilium/runs/` — including
+the anonymization map and per-reviewer scores, so you can audit who said what
+(and whether an agent favored its own anonymized answer).
 
 ```
 $ cargo run -q -- doctor
