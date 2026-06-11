@@ -34,7 +34,28 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Doctor => println!("doctor: not implemented yet"),
+        Command::Doctor => {
+            let mut all_ok = true;
+            for status in consilium::doctor::run_doctor() {
+                if status.found {
+                    println!(
+                        "✓ {:8} {}",
+                        status.binary,
+                        status.version.unwrap_or_default()
+                    );
+                } else {
+                    all_ok = false;
+                    println!("✗ {:8} not found", status.binary);
+                }
+            }
+            if !all_ok {
+                println!("\nInstall missing CLIs:");
+                println!("  codex:  npm install -g @openai/codex   (then: codex login)");
+                println!("  gemini: npm install -g @google/gemini-cli");
+                println!("  claude: see https://code.claude.com");
+                std::process::exit(1);
+            }
+        }
         Command::Run {
             provider,
             model,
