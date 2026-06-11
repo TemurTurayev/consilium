@@ -18,14 +18,26 @@ impl TranscriptStore {
         Ok(Path::new(&home).join(".consilium"))
     }
 
+    /// `kind` must contain only ASCII alphanumerics, hyphens, and underscores —
+    /// it is interpolated into a filename. Enforced via debug_assert.
     pub fn save(&self, kind: &str, payload: &serde_json::Value) -> anyhow::Result<PathBuf> {
+        debug_assert!(
+            kind.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "transcript kind '{kind}' contains characters that are unsafe in filenames"
+        );
         let dir = self.base.join("runs");
         std::fs::create_dir_all(&dir)?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock before unix epoch")
             .as_nanos();
-        let path = dir.join(format!("{nanos}-{kind}.json"));
+        // Per-process atomic counter as a tiebreaker: nanosecond timestamps can
+        // collide under coarse clocks or parallel saves — overwriting silently
+        // would lose a transcript.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!("{nanos}-{seq:04}-{kind}.json"));
         std::fs::write(&path, serde_json::to_string_pretty(payload)?)?;
         Ok(path)
     }
