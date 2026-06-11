@@ -1132,6 +1132,10 @@ Review arm (complete):
                 None => {
                     println!("(reviewer output was not structured JSON — raw review below)\n");
                     println!("{}", result.raw_review);
+                    println!("\ntranscript: {}", path.display());
+                    // An unparseable security review must fail CLOSED: CI can
+                    // distinguish "critical found" (2) from "review unusable" (3).
+                    std::process::exit(3);
                 }
             }
             println!("\ntranscript: {}", path.display());
@@ -1181,7 +1185,7 @@ Expected: findings (or clean verdict) printed; exit code 0 or 2 consistent with 
 
 - `cargo test` green (≥60 tests), clippy `-D warnings` clean, fmt clean.
 - `consilium council "<question>"` completes a real 3-stage deliberation across the configured providers, prints a synthesis, writes a transcript, records quota.
-- `consilium review --diff-file <f>` returns a structured verdict, exit code 2 on critical findings.
+- `consilium review --diff-file <f>` returns a structured verdict; exit code 2 on critical findings, exit code 3 when the reviewer output is unparseable (fail closed).
 - Zero quota spent by the test suite (scripted adapters only); real spend confined to the two smoke runs.
 
 ## Next plan (after M2a ships)
