@@ -1,0 +1,97 @@
+use consilium::adapters::{Adapter, RunRequest};
+use consilium::event::{AgentEvent, Provider};
+use consilium::sessions;
+use std::sync::Arc;
+
+/// Fake adapter: "CLI" is `cat <fixture>`, parsing delegates to the Claude parser.
+struct FakeAdapter {
+    fixture: std::path::PathBuf,
+}
+
+impl Adapter for FakeAdapter {
+    fn provider(&self) -> Provider {
+        Provider::Claude
+    }
+    fn cli_binary(&self) -> &'static str {
+        "cat"
+    }
+    fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("cat");
+        cmd.arg(&self.fixture);
+        cmd
+    }
+    fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
+        consilium::adapters::claude::ClaudeAdapter.parse_line(line)
+    }
+}
+
+/// Fake adapter whose process exits non-zero without output.
+struct CrashingAdapter;
+
+impl Adapter for CrashingAdapter {
+    fn provider(&self) -> Provider {
+        Provider::Claude
+    }
+    fn cli_binary(&self) -> &'static str {
+        "sh"
+    }
+    fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("exit 3");
+        cmd
+    }
+}
+
+fn req() -> RunRequest {
+    RunRequest {
+        prompt: "hi".into(),
+        model: None,
+        cwd: std::env::temp_dir(),
+    }
+}
+
+async fn collect(mut handle: sessions::SessionHandle) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    while let Some(ev) = handle.events.recv().await {
+        events.push(ev);
+    }
+    events
+}
+
+#[tokio::test]
+async fn streams_events_from_process_in_order() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_cli_output.jsonl");
+    let handle = sessions::spawn(Arc::new(FakeAdapter { fixture }), req()).unwrap();
+    let events = collect(handle).await;
+    assert!(matches!(
+        events.first(),
+        Some(AgentEvent::SessionStarted { .. })
+    ));
+    assert!(matches!(events.last(), Some(AgentEvent::Completed { .. })));
+}
+
+#[tokio::test]
+async fn nonzero_exit_emits_failed_event() {
+    let handle = sessions::spawn(Arc::new(CrashingAdapter), req()).unwrap();
+    let events = collect(handle).await;
+    assert!(matches!(events.last(), Some(AgentEvent::Failed { error }) if error.contains("3")));
+}
+
+#[tokio::test]
+async fn missing_binary_returns_spawn_error() {
+    struct MissingBinaryAdapter;
+    impl Adapter for MissingBinaryAdapter {
+        fn provider(&self) -> Provider {
+            Provider::Claude
+        }
+        fn cli_binary(&self) -> &'static str {
+            "definitely-not-a-real-binary-xyz"
+        }
+        fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+            tokio::process::Command::new("definitely-not-a-real-binary-xyz")
+        }
+    }
+    let err = sessions::spawn(Arc::new(MissingBinaryAdapter), req()).unwrap_err();
+    assert!(err.to_string().contains("definitely-not-a-real-binary-xyz"));
+}
