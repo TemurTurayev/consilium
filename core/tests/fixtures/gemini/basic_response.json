@@ -13,6 +13,17 @@
           "thoughts": 0,
           "tool": 0
         }
+      },
+      "gemini-3-flash": {
+        "tokens": {
+          "input": 100,
+          "prompt": 100,
+          "candidates": 20,
+          "total": 135,
+          "cached": 10,
+          "thoughts": 5,
+          "tool": 0
+        }
       }
     }
   }
