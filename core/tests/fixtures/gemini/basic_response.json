@@ -1,0 +1,19 @@
+{
+  "session_id": "test-session-id",
+  "response": "ok",
+  "stats": {
+    "models": {
+      "gemini-3-pro": {
+        "tokens": {
+          "input": 12,
+          "prompt": 12,
+          "candidates": 3,
+          "total": 15,
+          "cached": 0,
+          "thoughts": 0,
+          "tool": 0
+        }
+      }
+    }
+  }
+}
