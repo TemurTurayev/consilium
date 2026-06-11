@@ -25,6 +25,24 @@ enum Command {
     },
     /// Show usage counters per provider
     Quota,
+    /// Convene the council: independent answers, anonymized cross-review, synthesis
+    Council {
+        question: String,
+        /// Hard per-session timeout in seconds
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
+    /// Audit a git diff with the reviewer role
+    Review {
+        /// Review staged changes instead of unstaged
+        #[arg(long)]
+        staged: bool,
+        /// Read the diff from a file instead of running git
+        #[arg(long)]
+        diff_file: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
 }
 
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
@@ -120,6 +138,114 @@ async fn main() -> anyhow::Result<()> {
             for p in [Provider::Claude, Provider::Codex, Provider::Gemini] {
                 let (input, output) = store.totals_since(p, since)?;
                 println!("  {:8} in={input:>8} out={output:>8}", p.as_str());
+            }
+        }
+        Command::Council { question, timeout } => {
+            use consilium::orchestrator::council::CouncilMember;
+            use consilium::orchestrator::{council, roles, transcript::TranscriptStore};
+
+            let config = consilium::config::Config::load(Some(std::path::Path::new(
+                "consilium.config.json",
+            )))?;
+            let chairman_model = Some(config.roles.chairman.model.clone());
+            let chairman_adapter = roles::adapter_for(&config.roles.chairman);
+            let members: Vec<CouncilMember> = config
+                .roles
+                .workers
+                .iter()
+                .map(|role| CouncilMember {
+                    label: format!("{}-{}", role.provider.as_str(), role.model),
+                    adapter: roles::adapter_for(role),
+                    model: Some(role.model.clone()),
+                })
+                .collect();
+
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
+            let outcome = council::run_council(
+                &question,
+                members,
+                chairman_adapter,
+                chairman_model,
+                &store,
+                std::env::current_dir()?,
+                std::time::Duration::from_secs(timeout),
+            )
+            .await?;
+            let path = transcripts.save("council", &outcome.transcript)?;
+            println!("\n════ COUNCIL SYNTHESIS ════\n");
+            println!("{}", outcome.synthesis);
+            if !outcome.failed_members.is_empty() {
+                println!("\n(members failed: {})", outcome.failed_members.join(", "));
+            }
+            println!("\ntranscript: {}", path.display());
+        }
+        Command::Review {
+            staged,
+            diff_file,
+            timeout,
+        } => {
+            use consilium::orchestrator::{review, roles, transcript::TranscriptStore};
+
+            let cwd = std::env::current_dir()?;
+            let diff = match diff_file {
+                Some(path) => std::fs::read_to_string(&path)
+                    .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?,
+                None => {
+                    let mut cmd = std::process::Command::new("git");
+                    cmd.arg("diff").current_dir(&cwd);
+                    if staged {
+                        cmd.arg("--staged");
+                    }
+                    let out = cmd.output()?;
+                    if !out.status.success() {
+                        anyhow::bail!("git diff failed: {}", String::from_utf8_lossy(&out.stderr));
+                    }
+                    String::from_utf8_lossy(&out.stdout).into_owned()
+                }
+            };
+            if diff.trim().is_empty() {
+                anyhow::bail!("nothing to review: the diff is empty");
+            }
+
+            let config = consilium::config::Config::load(Some(std::path::Path::new(
+                "consilium.config.json",
+            )))?;
+            let reviewer_role = &config.roles.reviewer;
+            let reviewer = roles::adapter_for(reviewer_role);
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
+
+            let result = review::run_review(
+                &diff,
+                reviewer,
+                Some(reviewer_role.model.clone()),
+                &store,
+                cwd,
+                std::time::Duration::from_secs(timeout),
+            )
+            .await?;
+            let path = transcripts.save("review", &result.transcript)?;
+
+            match &result.verdict {
+                Some(v) if v.findings.is_empty() => println!("✓ clean — no findings"),
+                Some(v) => {
+                    for f in &v.findings {
+                        println!("[{:?}] {} — {}", f.severity, f.file, f.description);
+                    }
+                }
+                None => {
+                    println!("(reviewer output was not structured JSON — raw review below)\n");
+                    println!("{}", result.raw_review);
+                    println!("\ntranscript: {}", path.display());
+                    // An unparseable security review must fail CLOSED: CI can
+                    // distinguish "critical found" (2) from "review unusable" (3).
+                    std::process::exit(3);
+                }
+            }
+            println!("\ntranscript: {}", path.display());
+            if result.verdict.as_ref().is_some_and(|v| v.has_critical()) {
+                std::process::exit(2);
             }
         }
     }
