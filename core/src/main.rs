@@ -28,7 +28,8 @@ enum Command {
 }
 
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
-    let home = std::env::var("HOME")?;
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("$HOME is not set; cannot locate ~/.consilium/usage.db"))?;
     Ok(std::path::PathBuf::from(home)
         .join(".consilium")
         .join("usage.db"))
@@ -98,6 +99,8 @@ async fn main() -> anyhow::Result<()> {
                         input_tokens,
                         output_tokens,
                     } => {
+                        // Usage is recorded regardless of subsequent failure — real tokens were
+                        // spent. M2 can associate the session id with a failed outcome separately.
                         store.record(provider, *input_tokens, *output_tokens)?;
                         println!("[usage] in={input_tokens} out={output_tokens}");
                     }
