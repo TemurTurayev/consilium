@@ -1,3 +1,9 @@
+//! Integration tests for the SessionManager (real process spawning).
+//!
+//! NOTE: `tests/fake_cli_output.jsonl` is a copy of
+//! `tests/fixtures/claude/basic_session.jsonl` and must stay in sync with it —
+//! if the Claude fixture changes, re-copy it here.
+
 use consilium::adapters::{Adapter, RunRequest};
 use consilium::event::{AgentEvent, Provider};
 use consilium::sessions;
@@ -76,6 +82,65 @@ async fn nonzero_exit_emits_failed_event() {
     let handle = sessions::spawn(Arc::new(CrashingAdapter), req()).unwrap();
     let events = collect(handle).await;
     assert!(matches!(events.last(), Some(AgentEvent::Failed { error }) if error.contains("3")));
+}
+
+#[tokio::test]
+async fn nonzero_exit_includes_stderr_tail() {
+    struct StderrCrashingAdapter;
+    impl Adapter for StderrCrashingAdapter {
+        fn provider(&self) -> Provider {
+            Provider::Claude
+        }
+        fn cli_binary(&self) -> &'static str {
+            "sh"
+        }
+        fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg("echo boom >&2; exit 3");
+            cmd
+        }
+    }
+    let handle = sessions::spawn(Arc::new(StderrCrashingAdapter), req()).unwrap();
+    let events = collect(handle).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Failed { error }) if error.contains("3") && error.contains("boom")
+    ));
+}
+
+#[tokio::test]
+async fn large_stderr_does_not_deadlock() {
+    /// Writes ~200KB to stderr (well past the ~64KB pipe buffer) before
+    /// printing "done" on stdout — deadlocks unless stderr is drained.
+    struct NoisyStderrAdapter;
+    impl Adapter for NoisyStderrAdapter {
+        fn provider(&self) -> Provider {
+            Provider::Claude
+        }
+        fn cli_binary(&self) -> &'static str {
+            "sh"
+        }
+        fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c")
+                .arg("yes x | head -c 200000 >&2; echo done; exit 0");
+            cmd
+        }
+        fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
+            if line == "done" {
+                vec![AgentEvent::Completed { result: None }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    let handle = sessions::spawn(Arc::new(NoisyStderrAdapter), req()).unwrap();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(10), collect(handle))
+        .await
+        .expect("session deadlocked: stderr was not drained");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Completed { .. })));
 }
 
 #[tokio::test]
