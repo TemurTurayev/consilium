@@ -36,6 +36,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Doctor => {
             let mut all_ok = true;
+            // check_with_path uses std::process::Command (blocking); acceptable for a
+            // one-shot CLI diagnostic — no async work runs concurrently with this arm.
             for status in consilium::doctor::run_doctor() {
                 if status.found {
                     println!(

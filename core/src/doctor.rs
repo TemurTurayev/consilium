@@ -14,11 +14,24 @@ pub fn check_with_path(binary: &str, path_override: Option<&OsStr>) -> CliStatus
         cmd.env("PATH", path);
     }
     match cmd.output() {
-        Ok(out) if out.status.success() => CliStatus {
-            binary: binary.to_string(),
-            found: true,
-            version: Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
-        },
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let version = if stdout.is_empty() {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    None
+                } else {
+                    Some(stderr)
+                }
+            } else {
+                Some(stdout)
+            };
+            CliStatus {
+                binary: binary.to_string(),
+                found: true,
+                version,
+            }
+        }
         _ => CliStatus {
             binary: binary.to_string(),
             found: false,
@@ -42,13 +55,17 @@ pub fn run_doctor() -> Vec<CliStatus> {
 mod tests {
     use super::*;
 
-    fn fake_bin_dir(name: &str, output: &str) -> tempfile::TempDir {
+    fn fake_bin_dir_script(name: &str, script: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\necho \"{output}\"\n")).unwrap();
+        std::fs::write(&path, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         dir
+    }
+
+    fn fake_bin_dir(name: &str, output: &str) -> tempfile::TempDir {
+        fake_bin_dir_script(name, &format!("#!/bin/sh\necho \"{output}\"\n"))
     }
 
     #[test]
@@ -64,6 +81,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap(); // empty dir on PATH
         let status = check_with_path("definitely-not-installed", Some(dir.path().as_os_str()));
         assert!(!status.found);
+        assert!(status.version.is_none());
+    }
+
+    #[test]
+    fn version_falls_back_to_stderr() {
+        let dir = fake_bin_dir_script("stderrcli", "#!/bin/sh\necho \"ver 1.0\" >&2\n");
+        let status = check_with_path("stderrcli", Some(dir.path().as_os_str()));
+        assert!(status.found);
+        assert_eq!(status.version.as_deref(), Some("ver 1.0"));
+    }
+
+    #[test]
+    fn silent_binary_yields_no_version() {
+        let dir = fake_bin_dir_script("silentcli", "#!/bin/sh\nexit 0\n");
+        let status = check_with_path("silentcli", Some(dir.path().as_os_str()));
+        assert!(status.found);
         assert!(status.version.is_none());
     }
 }
