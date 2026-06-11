@@ -17,6 +17,8 @@ pub struct RunOutcome {
     pub session_id: String,
     /// Completed.result if present, else the last Message text, else empty.
     pub final_text: String,
+    /// All events collected during the session. Empty when status is TimedOut
+    /// (the future is dropped on timeout — collected events are lost).
     pub events: Vec<AgentEvent>,
     pub status: RunStatus,
 }
