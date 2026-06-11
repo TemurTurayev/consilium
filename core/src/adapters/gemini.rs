@@ -63,20 +63,33 @@ impl Adapter for GeminiAdapter {
             }];
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(response) = v["response"].as_str() {
-                let mut events = vec![AgentEvent::Message {
-                    text: response.to_string(),
+            let Some(response) = v["response"].as_str() else {
+                // Valid JSON without "response" is an error envelope (quota,
+                // auth, ...) — surface it as Failed, never as fake success.
+                return vec![AgentEvent::Failed {
+                    error: format!("gemini JSON response had no 'response' field: {trimmed}"),
                 }];
-                if let Some(usage) = v.get("stats").and_then(extract_usage) {
-                    events.push(usage);
-                }
-                events.push(AgentEvent::Completed {
-                    result: Some(response.to_string()),
+            };
+            let mut events = Vec::new();
+            if let Some(sid) = v["session_id"].as_str() {
+                events.push(AgentEvent::SessionStarted {
+                    session_id: sid.to_string(),
+                    provider: Provider::Gemini,
+                    model: None, // model name is per-stats entry, not top-level
                 });
-                return events;
             }
+            events.push(AgentEvent::Message {
+                text: response.to_string(),
+            });
+            if let Some(usage) = v.get("stats").and_then(extract_usage) {
+                events.push(usage);
+            }
+            events.push(AgentEvent::Completed {
+                result: Some(response.to_string()),
+            });
+            return events;
         }
-        // Plain-text fallback (older CLI versions or missing --output-format support)
+        // Falls here only on JSON parse error — genuine plain-text output from older CLIs.
         vec![
             AgentEvent::Message {
                 text: trimmed.to_string(),
@@ -98,6 +111,10 @@ mod tests {
     #[test]
     fn parses_json_response_fixture() {
         let events = GeminiAdapter.parse_final(FIXTURE);
+        assert!(matches!(
+            events.first(),
+            Some(AgentEvent::SessionStarted { session_id, .. }) if session_id == "test-session-1"
+        ));
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::Message { text } if text == "ok")));
@@ -128,6 +145,15 @@ mod tests {
     fn empty_output_yields_failed() {
         let events = GeminiAdapter.parse_final("   \n");
         assert!(matches!(&events[0], AgentEvent::Failed { .. }));
+    }
+
+    #[test]
+    fn json_error_envelope_maps_to_failed() {
+        let events = GeminiAdapter.parse_final(r#"{"error":"quota exceeded"}"#);
+        assert!(matches!(
+            &events[0],
+            AgentEvent::Failed { error } if error.contains("no 'response' field")
+        ));
     }
 
     #[test]
@@ -164,6 +190,9 @@ mod tests {
             return;
         }
         let events = GeminiAdapter.parse_final(&raw);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. })));
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::Message { .. })));
