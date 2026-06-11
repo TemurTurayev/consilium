@@ -5,6 +5,7 @@ use crate::sessions;
 use std::sync::Arc;
 use std::time::Duration;
 
+// PartialEq: forward-declared for orchestrator tests (council/review) that compare statuses.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunStatus {
     Completed,
@@ -15,7 +16,8 @@ pub enum RunStatus {
 #[derive(Debug)]
 pub struct RunOutcome {
     pub session_id: String,
-    /// Completed.result if present, else the last Message text, else empty.
+    /// Result of the FIRST terminal Completed event if it carried one, else
+    /// the last Message text, else empty.
     pub final_text: String,
     /// All events collected during the session. Empty when status is TimedOut
     /// (the future is dropped on timeout — collected events are lost).
@@ -37,11 +39,14 @@ pub async fn run_to_completion(
     let mut handle = sessions::spawn(adapter, req)?;
     let session_id = handle.id.clone();
 
-    // Collect returns (events, terminal_status) to avoid borrow-checker issues
-    // with capturing &mut locals across the async boundary.
+    // Collect returns (events, terminal_status, final_text) to avoid
+    // borrow-checker issues with capturing &mut locals across the async boundary.
     let collect = async move {
         let mut events: Vec<AgentEvent> = Vec::new();
         let mut status: Option<RunStatus> = None;
+        // Outer Option = saw the first terminal Completed; inner = it carried a result.
+        let mut final_text_candidate: Option<Option<String>> = None;
+        let mut last_message: Option<String> = None;
 
         while let Some(ev) = handle.events.recv().await {
             match &ev {
@@ -49,9 +54,16 @@ pub async fn run_to_completion(
                     input_tokens,
                     output_tokens,
                 } => {
-                    quota.record(provider, *input_tokens, *output_tokens)?;
+                    // Accounting is a side-channel: a failed write must not abort collection.
+                    if let Err(e) = quota.record(provider, *input_tokens, *output_tokens) {
+                        tracing::warn!(error = %e, "quota record failed; continuing");
+                    }
                 }
-                AgentEvent::Completed { .. } if status.is_none() => {
+                AgentEvent::Message { text } => {
+                    last_message = Some(text.clone());
+                }
+                AgentEvent::Completed { result } if status.is_none() => {
+                    final_text_candidate = Some(result.clone());
                     status = Some(RunStatus::Completed);
                 }
                 AgentEvent::Failed { error } if status.is_none() => {
@@ -61,12 +73,15 @@ pub async fn run_to_completion(
             }
             events.push(ev);
         }
-        anyhow::Ok((events, status))
+
+        let final_text = final_text_candidate
+            .unwrap_or(None)
+            .or(last_message)
+            .unwrap_or_default();
+        (events, status, final_text)
     };
 
-    let result = tokio::time::timeout(timeout, collect).await;
-
-    let (events, status) = match result {
+    let (events, status, final_text) = match tokio::time::timeout(timeout, collect).await {
         Err(_elapsed) => {
             // Timeout: child is orphaned per M1 policy.
             return Ok(RunOutcome {
@@ -76,26 +91,11 @@ pub async fn run_to_completion(
                 status: RunStatus::TimedOut,
             });
         }
-        Ok(Err(e)) => return Err(e),
-        Ok(Ok(pair)) => pair,
+        Ok(collected) => collected,
     };
 
     let status =
         status.unwrap_or_else(|| RunStatus::Failed("stream ended without terminal event".into()));
-
-    let final_text = events
-        .iter()
-        .find_map(|e| match e {
-            AgentEvent::Completed { result: Some(r) } => Some(r.clone()),
-            _ => None,
-        })
-        .or_else(|| {
-            events.iter().rev().find_map(|e| match e {
-                AgentEvent::Message { text } => Some(text.clone()),
-                _ => None,
-            })
-        })
-        .unwrap_or_default();
 
     Ok(RunOutcome {
         session_id,

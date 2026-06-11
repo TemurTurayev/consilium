@@ -78,6 +78,8 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
                 if tx.send(ev).await.is_err() {
                     // Receiver dropped: child is orphaned (not killed) — tokio reaps it
                     // on SIGCHLD. M2 cancellation must start_kill() + wait() here.
+                    // The detached stderr-drain task also keeps running until the
+                    // orphaned child exits.
                     return;
                 }
             }
@@ -86,6 +88,8 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
             if tx.send(ev).await.is_err() {
                 // Receiver dropped: child is orphaned (not killed) — tokio reaps it
                 // on SIGCHLD. M2 cancellation must start_kill() + wait() here.
+                // The detached stderr-drain task also keeps running until the
+                // orphaned child exits.
                 return;
             }
         }

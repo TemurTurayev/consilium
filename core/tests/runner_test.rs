@@ -54,4 +54,6 @@ async fn timeout_yields_timedout_status() {
         .await
         .unwrap();
     assert!(matches!(outcome.status, RunStatus::TimedOut));
+    assert!(outcome.events.is_empty());
+    assert!(outcome.final_text.is_empty());
 }
