@@ -2,4 +2,4 @@
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","status":"completed"}}
 {"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ok"}}
-{"type":"turn.completed","usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":6}}
+{"type":"turn.completed","usage":{"input_tokens":40,"cached_input_tokens":30,"output_tokens":6,"reasoning_output_tokens":2}}

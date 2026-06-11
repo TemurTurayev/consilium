@@ -32,7 +32,7 @@ impl Adapter for CodexAdapter {
             Some("thread.started") => vec![AgentEvent::SessionStarted {
                 session_id: v["thread_id"].as_str().unwrap_or_default().to_string(),
                 provider: Provider::Codex,
-                // TODO(Task 9): check whether real thread.started carries a model field; populate if present.
+                // Real thread.started (codex-cli 0.139) carries no model field — stays None.
                 model: None,
             }],
             Some("item.completed") => {
@@ -55,12 +55,13 @@ impl Adapter for CodexAdapter {
             Some("turn.completed") => {
                 let mut events = Vec::new();
                 if let Some(u) = v.get("usage") {
-                    // M1 counts all input-side tokens together; M2 quota-$ conversion will split by cache rate.
-                    let input = u["input_tokens"].as_u64().unwrap_or(0)
-                        + u["cached_input_tokens"].as_u64().unwrap_or(0);
+                    // OpenAI semantics: cached_input_tokens is a SUBSET of input_tokens — do
+                    // NOT sum (unlike Claude, where cache tokens are disjoint additions).
+                    // M2 quota-$ conversion will use the cached share for discount math.
                     events.push(AgentEvent::Usage {
-                        input_tokens: input,
-                        output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+                        input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+                        output_tokens: u["output_tokens"].as_u64().unwrap_or(0)
+                            + u["reasoning_output_tokens"].as_u64().unwrap_or(0),
                     });
                 }
                 events.push(AgentEvent::Completed { result: None });
@@ -108,7 +109,7 @@ mod tests {
             e,
             AgentEvent::Usage {
                 input_tokens: 40,
-                output_tokens: 6
+                output_tokens: 8
             }
         )));
         assert!(matches!(
@@ -154,14 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn usage_sums_cached_tokens() {
-        let line = r#"{"type":"turn.completed","usage":{"input_tokens":40,"cached_input_tokens":100,"output_tokens":6}}"#;
+    fn usage_does_not_double_count_cached_subset() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":140,"cached_input_tokens":100,"output_tokens":6,"reasoning_output_tokens":4}}"#;
         let events = CodexAdapter.parse_line(line);
         assert!(matches!(
             &events[0],
             AgentEvent::Usage {
                 input_tokens: 140,
-                output_tokens: 6
+                output_tokens: 10
             }
         ));
     }
@@ -190,6 +191,13 @@ mod tests {
             .iter()
             .any(|e| matches!(e, AgentEvent::Message { .. })));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Usage { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Usage {
+                input_tokens: 10324,
+                output_tokens: 5
+            }
+        )));
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::Completed { .. })));

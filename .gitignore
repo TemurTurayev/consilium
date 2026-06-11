@@ -12,3 +12,6 @@ dist/
 # Local env
 .env
 .env.local
+
+# Consilium local runtime state (usage.db)
+.consilium/

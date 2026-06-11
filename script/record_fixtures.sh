@@ -8,7 +8,9 @@ mkdir -p core/tests/fixtures/{claude,codex,gemini}/recorded
 record() {
   local name="$1" dest="$2"; shift 2
   local tmp; tmp=$(mktemp)
-  if "$@" > "$tmp" 2> >(cat >&2); then
+  # < /dev/null: codex exec hangs reading stdin when stdout is redirected;
+  # harmless for the other CLIs (sessions.rs uses Stdio::null for the same reason).
+  if "$@" < /dev/null > "$tmp" 2> >(cat >&2); then
     mv "$tmp" "$dest"
     echo "$name: recorded"
   else
