@@ -75,6 +75,7 @@ pub async fn run_review(
             prompt,
             model: reviewer_model,
             cwd,
+            advisory: true, // read-only audit — no file mutations
         },
         quota,
         timeout,

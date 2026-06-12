@@ -66,6 +66,7 @@ pub async fn run_council(
                 prompt: answer_prompt.clone(),
                 model: model.clone(),
                 cwd: cwd.clone(),
+                advisory: true, // deliberation only — no file mutations
             };
             run_to_completion(adapter.clone(), req, quota, timeout)
         })
@@ -117,6 +118,7 @@ pub async fn run_council(
                 prompt: review_prompt.clone(),
                 model: model.clone(),
                 cwd: cwd.clone(),
+                advisory: true, // deliberation only — no file mutations
             };
             run_to_completion(adapter.clone(), req, quota, timeout)
         })
@@ -143,6 +145,7 @@ pub async fn run_council(
             prompt: synthesis_prompt,
             model: chairman_model,
             cwd,
+            advisory: true, // deliberation only — no file mutations
         },
         quota,
         timeout,

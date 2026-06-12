@@ -16,10 +16,12 @@ impl Adapter for CodexAdapter {
     fn build_command(&self, req: &RunRequest) -> Command {
         let mut cmd = Command::new(self.cli_binary());
         cmd.arg("exec").arg("--json");
-        // codex refuses to run outside a trusted/git directory; council and
-        // review may legitimately run anywhere (claude/gemini have no such
-        // restriction), so opt out uniformly.
-        cmd.arg("--skip-git-repo-check");
+        // codex refuses to run outside a trusted/git directory. Advisory runs
+        // (council/review — read-only deliberation) may legitimately run
+        // anywhere, so they opt out; execution/write runs keep the safeguard.
+        if req.advisory {
+            cmd.arg("--skip-git-repo-check");
+        }
         if let Some(model) = &req.model {
             cmd.arg("-m").arg(model);
         }
@@ -139,24 +141,40 @@ mod tests {
             .is_empty());
     }
 
-    #[test]
-    fn build_command_uses_exec_json() {
+    fn command_args(advisory: bool) -> Vec<String> {
         let req = RunRequest {
             prompt: "hi".into(),
             model: Some("gpt-5.4".into()),
             cwd: std::env::temp_dir(),
+            advisory,
         };
-        let cmd = CodexAdapter.build_command(&req);
-        let args: Vec<String> = cmd
+        CodexAdapter
+            .build_command(&req)
             .as_std()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn build_command_uses_exec_json() {
+        let args = command_args(false);
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"--json".to_string()));
-        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.4"]));
         assert_eq!(args.last().unwrap(), "hi");
+    }
+
+    #[test]
+    fn advisory_run_skips_git_repo_check() {
+        let args = command_args(true);
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
+    }
+
+    #[test]
+    fn execution_run_keeps_git_repo_safeguard() {
+        let args = command_args(false);
+        assert!(!args.contains(&"--skip-git-repo-check".to_string()));
     }
 
     #[test]

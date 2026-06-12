@@ -162,6 +162,7 @@ mod tests {
             prompt: "hi".into(),
             model: Some("gemini-3-pro".into()),
             cwd: std::env::temp_dir(),
+            advisory: false,
         };
         let cmd = GeminiAdapter.build_command(&req);
         let args: Vec<String> = cmd

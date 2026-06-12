@@ -10,6 +10,12 @@ pub struct RunRequest {
     pub prompt: String,
     pub model: Option<String>,
     pub cwd: PathBuf,
+    /// Advisory (read-only deliberation) run — council/review answering and
+    /// reviewing, never mutating files. Adapters may relax workspace-trust
+    /// safeguards that exist to protect against unwanted mutations (codex:
+    /// `--skip-git-repo-check`). Execution/write runs MUST keep this false so
+    /// provider safeguards stay armed (M2b conduct relies on that default).
+    pub advisory: bool,
 }
 
 /// An adapter knows how to launch one provider's CLI and translate its raw

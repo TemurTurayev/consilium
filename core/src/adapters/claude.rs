@@ -143,6 +143,7 @@ mod tests {
             prompt: "hi".into(),
             model: Some("sonnet".into()),
             cwd: std::env::temp_dir(),
+            advisory: false,
         };
         let cmd = ClaudeAdapter.build_command(&req);
         let args: Vec<String> = cmd

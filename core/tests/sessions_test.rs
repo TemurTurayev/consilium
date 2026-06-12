@@ -30,6 +30,7 @@ fn req() -> RunRequest {
         prompt: "hi".into(),
         model: None,
         cwd: std::env::temp_dir(),
+        advisory: false,
     }
 }
 

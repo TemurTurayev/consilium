@@ -22,6 +22,9 @@ pub fn request_for(role: &RoleConfig, prompt: String, cwd: PathBuf) -> RunReques
         prompt,
         model: Some(role.model.clone()),
         cwd,
+        // Execution-oriented default: provider safeguards stay armed. Advisory
+        // callers (council/review) build their requests directly.
+        advisory: false,
     }
 }
 
