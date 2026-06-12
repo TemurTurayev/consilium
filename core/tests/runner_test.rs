@@ -51,6 +51,7 @@ async fn timeout_yields_timedout_status() {
         provider: Provider::Gemini,
         script: String::new(),
         delay_secs: 30,
+        pre_script: String::new(),
     });
     let outcome = run_to_completion(adapter, req(), &store, Duration::from_millis(200))
         .await

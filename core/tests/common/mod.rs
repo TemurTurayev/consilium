@@ -14,6 +14,11 @@ pub struct ScriptedAdapter {
     pub script: String,
     /// Optional delay (seconds) before emitting — for timeout tests.
     pub delay_secs: u64,
+    /// Shell snippet prepended to the heredoc script (runs first in the child
+    /// process cwd). A fake worker can mutate a temp git repo here before
+    /// reporting success — conduct tests exercise real change capture at zero
+    /// quota cost.
+    pub pre_script: String,
 }
 
 #[allow(dead_code)]
@@ -29,6 +34,7 @@ impl ScriptedAdapter {
             provider,
             script,
             delay_secs: 0,
+            pre_script: String::new(),
         }
     }
 
@@ -41,6 +47,7 @@ impl ScriptedAdapter {
             provider,
             script,
             delay_secs: 0,
+            pre_script: String::new(),
         }
     }
 }
@@ -52,17 +59,59 @@ impl Adapter for ScriptedAdapter {
     fn cli_binary(&self) -> &'static str {
         "sh"
     }
-    fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+    fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
         debug_assert!(
             !self.script.lines().any(|l| l == "CONSILIUM_EOF"),
             "ScriptedAdapter: script contains the literal heredoc delimiter 'CONSILIUM_EOF' as a standalone line; output will be truncated"
         );
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(format!(
-            "sleep {}; cat <<'CONSILIUM_EOF'\n{}\nCONSILIUM_EOF",
-            self.delay_secs, self.script
+            "{}\nsleep {}; cat <<'CONSILIUM_EOF'\n{}\nCONSILIUM_EOF",
+            self.pre_script, self.delay_secs, self.script
         ));
+        cmd.current_dir(&req.cwd);
         cmd
+    }
+    fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
+        ClaudeAdapter.parse_line(line)
+    }
+}
+
+/// Wraps a sequence of [`ScriptedAdapter`] steps, advancing one step per
+/// `build_command` call (clamped to the last step if over-called). Lets one
+/// logical role (e.g. the conductor) return different scripted responses across
+/// sequential invocations — plan → verdict → verdict … — without quota.
+#[allow(dead_code)]
+pub struct SequencedAdapter {
+    pub provider: Provider,
+    pub steps: Vec<ScriptedAdapter>,
+    cursor: std::sync::atomic::AtomicUsize,
+}
+
+#[allow(dead_code)]
+impl SequencedAdapter {
+    pub fn new(provider: Provider, steps: Vec<ScriptedAdapter>) -> Self {
+        Self {
+            provider,
+            steps,
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Adapter for SequencedAdapter {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+    fn cli_binary(&self) -> &'static str {
+        "sh"
+    }
+    fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
+        let i = self
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .min(self.steps.len() - 1); // clamp: repeat last step if over-called
+        self.steps[i].build_command(req)
     }
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         ClaudeAdapter.parse_line(line)

@@ -53,6 +53,7 @@ async fn streams_events_from_process_in_order() {
         provider: Provider::Claude,
         script,
         delay_secs: 0,
+        pre_script: String::new(),
     };
     let handle = sessions::spawn(Arc::new(adapter), req()).unwrap();
     let events = collect(handle).await;
