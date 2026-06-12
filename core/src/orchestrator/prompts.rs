@@ -41,6 +41,68 @@ pub fn council_synthesis(question: &str, answers: &[(&str, &str)], reviews: &[&s
     )
 }
 
+pub fn conduct_decompose(task: &str, context: &str) -> String {
+    format!(
+        "You are the conductor of a team of AI coding agents working in this \
+         repository. Decompose the task below into the SMALLEST number of \
+         self-contained subtasks (1-5). Each subtask prompt must carry ALL \
+         context the worker needs (file paths, conventions, acceptance criteria) \
+         — workers cannot see this conversation, each other, or earlier subtasks. \
+         Design subtasks so they touch DISJOINT files; they run sequentially.\n\n\
+         Task:\n{task}\n\nAdditional context:\n{context}\n\n\
+         Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
+    )
+}
+
+pub fn conduct_evaluation(
+    subtask_prompt: &str,
+    changes: &str,
+    worker_report: &str,
+    supervisor_note: Option<&str>,
+) -> String {
+    let supervisor = supervisor_note
+        .map(|n| format!("\nSupervisor's note (weigh it seriously):\n{n}\n"))
+        .unwrap_or_default();
+    format!(
+        "You are the conductor reviewing a worker's completed subtask. Judge \
+         ONLY whether the changes fulfil the subtask — not style preferences.\n\n\
+         Subtask given to the worker:\n{subtask_prompt}\n\n\
+         Changes made (diff + new files):\n<changes>\n{changes}\n</changes>\n\n\
+         Worker's report:\n{worker_report}\n{supervisor}\n\
+         Output EXACTLY one JSON code block — decision is accept | rework | fail \
+         (rework requires concrete, actionable feedback):\n```json\n{{\"decision\":\"accept\",\"feedback\":\"\"}}\n```"
+    )
+}
+
+pub fn conduct_rework(original_prompt: &str, previous_changes: &str, feedback: &str) -> String {
+    format!(
+        "A previous attempt at this subtask was rejected. Redo it correctly.\n\n\
+         Original subtask:\n{original_prompt}\n\n\
+         Previous attempt's changes:\n<changes>\n{previous_changes}\n</changes>\n\n\
+         Reviewer feedback to address:\n{feedback}\n\n\
+         Apply the fixes on top of the current state of the repository."
+    )
+}
+
+pub fn supervisor_gate(task: &str, progress: &str) -> String {
+    format!(
+        "You are the supervisor of a multi-agent coding run. You read a lot and \
+         intervene rarely — flag only real problems: scope drift, repeated \
+         failures, destructive changes, work that contradicts the task.\n\n\
+         Overall task:\n{task}\n\nProgress so far:\n{progress}\n\n\
+         Output EXACTLY one JSON code block — status is ok | concern | halt:\n```json\n{{\"status\":\"ok\",\"note\":\"\"}}\n```"
+    )
+}
+
+pub fn auto_triage(task: &str) -> String {
+    format!(
+        "Classify this coding task. trivial = single focused change, one file or \
+         a couple of lines, no design decisions. standard = everything else.\n\n\
+         Task:\n{task}\n\n\
+         Output EXACTLY one JSON code block:\n```json\n{{\"complexity\":\"trivial\"}}\n```"
+    )
+}
+
 pub fn diff_review(diff: &str) -> String {
     format!(
         "Review this diff for real problems: bugs, security issues, broken edge \
