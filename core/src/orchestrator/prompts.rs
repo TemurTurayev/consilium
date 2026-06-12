@@ -103,6 +103,17 @@ pub fn auto_triage(task: &str) -> String {
     )
 }
 
+pub fn arbiter_decide(subtask: &str, changes: &str, findings: &str) -> String {
+    format!(
+        "You are the arbiter. A worker's subtask passed the conductor but the \
+         reviewer keeps flagging critical findings after the rework limit. \
+         Decide: ship (findings are tolerable or wrong) or fail (findings are \
+         real blockers).\n\nSubtask:\n{subtask}\n\nFinal changes:\n<changes>\n{changes}\n</changes>\n\n\
+         Reviewer findings:\n{findings}\n\n\
+         Output EXACTLY one JSON code block — decision is ship | fail:\n```json\n{{\"decision\":\"ship\",\"reason\":\"\"}}\n```"
+    )
+}
+
 pub fn diff_review(diff: &str) -> String {
     format!(
         "Review this diff for real problems: bugs, security issues, broken edge \

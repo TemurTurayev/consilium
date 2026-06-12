@@ -1,11 +1,12 @@
 mod common;
 
-use common::{ScriptedAdapter, SequencedAdapter};
+#[allow(unused_imports)]
+use common::{RecordingAdapter, ScriptedAdapter, SequencedAdapter};
 use consilium::event::Provider;
 use consilium::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
 use consilium::quota::QuotaStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -67,6 +68,30 @@ fn supervisor_halt_json(note: &str) -> String {
     format!(r#"{{"status":"halt","note":"{note}"}}"#)
 }
 
+fn supervisor_concern_json(note: &str) -> String {
+    format!(r#"{{"status":"concern","note":"{note}"}}"#)
+}
+
+/// Reviewer verdict with one critical finding.
+fn review_critical_json(file: &str, description: &str) -> String {
+    format!(
+        r#"{{"findings":[{{"severity":"critical","file":"{file}","description":"{description}"}}]}}"#
+    )
+}
+
+/// Reviewer verdict with no findings (clean).
+fn review_clean_json() -> String {
+    r#"{"findings":[]}"#.to_string()
+}
+
+fn arbiter_ship_json(reason: &str) -> String {
+    format!(r#"{{"decision":"ship","reason":"{reason}"}}"#)
+}
+
+fn arbiter_fail_json(reason: &str) -> String {
+    format!(r#"{{"decision":"fail","reason":"{reason}"}}"#)
+}
+
 fn store() -> QuotaStore {
     QuotaStore::open_in_memory().unwrap()
 }
@@ -109,6 +134,8 @@ async fn happy_path_single_subtask() {
             model: None,
         }],
         supervisor: None,
+        reviewer: None,
+        arbiter: None,
     };
 
     let outcome: ConductOutcome = run_conduct(
@@ -186,6 +213,8 @@ async fn rework_then_accept() {
             model: None,
         }],
         supervisor: None,
+        reviewer: None,
+        arbiter: None,
     };
 
     let outcome = run_conduct(
@@ -244,6 +273,8 @@ async fn rework_exhaustion_fails() {
             model: None,
         }],
         supervisor: None,
+        reviewer: None,
+        arbiter: None,
     };
 
     let outcome = run_conduct(
@@ -308,6 +339,8 @@ async fn supervisor_halt_aborts() {
             adapter: supervisor,
             model: None,
         }),
+        reviewer: None,
+        arbiter: None,
     };
 
     let outcome = run_conduct(
@@ -386,6 +419,8 @@ async fn worker_failure_counts_as_attempt() {
             model: None,
         }],
         supervisor: None,
+        reviewer: None,
+        arbiter: None,
     };
 
     let outcome = run_conduct(
@@ -447,6 +482,8 @@ async fn capture_failure_propagates_as_error() {
             model: None,
         }],
         supervisor: None,
+        reviewer: None,
+        arbiter: None,
     };
 
     let result = run_conduct(
@@ -514,6 +551,8 @@ async fn two_subtasks_complete_in_order() {
             model: None,
         }],
         supervisor: None,
+        reviewer: None,
+        arbiter: None,
     };
 
     let outcome = run_conduct(
@@ -587,6 +626,8 @@ async fn fail_on_second_preserves_first() {
             model: None,
         }],
         supervisor: None,
+        reviewer: None,
+        arbiter: None,
     };
 
     let outcome = run_conduct(
@@ -615,4 +656,463 @@ async fn fail_on_second_preserves_first() {
     // Fail stops the subtask immediately — exactly one attempt on subtask 2.
     assert_eq!(entries[1]["attempts"].as_array().unwrap().len(), 1);
     assert_eq!(entries[1]["attempts"][0]["decision"], "fail");
+}
+
+// ─── Test 9: critical_review_forces_rework ────────────────────────────────
+// Reviewer returns critical findings on attempt 1, clean on attempt 2.
+// Expected: completed == [1] after 2 attempts (conductor always accepts).
+
+#[tokio::test]
+async fn critical_review_forces_rework() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor: plan → accept → accept (always willing to accept)
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    // Worker: writes a file both times
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'v1' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'v2' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v2")
+            },
+        ],
+    ));
+
+    // Reviewer: first call → critical, second call → clean
+    let reviewer = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &review_critical_json("work.txt", "sql injection"),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &review_clean_json()),
+        ],
+    ));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: None,
+        reviewer: Some(RoleHandle {
+            adapter: reviewer,
+            model: None,
+        }),
+        arbiter: None,
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.completed,
+        vec![1],
+        "should complete after 2 attempts"
+    );
+    assert!(outcome.failed.is_none());
+
+    // 2 attempts total (first was reworked due to review)
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let attempts = entries[0]["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "review gate should have forced a rework");
+    // First attempt: conductor accepted but review blocked → "accept" decision recorded but review="critical"
+    assert_eq!(attempts[0]["decision"], "accept");
+    assert_eq!(attempts[0]["review"], "critical");
+    // Second attempt: review clean → accepted
+    assert_eq!(attempts[1]["decision"], "accept");
+    assert_eq!(attempts[1]["review"], "clean");
+}
+
+// ─── Test 10: arbiter_ships_on_exhaustion ────────────────────────────────
+// Reviewer always returns critical (MAX_REWORKS exhausted at review gate).
+// Arbiter ships → subtask completed; transcript records arbiter decision+reason.
+
+#[tokio::test]
+async fn arbiter_ships_on_exhaustion() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor: plan → accept × 3 (always willing to accept — review keeps blocking)
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'result' > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "done")
+    });
+
+    // Reviewer: always critical (blocks all MAX_REWORKS+1 attempts)
+    let reviewer = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &review_critical_json("out.txt", "persistent issue"),
+    ));
+
+    // Arbiter: ships
+    let arbiter = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &arbiter_ship_json("findings are noise, ship it"),
+    ));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: None,
+        reviewer: Some(RoleHandle {
+            adapter: reviewer,
+            model: None,
+        }),
+        arbiter: Some(RoleHandle {
+            adapter: arbiter,
+            model: None,
+        }),
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.completed,
+        vec![1],
+        "arbiter ship should mark subtask as completed"
+    );
+    assert!(outcome.failed.is_none());
+
+    // Transcript records arbiter decision+reason
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let arb = &entries[0]["arbiter"];
+    assert_eq!(arb["decision"], "ship");
+    assert!(
+        arb["reason"].as_str().unwrap_or("").contains("noise"),
+        "arbiter reason should be in transcript"
+    );
+}
+
+// ─── Test 11: arbiter_fails_on_exhaustion ────────────────────────────────
+// Reviewer always critical, arbiter returns fail → run stops (failed).
+
+#[tokio::test]
+async fn arbiter_fails_on_exhaustion() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "done"));
+
+    let reviewer = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &review_critical_json("x.rs", "real blocker"),
+    ));
+
+    // Arbiter: fails
+    let arbiter = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &arbiter_fail_json("findings are real, do not ship"),
+    ));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: None,
+        reviewer: Some(RoleHandle {
+            adapter: reviewer,
+            model: None,
+        }),
+        arbiter: Some(RoleHandle {
+            adapter: arbiter,
+            model: None,
+        }),
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.failed.is_some(), "arbiter fail should set failed");
+    assert!(outcome.completed.is_empty());
+
+    // Arbiter decision should be in transcript
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let arb = &entries[0]["arbiter"];
+    assert_eq!(arb["decision"], "fail");
+}
+
+// ─── Test 12: supervisor_ok_does_not_interfere ───────────────────────────
+// Supervisor returns ok → happy path completes normally; transcript has "ok".
+
+#[tokio::test]
+async fn supervisor_ok_does_not_interfere() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "create file", "create ok.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'hello' > ok.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "created ok.txt")
+    });
+
+    let supervisor = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &supervisor_ok_json(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: Some(RoleHandle {
+            adapter: supervisor,
+            model: None,
+        }),
+        reviewer: None,
+        arbiter: None,
+    };
+
+    let outcome = run_conduct(
+        "create a file",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    assert!(outcome.halted.is_none());
+    assert!(outcome.failed.is_none());
+    assert!(repo.path().join("ok.txt").exists());
+
+    // Supervisor entry should show status "ok"
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    let sup_entries = entries[0]["supervisor"].as_array().unwrap();
+    assert!(!sup_entries.is_empty());
+    assert_eq!(sup_entries[0]["status"], "ok");
+}
+
+// ─── Test 13: supervisor_concern_threads_note_into_evaluation ─────────────
+// Supervisor returns a concern with a specific note. The conductor's evaluation
+// prompt must contain that note text (verified via RecordingAdapter).
+//
+// RecordingAdapter wraps ScriptedAdapter directly, so we build a minimal
+// `RecordingSequenced` helper (local struct) that sequences two RecordingAdapters
+// of Arc<dyn Adapter> and records each build_command call into a shared log.
+
+#[tokio::test]
+async fn supervisor_concern_threads_note_into_evaluation() {
+    use consilium::adapters::claude::ClaudeAdapter;
+
+    // Sequences a Vec<Arc<dyn Adapter>> with clamping, recording each call prompt
+    // into a shared log — lets us assert what prompt reached the conductor.
+    struct RecordingSequenced {
+        provider: Provider,
+        steps: Vec<Arc<dyn consilium::adapters::Adapter>>,
+        cursor: std::sync::atomic::AtomicUsize,
+        log: Arc<Mutex<Vec<(String, bool, bool)>>>,
+    }
+    impl consilium::adapters::Adapter for RecordingSequenced {
+        fn provider(&self) -> consilium::event::Provider {
+            self.provider
+        }
+        fn cli_binary(&self) -> &'static str {
+            "sh"
+        }
+        fn build_command(&self, req: &consilium::adapters::RunRequest) -> tokio::process::Command {
+            {
+                let mut guard = self.log.lock().unwrap();
+                guard.push((req.prompt.clone(), req.advisory, req.write));
+            }
+            let i = self
+                .cursor
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .min(self.steps.len().saturating_sub(1));
+            self.steps[i].build_command(req)
+        }
+        fn parse_line(&self, line: &str) -> Vec<consilium::event::AgentEvent> {
+            ClaudeAdapter.parse_line(line)
+        }
+    }
+
+    let repo = temp_repo();
+    let quota = store();
+
+    let concern_note = "scope is drifting into unrelated modules";
+    let shared_log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Conductor: step 0 = plan, step 1 = accept.
+    // Both steps are plain ScriptedAdapters; the RecordingSequenced records
+    // the prompt before delegating, giving us a post-run log.
+    let plan_adapter = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &plan_json(&[(1, "create file", "create concern.txt")]),
+    ));
+    let accept_adapter = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &accept_json(),
+    ));
+
+    let conductor = Arc::new(RecordingSequenced {
+        provider: Provider::Claude,
+        steps: vec![plan_adapter, accept_adapter],
+        cursor: std::sync::atomic::AtomicUsize::new(0),
+        log: shared_log.clone(),
+    });
+
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'content' > concern.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "created concern.txt")
+    });
+
+    let supervisor = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &supervisor_concern_json(concern_note),
+    ));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: Some(RoleHandle {
+            adapter: supervisor,
+            model: None,
+        }),
+        reviewer: None,
+        arbiter: None,
+    };
+
+    let outcome = run_conduct(
+        "create a file",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    assert!(outcome.halted.is_none());
+
+    // calls[0] = decompose prompt (advisory=true, write=false)
+    // calls[1] = evaluation prompt (advisory=true, write=false) — must contain the note
+    let calls = shared_log.lock().unwrap();
+    assert!(
+        calls.len() >= 2,
+        "conductor should have been called at least twice; got {} calls",
+        calls.len()
+    );
+    let eval_prompt = &calls[1].0;
+    assert!(
+        eval_prompt.contains(concern_note),
+        "evaluation prompt must contain the supervisor note; got:\n{eval_prompt}"
+    );
 }

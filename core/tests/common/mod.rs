@@ -4,6 +4,7 @@
 
 use consilium::adapters::{claude::ClaudeAdapter, Adapter, RunRequest};
 use consilium::event::{AgentEvent, Provider};
+use std::sync::{Arc, Mutex};
 
 // Each integration-test binary compiles its own copy of this module and uses a
 // different subset of helpers — suppress per-binary dead_code noise.
@@ -116,6 +117,50 @@ impl Adapter for SequencedAdapter {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .min(self.steps.len().saturating_sub(1)); // clamp: repeat last step if over-called
         self.steps[i].build_command(req)
+    }
+    fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
+        ClaudeAdapter.parse_line(line)
+    }
+}
+
+/// Wraps an inner [`ScriptedAdapter`] and records each `build_command` call's
+/// prompt, advisory flag, and write flag into a shared log. Lets integration
+/// tests assert what prompts were fed to a role (e.g. that a supervisor note
+/// reached the conductor's evaluation prompt).
+///
+/// `parse_line` delegates to `ClaudeAdapter` as usual.
+#[allow(dead_code)]
+pub struct RecordingAdapter {
+    pub provider: Provider,
+    inner: ScriptedAdapter,
+    /// Appended entries: (prompt, advisory, write) per build_command call.
+    pub log: Arc<Mutex<Vec<(String, bool, bool)>>>,
+}
+
+#[allow(dead_code)]
+impl RecordingAdapter {
+    pub fn new(inner: ScriptedAdapter, log: Arc<Mutex<Vec<(String, bool, bool)>>>) -> Self {
+        Self {
+            provider: inner.provider,
+            inner,
+            log,
+        }
+    }
+}
+
+impl Adapter for RecordingAdapter {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+    fn cli_binary(&self) -> &'static str {
+        "sh"
+    }
+    fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
+        {
+            let mut guard = self.log.lock().unwrap();
+            guard.push((req.prompt.clone(), req.advisory, req.write));
+        }
+        self.inner.build_command(req)
     }
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         ClaudeAdapter.parse_line(line)

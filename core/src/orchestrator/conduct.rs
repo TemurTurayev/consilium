@@ -113,6 +113,44 @@ pub fn parse_triage(text: &str) -> Option<Triage> {
     super::json_extract::extract_json_object::<Triage>(text)
 }
 
+// ─── Arbiter verdict ─────────────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq)]
+pub enum ArbiterDecision {
+    Ship,
+    Fail,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArbiterVerdict {
+    #[serde(
+        deserialize_with = "lenient_arbiter_decision",
+        default = "default_arbiter_decision"
+    )]
+    pub decision: ArbiterDecision,
+    #[serde(default)]
+    pub reason: String,
+}
+
+fn default_arbiter_decision() -> ArbiterDecision {
+    ArbiterDecision::Fail
+}
+
+// Fail-safe: anything not explicitly "ship" → Fail (never silent ship).
+fn lenient_arbiter_decision<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<ArbiterDecision, D::Error> {
+    let s = Option::<String>::deserialize(d)?.unwrap_or_default();
+    Ok(match s.trim().to_ascii_lowercase().as_str() {
+        "ship" => ArbiterDecision::Ship,
+        _ => ArbiterDecision::Fail,
+    })
+}
+
+pub fn parse_arbiter(text: &str) -> Option<ArbiterVerdict> {
+    super::json_extract::extract_json_object::<ArbiterVerdict>(text)
+}
+
 // ─── Orchestration contracts ─────────────────────────────────────────────────
 
 pub struct RoleHandle {
@@ -126,6 +164,8 @@ pub struct ConductDeps {
     /// the council module — no new type needed.
     pub workers: Vec<CouncilMember>,
     pub supervisor: Option<RoleHandle>,
+    pub reviewer: Option<RoleHandle>,
+    pub arbiter: Option<RoleHandle>,
 }
 
 pub struct ConductOutcome {
@@ -166,6 +206,8 @@ pub async fn run_conduct(
     let conductor_adapter = deps.conductor.adapter.clone();
     let conductor_model = deps.conductor.model.clone();
     let supervisor = deps.supervisor;
+    let reviewer = deps.reviewer;
+    let arbiter = deps.arbiter;
     let workers = deps.workers;
 
     // ── Step 1: decompose ────────────────────────────────────────────────────
@@ -207,7 +249,6 @@ pub async fn run_conduct(
         let original_prompt = subtask.prompt.clone();
         let mut current_prompt = original_prompt.clone();
         let mut previous_changes = String::new();
-
         for attempt_num in 0..=(MAX_REWORKS as usize) {
             // ── 2a: route ────────────────────────────────────────────────────
             let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
@@ -359,6 +400,140 @@ pub async fn run_conduct(
 
             match evaluation.decision {
                 EvalDecision::Accept => {
+                    // ── 2f: review gate (if configured, advisory) ───────────
+                    if let Some(ref rev) = reviewer {
+                        let review_result = super::review::run_review(
+                            &changes,
+                            rev.adapter.clone(),
+                            rev.model.clone(),
+                            quota,
+                            cwd.clone(),
+                            timeout,
+                        )
+                        .await?;
+
+                        // Determine whether review blocks: critical findings OR
+                        // unparseable verdict (fail-closed, consistent with CLI gate).
+                        let review_blocks = match &review_result.verdict {
+                            Some(v) => v.has_critical(),
+                            None => true, // unparseable → fail-closed
+                        };
+
+                        // Summarise findings for feedback / arbiter.
+                        let findings_text = match &review_result.verdict {
+                            Some(v) => serde_json::to_string(&serde_json::json!({
+                                "findings": v.findings.iter().map(|f| serde_json::json!({
+                                    "severity": format!("{:?}", f.severity).to_lowercase(),
+                                    "file": f.file,
+                                    "description": f.description,
+                                })).collect::<Vec<_>>()
+                            }))
+                            .unwrap_or_else(|_| review_result.raw_review.clone()),
+                            None => "reviewer output unparseable".to_string(),
+                        };
+
+                        // Record review outcome in the attempt entry (already pushed above).
+                        let review_status = if review_result.verdict.is_none() {
+                            "unparseable"
+                        } else if review_blocks {
+                            "critical"
+                        } else {
+                            "clean"
+                        };
+                        // Patch the last attempt entry with the review outcome.
+                        if let Some(last) = attempts.last_mut() {
+                            if let Some(obj) = last.as_object_mut() {
+                                obj.insert(
+                                    "review".to_string(),
+                                    serde_json::Value::String(review_status.to_string()),
+                                );
+                            }
+                        }
+
+                        if review_blocks {
+                            if attempt_num >= MAX_REWORKS as usize {
+                                // Exhausted with review still blocking → try arbiter.
+                                if let Some(ref arb) = arbiter {
+                                    let arb_req = RunRequest {
+                                        prompt: prompts::arbiter_decide(
+                                            &subtask.prompt,
+                                            &changes,
+                                            &findings_text,
+                                        ),
+                                        model: arb.model.clone(),
+                                        cwd: cwd.clone(),
+                                        advisory: true,
+                                        write: false,
+                                    };
+                                    let arb_out = run_to_completion(
+                                        arb.adapter.clone(),
+                                        arb_req,
+                                        quota,
+                                        timeout,
+                                    )
+                                    .await?;
+                                    // Fail-safe: unparseable → Fail.
+                                    let arb_verdict = parse_arbiter(&arb_out.final_text).unwrap_or(
+                                        ArbiterVerdict {
+                                            decision: ArbiterDecision::Fail,
+                                            reason: "arbiter output unparseable".to_string(),
+                                        },
+                                    );
+
+                                    if arb_verdict.decision == ArbiterDecision::Ship {
+                                        completed.push(subtask.id);
+                                        subtask_entries.push(serde_json::json!({
+                                            "id": subtask.id,
+                                            "title": subtask.title,
+                                            "attempts": attempts,
+                                            "supervisor": supervisor_entries,
+                                            "arbiter": {
+                                                "decision": "ship",
+                                                "reason": arb_verdict.reason,
+                                            },
+                                        }));
+                                        continue 'subtask;
+                                    } else {
+                                        failed = Some(format!(
+                                            "subtask {} arbiter failed: {}",
+                                            subtask.id, arb_verdict.reason
+                                        ));
+                                        subtask_entries.push(serde_json::json!({
+                                            "id": subtask.id,
+                                            "title": subtask.title,
+                                            "attempts": attempts,
+                                            "supervisor": supervisor_entries,
+                                            "arbiter": {
+                                                "decision": "fail",
+                                                "reason": arb_verdict.reason,
+                                            },
+                                        }));
+                                        break 'subtask;
+                                    }
+                                }
+
+                                // No arbiter — just fail.
+                                failed = Some(format!(
+                                    "subtask {} exhausted {} rework attempts (review gate): {}",
+                                    subtask.id, MAX_REWORKS, findings_text
+                                ));
+                                subtask_entries.push(serde_json::json!({
+                                    "id": subtask.id,
+                                    "title": subtask.title,
+                                    "attempts": attempts,
+                                    "supervisor": supervisor_entries,
+                                }));
+                                break 'subtask;
+                            }
+
+                            // Not yet exhausted — rework with review findings.
+                            current_prompt =
+                                prompts::conduct_rework(&original_prompt, &changes, &findings_text);
+                            continue;
+                        }
+                    }
+
+                    // Review clean (or no reviewer) → accept.
                     completed.push(subtask.id);
                     subtask_entries.push(serde_json::json!({
                         "id": subtask.id,
@@ -532,5 +707,35 @@ mod tests {
     fn triage_template_example_parses() {
         let p = crate::orchestrator::prompts::auto_triage("task");
         assert!(parse_triage(&p).is_some());
+    }
+
+    // ── Arbiter verdict unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn arbiter_parses_ship() {
+        let v = parse_arbiter(r#"{"decision":"ship","reason":"findings are noise"}"#).unwrap();
+        assert_eq!(v.decision, ArbiterDecision::Ship);
+        assert_eq!(v.reason, "findings are noise");
+    }
+
+    #[test]
+    fn arbiter_parses_fail() {
+        let v = parse_arbiter(r#"{"decision":"fail","reason":"real blocker"}"#).unwrap();
+        assert_eq!(v.decision, ArbiterDecision::Fail);
+    }
+
+    #[test]
+    fn arbiter_unknown_maps_to_fail() {
+        // Fail-safe: unrecognized decision must never silently ship.
+        let v = parse_arbiter(r#"{"decision":"maybe","reason":"unsure"}"#).unwrap();
+        assert_eq!(v.decision, ArbiterDecision::Fail);
+    }
+
+    #[test]
+    fn arbiter_template_example_parses() {
+        let p = crate::orchestrator::prompts::arbiter_decide("subtask", "changes", "findings");
+        let v = parse_arbiter(&p).expect("arbiter template example must parse");
+        // Template example decision is "ship".
+        assert_eq!(v.decision, ArbiterDecision::Ship);
     }
 }
