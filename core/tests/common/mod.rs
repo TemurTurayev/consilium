@@ -107,10 +107,14 @@ impl Adapter for SequencedAdapter {
         "sh"
     }
     fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
+        debug_assert!(
+            !self.steps.is_empty(),
+            "SequencedAdapter: steps must be non-empty"
+        );
         let i = self
             .cursor
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            .min(self.steps.len() - 1); // clamp: repeat last step if over-called
+            .min(self.steps.len().saturating_sub(1)); // clamp: repeat last step if over-called
         self.steps[i].build_command(req)
     }
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {

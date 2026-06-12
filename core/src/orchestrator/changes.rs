@@ -13,11 +13,21 @@ pub fn capture_changes(cwd: &Path) -> Result<String> {
     const PER_FILE_CAP: usize = 8 * 1024;
     const TOTAL_BUDGET: usize = 40 * 1024;
 
-    // Tracked changes via diff.
+    // Tracked changes via diff. A failed git invocation (e.g. cwd is not a
+    // repository) must surface as an error — a silent "(no changes)" would let
+    // the conductor accept a worker that did nothing.
     let diff_out = std::process::Command::new("git")
         .args(["diff", "HEAD"])
         .current_dir(cwd)
         .output()?;
+    if !diff_out.status.success() {
+        anyhow::bail!(
+            "git diff HEAD failed in {} (exit {}): {}",
+            cwd.display(),
+            diff_out.status,
+            String::from_utf8_lossy(&diff_out.stderr).trim()
+        );
+    }
     let diff = String::from_utf8_lossy(&diff_out.stdout).into_owned();
 
     // Untracked files.
@@ -25,6 +35,14 @@ pub fn capture_changes(cwd: &Path) -> Result<String> {
         .args(["ls-files", "--others", "--exclude-standard"])
         .current_dir(cwd)
         .output()?;
+    if !untracked_out.status.success() {
+        anyhow::bail!(
+            "git ls-files failed in {} (exit {}): {}",
+            cwd.display(),
+            untracked_out.status,
+            String::from_utf8_lossy(&untracked_out.stderr).trim()
+        );
+    }
     let untracked_list = String::from_utf8_lossy(&untracked_out.stdout).into_owned();
 
     if diff.trim().is_empty() && untracked_list.trim().is_empty() {
@@ -127,6 +145,13 @@ mod tests {
         let repo = temp_repo();
         let c = capture_changes(repo.path()).unwrap();
         assert!(c.contains("(no changes)"));
+    }
+
+    #[test]
+    fn non_git_directory_is_an_error_not_no_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = capture_changes(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("git diff HEAD failed"));
     }
 
     #[test]
