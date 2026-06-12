@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
             let mut handle = consilium::sessions::spawn(adapter, req)?;
             println!("session: {}", handle.id);
+            let mut failed = false;
             while let Some(ev) = handle.events.recv().await {
                 match &ev {
                     AgentEvent::Usage {
@@ -128,9 +129,15 @@ async fn main() -> anyhow::Result<()> {
                     AgentEvent::Message { text } => println!("[message] {text}"),
                     AgentEvent::ToolCall { name, .. } => println!("[tool] {name}"),
                     AgentEvent::Completed { .. } => println!("[completed]"),
-                    AgentEvent::Failed { error } => println!("[failed] {error}"),
+                    AgentEvent::Failed { error } => {
+                        failed = true;
+                        println!("[failed] {error}")
+                    }
                     other => println!("[event] {other:?}"),
                 }
+            }
+            if failed {
+                std::process::exit(1);
             }
         }
         Command::Quota => {
