@@ -31,6 +31,7 @@ fn req() -> RunRequest {
         model: None,
         cwd: std::env::temp_dir(),
         advisory: false,
+        write: false,
     }
 }
 

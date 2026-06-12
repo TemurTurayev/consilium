@@ -16,6 +16,12 @@ pub struct RunRequest {
     /// `--skip-git-repo-check`). Execution/write runs MUST keep this false so
     /// provider safeguards stay armed (M2b conduct relies on that default).
     pub advisory: bool,
+    /// Write-enabled execution run (conduct workers): the adapter passes its
+    /// CLI's scoped auto-approve-edits flag (verified 2026-06-12):
+    /// claude `--permission-mode acceptEdits`, codex `--sandbox workspace-write`,
+    /// gemini `--approval-mode auto_edit`. Deliberation runs keep this false —
+    /// council/review must never mutate files.
+    pub write: bool,
 }
 
 /// An adapter knows how to launch one provider's CLI and translate its raw

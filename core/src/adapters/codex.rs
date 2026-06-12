@@ -22,6 +22,9 @@ impl Adapter for CodexAdapter {
         if req.advisory {
             cmd.arg("--skip-git-repo-check");
         }
+        if req.write {
+            cmd.arg("--sandbox").arg("workspace-write");
+        }
         if let Some(model) = &req.model {
             cmd.arg("-m").arg(model);
         }
@@ -141,12 +144,13 @@ mod tests {
             .is_empty());
     }
 
-    fn command_args(advisory: bool) -> Vec<String> {
+    fn command_args(advisory: bool, write: bool) -> Vec<String> {
         let req = RunRequest {
             prompt: "hi".into(),
             model: Some("gpt-5.4".into()),
             cwd: std::env::temp_dir(),
             advisory,
+            write,
         };
         CodexAdapter
             .build_command(&req)
@@ -158,7 +162,7 @@ mod tests {
 
     #[test]
     fn build_command_uses_exec_json() {
-        let args = command_args(false);
+        let args = command_args(false, false);
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"--json".to_string()));
         assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.4"]));
@@ -167,14 +171,28 @@ mod tests {
 
     #[test]
     fn advisory_run_skips_git_repo_check() {
-        let args = command_args(true);
+        let args = command_args(true, false);
         assert!(args.contains(&"--skip-git-repo-check".to_string()));
     }
 
     #[test]
     fn execution_run_keeps_git_repo_safeguard() {
-        let args = command_args(false);
+        let args = command_args(false, false);
         assert!(!args.contains(&"--skip-git-repo-check".to_string()));
+    }
+
+    #[test]
+    fn write_run_enables_scoped_edits() {
+        let args = command_args(false, true);
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--sandbox", "workspace-write"]));
+    }
+
+    #[test]
+    fn deliberation_run_has_no_write_flags() {
+        let args = command_args(false, false);
+        assert!(!args.contains(&"--sandbox".to_string()));
     }
 
     #[test]

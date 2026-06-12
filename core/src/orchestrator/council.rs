@@ -67,6 +67,7 @@ pub async fn run_council(
                 model: model.clone(),
                 cwd: cwd.clone(),
                 advisory: true, // deliberation only — no file mutations
+                write: false,
             };
             run_to_completion(adapter.clone(), req, quota, timeout)
         })
@@ -119,6 +120,7 @@ pub async fn run_council(
                 model: model.clone(),
                 cwd: cwd.clone(),
                 advisory: true, // deliberation only — no file mutations
+                write: false,
             };
             run_to_completion(adapter.clone(), req, quota, timeout)
         })
@@ -146,6 +148,7 @@ pub async fn run_council(
             model: chairman_model,
             cwd,
             advisory: true, // deliberation only — no file mutations
+            write: false,
         },
         quota,
         timeout,

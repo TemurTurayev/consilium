@@ -24,6 +24,9 @@ impl Adapter for ClaudeAdapter {
         if let Some(model) = &req.model {
             cmd.arg("--model").arg(model);
         }
+        if req.write {
+            cmd.arg("--permission-mode").arg("acceptEdits");
+        }
         cmd.current_dir(&req.cwd);
         cmd
     }
@@ -137,25 +140,44 @@ mod tests {
             .is_empty());
     }
 
-    #[test]
-    fn build_command_uses_stream_json_and_model() {
+    fn command_args(advisory: bool, write: bool) -> Vec<String> {
         let req = RunRequest {
             prompt: "hi".into(),
             model: Some("sonnet".into()),
             cwd: std::env::temp_dir(),
-            advisory: false,
+            advisory,
+            write,
         };
-        let cmd = ClaudeAdapter.build_command(&req);
-        let args: Vec<String> = cmd
+        ClaudeAdapter
+            .build_command(&req)
             .as_std()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn build_command_uses_stream_json_and_model() {
+        let args = command_args(false, false);
         assert!(args
             .windows(2)
             .any(|w| w == ["--output-format", "stream-json"]));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"sonnet".to_string()));
+    }
+
+    #[test]
+    fn write_run_enables_scoped_edits() {
+        let args = command_args(false, true);
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "acceptEdits"]));
+    }
+
+    #[test]
+    fn deliberation_run_has_no_write_flags() {
+        let args = command_args(false, false);
+        assert!(!args.contains(&"--permission-mode".to_string()));
     }
 
     #[test]

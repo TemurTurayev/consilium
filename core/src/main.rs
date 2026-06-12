@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
                 cwd: std::env::current_dir()?,
                 // Direct `run` may execute tools in cwd — keep provider safeguards armed.
                 advisory: false,
+                write: false,
             };
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
 

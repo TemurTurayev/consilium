@@ -51,6 +51,9 @@ impl Adapter for GeminiAdapter {
         if let Some(model) = &req.model {
             cmd.arg("-m").arg(model);
         }
+        if req.write {
+            cmd.arg("--approval-mode").arg("auto_edit");
+        }
         cmd.current_dir(&req.cwd);
         cmd
     }
@@ -156,23 +159,42 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn build_command_uses_json_output() {
+    fn command_args(advisory: bool, write: bool) -> Vec<String> {
         let req = RunRequest {
             prompt: "hi".into(),
             model: Some("gemini-3-pro".into()),
             cwd: std::env::temp_dir(),
-            advisory: false,
+            advisory,
+            write,
         };
-        let cmd = GeminiAdapter.build_command(&req);
-        let args: Vec<String> = cmd
+        GeminiAdapter
+            .build_command(&req)
             .as_std()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn build_command_uses_json_output() {
+        let args = command_args(false, false);
         assert!(args.contains(&"-p".to_string()));
         assert!(args.windows(2).any(|w| w == ["--output-format", "json"]));
         assert!(args.windows(2).any(|w| w == ["-m", "gemini-3-pro"]));
+    }
+
+    #[test]
+    fn write_run_enables_scoped_edits() {
+        let args = command_args(false, true);
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--approval-mode", "auto_edit"]));
+    }
+
+    #[test]
+    fn deliberation_run_has_no_write_flags() {
+        let args = command_args(false, false);
+        assert!(!args.contains(&"--approval-mode".to_string()));
     }
 
     /// Runs against the real recorded fixture (exists since Task 4).
