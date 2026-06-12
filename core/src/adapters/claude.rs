@@ -24,6 +24,9 @@ impl Adapter for ClaudeAdapter {
         if let Some(model) = &req.model {
             cmd.arg("--model").arg(model);
         }
+        // `advisory` has no per-flag effect for this CLI (no codex-style
+        // trusted-dir refusal to opt out of); the field is read by sessions::spawn's
+        // invariant check only.
         if req.write {
             cmd.arg("--permission-mode").arg("acceptEdits");
         }

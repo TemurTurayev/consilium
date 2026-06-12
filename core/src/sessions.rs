@@ -50,6 +50,14 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) -> String {
 /// Spawns the adapter's CLI process and streams normalized events.
 /// The channel closes when the process exits and all events are delivered.
 pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<SessionHandle> {
+    // INVARIANT: advisory and write must never both be true — advisory relaxes
+    // workspace-trust safeguards (codex: --skip-git-repo-check) while write
+    // auto-approves edits; combined they yield the most permissive and least
+    // protected run possible. Deliberation never writes.
+    debug_assert!(
+        !(req.advisory && req.write),
+        "advisory + write is a contradictory RunRequest: deliberation runs never mutate files"
+    );
     // Bounded channel: sender stalls when consumer is 256 events behind
     // (cooperative backpressure — the child's stdout pipe fills next).
     let (tx, rx) = mpsc::channel::<AgentEvent>(256);

@@ -51,6 +51,9 @@ impl Adapter for GeminiAdapter {
         if let Some(model) = &req.model {
             cmd.arg("-m").arg(model);
         }
+        // `advisory` has no per-flag effect for this CLI (no codex-style
+        // trusted-dir refusal to opt out of); the field is read by sessions::spawn's
+        // invariant check only.
         if req.write {
             cmd.arg("--approval-mode").arg("auto_edit");
         }

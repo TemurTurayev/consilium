@@ -146,3 +146,19 @@ async fn missing_binary_returns_spawn_error() {
     let err = sessions::spawn(Arc::new(MissingBinaryAdapter), req()).unwrap_err();
     assert!(err.to_string().contains("definitely-not-a-real-binary-xyz"));
 }
+
+/// The advisory+write combination is contradictory (deliberation never writes)
+/// and must be rejected by the spawn invariant in debug builds.
+#[tokio::test]
+#[should_panic(expected = "contradictory RunRequest")]
+async fn advisory_plus_write_combination_panics_in_debug() {
+    let adapter = Arc::new(CrashingAdapter);
+    let bad = RunRequest {
+        prompt: "x".into(),
+        model: None,
+        cwd: std::env::temp_dir(),
+        advisory: true,
+        write: true,
+    };
+    let _ = sessions::spawn(adapter, bad);
+}
