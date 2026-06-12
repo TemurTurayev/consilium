@@ -9,6 +9,20 @@ use std::path::Path;
 /// - Returns `"(no changes)"` when both outputs are empty.
 ///
 /// Never touches the git index (no `git add`). Pure `std::process`, no new deps.
+/// Byte-budget truncation that never splits a UTF-8 code point: walks the cut
+/// back to the nearest char boundary (a raw `&s[..max]` panics mid-codepoint —
+/// worker-written files are frequently non-ASCII).
+fn truncate_at_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 pub fn capture_changes(cwd: &Path) -> Result<String> {
     const PER_FILE_CAP: usize = 8 * 1024;
     const TOTAL_BUDGET: usize = 40 * 1024;
@@ -68,7 +82,7 @@ pub fn capture_changes(cwd: &Path) -> Result<String> {
         };
 
         let (content_to_use, truncated) = if content.len() > PER_FILE_CAP {
-            (&content[..PER_FILE_CAP], true)
+            (truncate_at_boundary(&content, PER_FILE_CAP), true)
         } else {
             (content.as_str(), false)
         };
@@ -81,8 +95,7 @@ pub fn capture_changes(cwd: &Path) -> Result<String> {
         // Enforce total budget.
         let remaining = TOTAL_BUDGET.saturating_sub(total);
         if entry.len() > remaining {
-            let cut = &entry[..remaining];
-            result.push_str(cut);
+            result.push_str(truncate_at_boundary(&entry, remaining));
             result.push_str("\n[truncated]");
             break;
         }
@@ -161,5 +174,15 @@ mod tests {
         let c = capture_changes(repo.path()).unwrap();
         assert!(c.len() < 50_000);
         assert!(c.contains("truncated"));
+    }
+
+    #[test]
+    fn multibyte_content_truncates_without_panicking() {
+        let repo = temp_repo();
+        // 3-byte chars ensure the byte cap lands mid-codepoint without the guard.
+        std::fs::write(repo.path().join("cyr.txt"), "ж".repeat(40_000)).unwrap();
+        let c = capture_changes(repo.path()).unwrap();
+        assert!(c.contains("truncated"));
+        assert!(c.contains('ж')); // content survived, boundary-safe
     }
 }
