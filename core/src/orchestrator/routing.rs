@@ -9,24 +9,15 @@ const ROUTING_WINDOW_SECS: i64 = 5 * 3600;
 /// token volume is a proxy for remaining quota headroom; per-pool $-budgets
 /// arrive with M3 dashboards.
 pub fn pick_worker(workers: &[RoleConfig], store: &QuotaStore) -> anyhow::Result<usize> {
-    if workers.is_empty() {
-        anyhow::bail!("no workers configured");
-    }
-    let since = unix_now() - ROUTING_WINDOW_SECS;
-    let mut best = 0usize;
-    let mut best_load = u64::MAX;
-    for (i, w) in workers.iter().enumerate() {
-        let (input, _) = store.totals_since(w.provider, since)?;
-        if input < best_load {
-            best_load = input;
-            best = i;
-        }
-    }
-    Ok(best)
+    let providers: Vec<Provider> = workers.iter().map(|w| w.provider).collect();
+    pick_worker_by_provider(&providers, store)
 }
 
-/// Same policy, but over bare providers (conduct routes over CouncilMember
-/// adapters whose RoleConfig isn't available).
+/// Same policy (least input tokens in the window, strict `<` so ties break by
+/// slice order), over bare providers — conduct routes over CouncilMember
+/// adapters whose RoleConfig isn't available.
+/// TODO(M3): exclude providers whose pool is exhausted (per-pool $-budgets and
+/// quota-error feedback), not just least-recently-used.
 pub fn pick_worker_by_provider(
     providers: &[Provider],
     store: &QuotaStore,
