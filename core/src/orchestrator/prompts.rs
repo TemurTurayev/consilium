@@ -49,7 +49,7 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
          context the worker needs (file paths, conventions, acceptance criteria) \
          — workers cannot see this conversation, each other, or earlier subtasks. \
          Design subtasks so they touch DISJOINT files; they run sequentially.\n\n\
-         Task:\n{task}\n\nAdditional context:\n{context}\n\n\
+         Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
          Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
     )
 }
@@ -68,7 +68,7 @@ pub fn conduct_evaluation(
          ONLY whether the changes fulfil the subtask — not style preferences.\n\n\
          Subtask given to the worker:\n{subtask_prompt}\n\n\
          Changes made (diff + new files):\n<changes>\n{changes}\n</changes>\n\n\
-         Worker's report:\n{worker_report}\n{supervisor}\n\
+         Worker's report:\n<worker_report>\n{worker_report}\n</worker_report>\n{supervisor}\n\
          Output EXACTLY one JSON code block — decision is accept | rework | fail \
          (rework requires concrete, actionable feedback):\n```json\n{{\"decision\":\"accept\",\"feedback\":\"\"}}\n```"
     )
@@ -89,7 +89,7 @@ pub fn supervisor_gate(task: &str, progress: &str) -> String {
         "You are the supervisor of a multi-agent coding run. You read a lot and \
          intervene rarely — flag only real problems: scope drift, repeated \
          failures, destructive changes, work that contradicts the task.\n\n\
-         Overall task:\n{task}\n\nProgress so far:\n{progress}\n\n\
+         Overall task:\n{task}\n\nProgress so far:\n<progress>\n{progress}\n</progress>\n\n\
          Output EXACTLY one JSON code block — status is ok | concern | halt:\n```json\n{{\"status\":\"ok\",\"note\":\"\"}}\n```"
     )
 }

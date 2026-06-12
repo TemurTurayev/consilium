@@ -120,6 +120,12 @@ mod tests {
     }
 
     #[test]
+    fn malformed_plan_returns_none() {
+        assert!(parse_plan("no json at all").is_none());
+        assert!(parse_plan(r#"{"subtasks": broken"#).is_none());
+    }
+
+    #[test]
     fn parses_evaluation_variants() {
         for (s, expected) in [
             (
