@@ -1,7 +1,15 @@
-//! Conduct contracts: structs, parsers, and test suite.
-//! Orchestration logic (run_conduct) lands in Task 6.
+//! Conduct contracts: structs, parsers, and orchestration (`run_conduct`).
 
+use crate::adapters::{Adapter, RunRequest};
+use crate::orchestrator::changes::capture_changes;
+use crate::orchestrator::council::CouncilMember;
+use crate::orchestrator::routing::pick_worker_by_provider;
+use crate::orchestrator::runner::{run_to_completion, RunStatus};
+use crate::quota::QuotaStore;
 use serde::Deserialize;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 pub struct Subtask {
@@ -103,6 +111,316 @@ impl Triage {
 
 pub fn parse_triage(text: &str) -> Option<Triage> {
     super::json_extract::extract_json_object::<Triage>(text)
+}
+
+// ─── Orchestration contracts ─────────────────────────────────────────────────
+
+pub struct RoleHandle {
+    pub adapter: Arc<dyn Adapter>,
+    pub model: Option<String>,
+}
+
+pub struct ConductDeps {
+    pub conductor: RoleHandle,
+    /// Workers available for routing. Reuses the label/adapter/model triple from
+    /// the council module — no new type needed.
+    pub workers: Vec<CouncilMember>,
+    pub supervisor: Option<RoleHandle>,
+}
+
+pub struct ConductOutcome {
+    /// Accepted subtask ids, in order.
+    pub completed: Vec<u32>,
+    /// Set when the supervisor issued a Halt verdict (run aborted).
+    pub halted: Option<String>,
+    /// Set when the conductor issued Fail or rework attempts were exhausted.
+    pub failed: Option<String>,
+    pub transcript: serde_json::Value,
+}
+
+/// Maximum number of rework rounds per subtask before the whole conduct fails.
+pub const MAX_REWORKS: u32 = 2;
+
+/// Conductor/worker loop.
+///
+/// Flow:
+/// 1. Decompose: conductor (advisory) calls `conduct_decompose` → parse plan.
+/// 2. For each subtask sequentially:
+///    a. Route to least-loaded worker via `pick_worker_by_provider`.
+///    b. Worker session (write:true, advisory:false).
+///    c. `capture_changes` on cwd.
+///    d. Supervisor gate (if configured) — Halt aborts the run.
+///    e. Conductor evaluation (advisory) — Accept / Rework / Fail.
+///    f. Rework: re-prompt worker (up to MAX_REWORKS); worker Failed/TimedOut counts as a rework attempt.
+pub async fn run_conduct(
+    task: &str,
+    context: &str,
+    deps: ConductDeps,
+    quota: &QuotaStore,
+    cwd: PathBuf,
+    timeout: Duration,
+) -> anyhow::Result<ConductOutcome> {
+    use super::prompts;
+
+    // ── extract owned handles so we can move them into async blocks freely ──
+    let conductor_adapter = deps.conductor.adapter.clone();
+    let conductor_model = deps.conductor.model.clone();
+    let supervisor = deps.supervisor;
+    let workers = deps.workers;
+
+    // ── Step 1: decompose ────────────────────────────────────────────────────
+    let decompose_req = RunRequest {
+        prompt: prompts::conduct_decompose(task, context),
+        model: conductor_model.clone(),
+        cwd: cwd.clone(),
+        advisory: true,
+        write: false,
+    };
+    let decompose_out =
+        run_to_completion(conductor_adapter.clone(), decompose_req, quota, timeout).await?;
+    let plan = parse_plan(&decompose_out.final_text)
+        .filter(|p| !p.subtasks.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("conductor produced no plan"))?;
+
+    // Build transcript scaffold.
+    let plan_summary: Vec<serde_json::Value> = plan
+        .subtasks
+        .iter()
+        .map(|s| serde_json::json!({"id": s.id, "title": s.title}))
+        .collect();
+
+    let mut completed: Vec<u32> = Vec::new();
+    let mut halted: Option<String> = None;
+    let mut failed: Option<String> = None;
+    let mut subtask_entries: Vec<serde_json::Value> = Vec::new();
+
+    // Worker providers for routing (stable slice across the loop).
+    let worker_providers: Vec<crate::event::Provider> =
+        workers.iter().map(|w| w.adapter.provider()).collect();
+
+    // ── Step 2: per-subtask loop ─────────────────────────────────────────────
+    'subtask: for subtask in &plan.subtasks {
+        let mut attempts: Vec<serde_json::Value> = Vec::new();
+        let mut supervisor_entries: Vec<serde_json::Value> = Vec::new();
+
+        // Current prompt starts as the subtask prompt; rework replaces it.
+        let original_prompt = subtask.prompt.clone();
+        let mut current_prompt = original_prompt.clone();
+        let mut previous_changes = String::new();
+
+        for attempt_num in 0..=(MAX_REWORKS as usize) {
+            // ── 2a: route ────────────────────────────────────────────────────
+            let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
+            let worker = &workers[worker_idx];
+
+            // ── 2b: worker session ──────────────────────────────────────────
+            let worker_req = RunRequest {
+                prompt: current_prompt.clone(),
+                model: worker.model.clone(),
+                cwd: cwd.clone(),
+                advisory: false,
+                write: true,
+            };
+            let worker_out =
+                run_to_completion(worker.adapter.clone(), worker_req, quota, timeout).await?;
+
+            // Worker failure counts as a rework attempt.
+            let (worker_text, worker_failed_msg) = match &worker_out.status {
+                RunStatus::Completed => (worker_out.final_text.clone(), None),
+                RunStatus::Failed(e) => (String::new(), Some(e.clone())),
+                RunStatus::TimedOut => (String::new(), Some("worker timed out".to_string())),
+            };
+
+            if let Some(err_msg) = worker_failed_msg {
+                // Record this as a rework-attempt entry.
+                attempts.push(serde_json::json!({
+                    "attempt": attempt_num,
+                    "decision": "rework",
+                    "feedback": err_msg,
+                    "changes_chars": 0,
+                }));
+                if attempt_num >= MAX_REWORKS as usize {
+                    failed = Some(format!(
+                        "subtask {} exhausted reworks (last: {})",
+                        subtask.id, err_msg
+                    ));
+                    subtask_entries.push(serde_json::json!({
+                        "id": subtask.id,
+                        "title": subtask.title,
+                        "attempts": attempts,
+                        "supervisor": supervisor_entries,
+                    }));
+                    break 'subtask;
+                }
+                // Prepare rework prompt for next attempt.
+                current_prompt =
+                    prompts::conduct_rework(&original_prompt, &previous_changes, &err_msg);
+                continue;
+            }
+
+            // ── 2c: capture changes ─────────────────────────────────────────
+            let changes =
+                capture_changes(&cwd).unwrap_or_else(|e| format!("(capture_changes error: {e})"));
+            previous_changes = changes.clone();
+
+            // ── 2d: supervisor gate ─────────────────────────────────────────
+            let supervisor_note: Option<String>;
+            if let Some(ref sup) = supervisor {
+                let progress = build_progress(&completed, subtask, &changes);
+                let sup_req = RunRequest {
+                    prompt: prompts::supervisor_gate(task, &progress),
+                    model: sup.model.clone(),
+                    cwd: cwd.clone(),
+                    advisory: true,
+                    write: false,
+                };
+                let sup_out =
+                    run_to_completion(sup.adapter.clone(), sup_req, quota, timeout).await?;
+                let verdict = parse_supervisor(&sup_out.final_text).unwrap_or(SupervisorVerdict {
+                    status: SupervisorStatus::Concern,
+                    note: "supervisor output unparseable".to_string(),
+                });
+
+                supervisor_entries.push(serde_json::json!({
+                    "status": status_str(&verdict.status),
+                    "note": verdict.note.clone(),
+                }));
+
+                match verdict.status {
+                    SupervisorStatus::Halt => {
+                        halted = Some(verdict.note.clone());
+                        subtask_entries.push(serde_json::json!({
+                            "id": subtask.id,
+                            "title": subtask.title,
+                            "attempts": attempts,
+                            "supervisor": supervisor_entries,
+                        }));
+                        break 'subtask;
+                    }
+                    SupervisorStatus::Concern => {
+                        supervisor_note = Some(verdict.note.clone());
+                    }
+                    SupervisorStatus::Ok => {
+                        supervisor_note = None;
+                    }
+                }
+            } else {
+                supervisor_note = None;
+            }
+
+            // ── 2e: conductor evaluation ────────────────────────────────────
+            let eval_req = RunRequest {
+                prompt: prompts::conduct_evaluation(
+                    &subtask.prompt,
+                    &changes,
+                    &worker_text,
+                    supervisor_note.as_deref(),
+                ),
+                model: conductor_model.clone(),
+                cwd: cwd.clone(),
+                advisory: true,
+                write: false,
+            };
+            let eval_out =
+                run_to_completion(conductor_adapter.clone(), eval_req, quota, timeout).await?;
+            // Fail-safe: unparseable evaluation → Rework (never silent accept).
+            let evaluation = parse_evaluation(&eval_out.final_text).unwrap_or(Evaluation {
+                decision: EvalDecision::Rework,
+                feedback: "evaluation output unparseable".to_string(),
+            });
+
+            let decision_str = match evaluation.decision {
+                EvalDecision::Accept => "accept",
+                EvalDecision::Rework => "rework",
+                EvalDecision::Fail => "fail",
+            };
+
+            attempts.push(serde_json::json!({
+                "attempt": attempt_num,
+                "decision": decision_str,
+                "feedback": evaluation.feedback,
+                "changes_chars": changes.len(),
+            }));
+
+            match evaluation.decision {
+                EvalDecision::Accept => {
+                    completed.push(subtask.id);
+                    subtask_entries.push(serde_json::json!({
+                        "id": subtask.id,
+                        "title": subtask.title,
+                        "attempts": attempts,
+                        "supervisor": supervisor_entries,
+                    }));
+                    continue 'subtask;
+                }
+                EvalDecision::Fail => {
+                    failed = Some(format!(
+                        "subtask {} failed: {}",
+                        subtask.id, evaluation.feedback
+                    ));
+                    subtask_entries.push(serde_json::json!({
+                        "id": subtask.id,
+                        "title": subtask.title,
+                        "attempts": attempts,
+                        "supervisor": supervisor_entries,
+                    }));
+                    break 'subtask;
+                }
+                EvalDecision::Rework => {
+                    if attempt_num >= MAX_REWORKS as usize {
+                        // Exhausted — fail the whole run.
+                        failed = Some(format!(
+                            "subtask {} exhausted {} rework attempts: {}",
+                            subtask.id, MAX_REWORKS, evaluation.feedback
+                        ));
+                        subtask_entries.push(serde_json::json!({
+                            "id": subtask.id,
+                            "title": subtask.title,
+                            "attempts": attempts,
+                            "supervisor": supervisor_entries,
+                        }));
+                        break 'subtask;
+                    }
+                    // Prepare rework for the next iteration.
+                    current_prompt =
+                        prompts::conduct_rework(&original_prompt, &changes, &evaluation.feedback);
+                }
+            }
+        }
+    }
+
+    let transcript = serde_json::json!({
+        "kind": "conduct",
+        "task": task,
+        "plan": plan_summary,
+        "subtasks": subtask_entries,
+        "completed": completed,
+        "halted": halted,
+        "failed": failed,
+    });
+
+    Ok(ConductOutcome {
+        completed,
+        halted,
+        failed,
+        transcript,
+    })
+}
+
+fn status_str(s: &SupervisorStatus) -> &'static str {
+    match s {
+        SupervisorStatus::Ok => "ok",
+        SupervisorStatus::Concern => "concern",
+        SupervisorStatus::Halt => "halt",
+    }
+}
+
+fn build_progress(completed: &[u32], current: &Subtask, changes: &str) -> String {
+    let changes_preview: String = changes.chars().take(500).collect();
+    format!(
+        "Completed subtasks: {:?}\nCurrent subtask: {} — {}\nLatest changes (preview):\n{}",
+        completed, current.id, current.title, changes_preview
+    )
 }
 
 #[cfg(test)]
