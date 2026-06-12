@@ -232,9 +232,13 @@ pub async fn run_conduct(
             };
 
             if let Some(err_msg) = worker_failed_msg {
-                // Record this as a rework-attempt entry.
+                // Record this as a rework-attempt entry. `worker` lives on the
+                // attempt (not the subtask, as the plan sketched) because
+                // routing is per-attempt — each retry may land on a different
+                // worker.
                 attempts.push(serde_json::json!({
                     "attempt": attempt_num,
+                    "worker": worker.label,
                     "decision": "rework",
                     "feedback": err_msg,
                     "changes_chars": 0,
@@ -259,8 +263,10 @@ pub async fn run_conduct(
             }
 
             // ── 2c: capture changes ─────────────────────────────────────────
-            let changes =
-                capture_changes(&cwd).unwrap_or_else(|e| format!("(capture_changes error: {e})"));
+            // Capture failure is an infrastructure fault (e.g. cwd is no longer
+            // a git repo), not worker-quality feedback — propagate loudly rather
+            // than burning the rework budget on guaranteed-futile attempts.
+            let changes = capture_changes(&cwd)?;
             previous_changes = changes.clone();
 
             // ── 2d: supervisor gate ─────────────────────────────────────────
@@ -323,6 +329,13 @@ pub async fn run_conduct(
             };
             let eval_out =
                 run_to_completion(conductor_adapter.clone(), eval_req, quota, timeout).await?;
+            // A conductor infra failure must bail, not charge the worker's
+            // rework budget — only a Completed evaluation gets parsed.
+            match &eval_out.status {
+                RunStatus::Completed => {}
+                RunStatus::Failed(e) => anyhow::bail!("conductor evaluation failed: {e}"),
+                RunStatus::TimedOut => anyhow::bail!("conductor evaluation timed out"),
+            }
             // Fail-safe: unparseable evaluation → Rework (never silent accept).
             let evaluation = parse_evaluation(&eval_out.final_text).unwrap_or(Evaluation {
                 decision: EvalDecision::Rework,
@@ -335,8 +348,10 @@ pub async fn run_conduct(
                 EvalDecision::Fail => "fail",
             };
 
+            // `worker` recorded per-attempt (see the worker-failure push above).
             attempts.push(serde_json::json!({
                 "attempt": attempt_num,
+                "worker": worker.label,
                 "decision": decision_str,
                 "feedback": evaluation.feedback,
                 "changes_chars": changes.len(),

@@ -35,11 +35,15 @@ fn temp_repo() -> tempfile::TempDir {
     dir
 }
 
-/// Build a simple 1-subtask plan JSON string.
-fn plan_json(subtask_id: u32, title: &str, prompt: &str) -> String {
-    format!(
-        r#"{{"subtasks":[{{"id":{subtask_id},"title":"{title}","prompt":"{prompt}","depends_note":""}}]}}"#
-    )
+/// Build an N-subtask plan JSON string from (id, title, prompt) triples.
+fn plan_json(subtasks: &[(u32, &str, &str)]) -> String {
+    let entries: Vec<String> = subtasks
+        .iter()
+        .map(|(id, title, prompt)| {
+            format!(r#"{{"id":{id},"title":"{title}","prompt":"{prompt}","depends_note":""}}"#)
+        })
+        .collect();
+    format!(r#"{{"subtasks":[{}]}}"#, entries.join(","))
 }
 
 fn accept_json() -> String {
@@ -48,6 +52,10 @@ fn accept_json() -> String {
 
 fn rework_json(feedback: &str) -> String {
     format!(r#"{{"decision":"rework","feedback":"{feedback}"}}"#)
+}
+
+fn fail_json(feedback: &str) -> String {
+    format!(r#"{{"decision":"fail","feedback":"{feedback}"}}"#)
 }
 
 #[allow(dead_code)]
@@ -78,7 +86,7 @@ async fn happy_path_single_subtask() {
         vec![
             ScriptedAdapter::ok_with_text(
                 Provider::Claude,
-                &plan_json(1, "create file", "create out.txt"),
+                &plan_json(&[(1, "create file", "create out.txt")]),
             ),
             ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
         ],
@@ -128,6 +136,8 @@ async fn happy_path_single_subtask() {
     let attempts = entries[0]["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0]["decision"], "accept");
+    assert_eq!(attempts[0]["worker"], "codex-worker");
+    assert!(attempts[0]["changes_chars"].as_u64().unwrap() > 0);
 }
 
 // ─── Test 2: rework_then_accept ────────────────────────────────────────────
@@ -143,7 +153,7 @@ async fn rework_then_accept() {
         vec![
             ScriptedAdapter::ok_with_text(
                 Provider::Claude,
-                &plan_json(1, "write file", "write content"),
+                &plan_json(&[(1, "write file", "write content")]),
             ),
             ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("add more content")),
             ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
@@ -211,7 +221,10 @@ async fn rework_exhaustion_fails() {
     let conductor = Arc::new(SequencedAdapter::new(
         Provider::Claude,
         vec![
-            ScriptedAdapter::ok_with_text(Provider::Claude, &plan_json(1, "do thing", "do it")),
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
             ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("not good enough")),
             ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("still not good")),
             ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("still failing")),
@@ -249,6 +262,9 @@ async fn rework_exhaustion_fails() {
         "should fail after MAX_REWORKS exhausted"
     );
     assert!(outcome.completed.is_empty());
+    // Exactly MAX_REWORKS + 1 attempts: initial + 2 reworks, then exhaustion.
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(entries[0]["attempts"].as_array().unwrap().len(), 3);
 }
 
 // ─── Test 4: supervisor_halt_aborts ────────────────────────────────────────
@@ -262,7 +278,10 @@ async fn supervisor_halt_aborts() {
     let conductor = Arc::new(SequencedAdapter::new(
         Provider::Claude,
         vec![
-            ScriptedAdapter::ok_with_text(Provider::Claude, &plan_json(1, "do thing", "do it")),
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
             // Evaluation should NOT be called — supervisor halts first
             ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
         ],
@@ -314,10 +333,12 @@ async fn supervisor_halt_aborts() {
             .contains("scope creep"),
         "halt reason should mention scope creep"
     );
+    assert!(outcome.completed.is_empty());
     // Transcript should record the halt
     let entries = outcome.transcript["subtasks"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
-    // The halt entry should not have an evaluation attempt (no decision field)
+    // Halt fires BEFORE evaluation — no attempt entry exists for the subtask.
+    assert!(entries[0]["attempts"].as_array().unwrap().is_empty());
     let supervisor_entries = entries[0]["supervisor"].as_array().unwrap();
     assert!(!supervisor_entries.is_empty());
     assert_eq!(supervisor_entries[0]["status"], "halt");
@@ -334,7 +355,10 @@ async fn worker_failure_counts_as_attempt() {
     let conductor = Arc::new(SequencedAdapter::new(
         Provider::Claude,
         vec![
-            ScriptedAdapter::ok_with_text(Provider::Claude, &plan_json(1, "do thing", "do it")),
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
             ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
         ],
     ));
@@ -387,4 +411,208 @@ async fn worker_failure_counts_as_attempt() {
         first_feedback.contains("quota exceeded") || first_feedback.contains("worker error"),
         "first attempt feedback should contain the worker error, got: {first_feedback}"
     );
+}
+
+// ─── Test 6: capture_failure_propagates_as_error ───────────────────────────
+
+#[tokio::test]
+async fn capture_failure_propagates_as_error() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor only needs the plan — capture fails before evaluation.
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            &plan_json(&[(1, "sabotage", "do it")]),
+        )],
+    ));
+
+    // Worker destroys the git repo — capture_changes is an infrastructure
+    // fault and must propagate as Err, not burn the rework budget.
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "rm -rf .git".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "done")
+    });
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: None,
+    };
+
+    let result = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "capture_changes failure must propagate as Err"
+    );
+}
+
+// ─── Test 7: two_subtasks_complete_in_order ────────────────────────────────
+
+#[tokio::test]
+async fn two_subtasks_complete_in_order() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor: 2-subtask plan → accept → accept
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[
+                    (1, "first file", "create one.txt"),
+                    (2, "second file", "create two.txt"),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    // Worker: one file per subtask.
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'one' > one.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "created one.txt")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'two' > two.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "created two.txt")
+            },
+        ],
+    ));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: None,
+    };
+
+    let outcome = run_conduct(
+        "create two files",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1, 2]);
+    assert!(outcome.halted.is_none());
+    assert!(outcome.failed.is_none());
+    assert!(repo.path().join("one.txt").exists());
+    assert!(repo.path().join("two.txt").exists());
+
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["id"], 1);
+    assert_eq!(entries[1]["id"], 2);
+}
+
+// ─── Test 8: fail_on_second_preserves_first ────────────────────────────────
+
+#[tokio::test]
+async fn fail_on_second_preserves_first() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor: 2-subtask plan → accept (subtask 1) → fail (subtask 2)
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[
+                    (1, "good part", "do part one"),
+                    (2, "bad part", "do part two"),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("wrong approach")),
+        ],
+    ));
+
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'part one' > part1.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did part one")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'part two' > part2.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did part two")
+            },
+        ],
+    ));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: None,
+    };
+
+    let outcome = run_conduct(
+        "two part task",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    assert!(
+        outcome
+            .failed
+            .as_deref()
+            .unwrap_or("")
+            .contains("wrong approach"),
+        "failure reason should carry the conductor's feedback"
+    );
+
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    // Fail stops the subtask immediately — exactly one attempt on subtask 2.
+    assert_eq!(entries[1]["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(entries[1]["attempts"][0]["decision"], "fail");
 }
