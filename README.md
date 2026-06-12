@@ -39,7 +39,7 @@ cargo run -q -- quota                                     # usage in the last 5h
 # each other anonymously, the chairman synthesizes the best answer.
 cargo run -q -- council "Async Rust: when is spawning a task per request wrong?"
 
-# Audit a diff with the reviewer role. Exit codes: 0 clean/minor,
+# Audit a diff with the reviewer role. Exit codes: 0 no critical findings,
 # 2 critical findings, 3 reviewer output unparseable (fails closed).
 git diff | cargo run -q -- review --diff-file /dev/stdin
 ```
