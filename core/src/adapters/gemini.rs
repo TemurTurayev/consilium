@@ -1,4 +1,4 @@
-use super::{Adapter, RunRequest};
+use super::{Adapter, FailureKind, RunRequest};
 use crate::event::{AgentEvent, Provider};
 use tokio::process::Command;
 
@@ -40,6 +40,17 @@ impl Adapter for GeminiAdapter {
 
     fn cli_binary(&self) -> &'static str {
         "gemini"
+    }
+
+    fn classify_failure(&self, error: &str) -> FailureKind {
+        let e = error.to_ascii_lowercase();
+        if e.contains("code: 404") || e.contains("not found") || e.contains("critical error") {
+            FailureKind::ModelUnavailable
+        } else if e.contains("resource_exhausted") || e.contains("429") || e.contains("quota") {
+            FailureKind::RateLimited
+        } else {
+            FailureKind::Transient
+        }
     }
 
     fn build_command(&self, req: &RunRequest) -> Command {
@@ -110,6 +121,7 @@ impl Adapter for GeminiAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::FailureKind;
     use crate::event::AgentEvent;
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/gemini/basic_response.json");
@@ -198,6 +210,23 @@ mod tests {
     fn deliberation_run_has_no_write_flags() {
         let args = command_args(false, false);
         assert!(!args.contains(&"--approval-mode".to_string()));
+    }
+
+    #[test]
+    fn classifies_model_unavailable() {
+        let e = "  code: 404\nAn unexpected critical error occurred:[object Object]";
+        assert_eq!(
+            GeminiAdapter.classify_failure(e),
+            FailureKind::ModelUnavailable
+        );
+    }
+
+    #[test]
+    fn classifies_rate_limit() {
+        assert_eq!(
+            GeminiAdapter.classify_failure("Error: RESOURCE_EXHAUSTED (429)"),
+            FailureKind::RateLimited
+        );
     }
 
     /// Runs against the real recorded fixture (exists since Task 4).

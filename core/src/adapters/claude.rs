@@ -1,4 +1,4 @@
-use super::{Adapter, RunRequest};
+use super::{Adapter, FailureKind, RunRequest};
 use crate::event::{AgentEvent, Provider};
 use tokio::process::Command;
 
@@ -32,6 +32,19 @@ impl Adapter for ClaudeAdapter {
         }
         cmd.current_dir(&req.cwd);
         cmd
+    }
+
+    fn classify_failure(&self, error: &str) -> FailureKind {
+        let e = error.to_ascii_lowercase();
+        if e.contains("may not exist or you may not have access")
+            || e.contains("issue with the selected model")
+        {
+            FailureKind::ModelUnavailable
+        } else if e.contains("rate limit") || e.contains("usage limit") {
+            FailureKind::RateLimited
+        } else {
+            FailureKind::Transient
+        }
     }
 
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
@@ -96,6 +109,7 @@ impl Adapter for ClaudeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::FailureKind;
     use crate::event::{AgentEvent, Provider};
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/claude/basic_session.jsonl");
@@ -194,6 +208,31 @@ mod tests {
                 output_tokens: 6
             }
         )));
+    }
+
+    #[test]
+    fn classifies_model_unavailable() {
+        let e = "There's an issue with the selected model (claude-fable-5). It may not exist or you may not have access to it.";
+        assert_eq!(
+            ClaudeAdapter.classify_failure(e),
+            FailureKind::ModelUnavailable
+        );
+    }
+
+    #[test]
+    fn classifies_rate_limit() {
+        assert_eq!(
+            ClaudeAdapter.classify_failure("Claude usage limit reached; try again later"),
+            FailureKind::RateLimited
+        );
+    }
+
+    #[test]
+    fn classifies_other_as_transient() {
+        assert_eq!(
+            ClaudeAdapter.classify_failure("connection reset by peer"),
+            FailureKind::Transient
+        );
     }
 
     /// Runs only when real fixtures have been recorded via script/record_fixtures.sh.

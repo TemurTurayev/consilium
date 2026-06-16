@@ -1,4 +1,4 @@
-use super::{Adapter, RunRequest};
+use super::{Adapter, FailureKind, RunRequest};
 use crate::event::{AgentEvent, Provider};
 use tokio::process::Command;
 
@@ -31,6 +31,17 @@ impl Adapter for CodexAdapter {
         cmd.arg(&req.prompt);
         cmd.current_dir(&req.cwd);
         cmd
+    }
+
+    fn classify_failure(&self, error: &str) -> FailureKind {
+        let e = error.to_ascii_lowercase();
+        if e.contains("model is not supported") || e.contains("invalid_request_error") {
+            FailureKind::ModelUnavailable
+        } else if e.contains("usage limit") || e.contains("rate limit") || e.contains("429") {
+            FailureKind::RateLimited
+        } else {
+            FailureKind::Transient
+        }
     }
 
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
@@ -91,6 +102,7 @@ impl Adapter for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::FailureKind;
     use crate::event::{AgentEvent, Provider};
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/codex/basic_session.jsonl");
@@ -206,6 +218,23 @@ mod tests {
                 output_tokens: 10
             }
         ));
+    }
+
+    #[test]
+    fn classifies_model_unavailable() {
+        let e = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-bogus' model is not supported when using Codex with a ChatGPT account."}}"#;
+        assert_eq!(
+            CodexAdapter.classify_failure(e),
+            FailureKind::ModelUnavailable
+        );
+    }
+
+    #[test]
+    fn classifies_rate_limit() {
+        assert_eq!(
+            CodexAdapter.classify_failure("stream error: usage limit reached"),
+            FailureKind::RateLimited
+        );
     }
 
     /// Runs only when real fixtures have been recorded via script/record_fixtures.sh.

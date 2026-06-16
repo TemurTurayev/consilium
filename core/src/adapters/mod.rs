@@ -29,6 +29,18 @@ pub struct RunRequest {
     pub write: bool,
 }
 
+/// Why a session failed, for failover routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Model does not exist / no access (e.g. pulled like Fable). Permanent —
+    /// the model is marked dead for the rest of the run.
+    ModelUnavailable,
+    /// Provider quota / rate limit hit. Temporary — demote, don't mark dead.
+    RateLimited,
+    /// Anything else (network, transient). Retry once, then demote.
+    Transient,
+}
+
 /// An adapter knows how to launch one provider's CLI and translate its raw
 /// output into AgentEvents. Parsing is PURE (no I/O) so it is fixture-testable.
 pub trait Adapter: Send + Sync {
@@ -44,5 +56,12 @@ pub trait Adapter: Send + Sync {
     fn parse_final(&self, full_output: &str) -> Vec<AgentEvent> {
         let _ = full_output;
         Vec::new()
+    }
+    /// Classifies a failure message (from AgentEvent::Failed) for failover.
+    /// Default: Transient. Each adapter overrides with patterns matched against
+    /// its CLI's REAL error strings (see resilience tests).
+    fn classify_failure(&self, error: &str) -> FailureKind {
+        let _ = error;
+        FailureKind::Transient
     }
 }
