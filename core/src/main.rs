@@ -172,34 +172,34 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Council { question, timeout } => {
             use consilium::orchestrator::council::CouncilMember;
+            use consilium::orchestrator::resilience::ModelHealth;
             use consilium::orchestrator::{council, roles, transcript::TranscriptStore};
 
             let config = consilium::config::Config::load(Some(std::path::Path::new(
                 "consilium.config.json",
             )))?;
-            let chairman_model = Some(config.roles.chairman.model.clone());
-            let chairman_adapter = roles::adapter_for(&config.roles.chairman);
+            let chairman_ladder = roles::resolve_ladder(&config.roles.chairman);
             let members: Vec<CouncilMember> = config
                 .roles
                 .workers
                 .iter()
                 .map(|role| CouncilMember {
                     label: format!("{}-{}", role.provider.as_str(), role.model),
-                    adapter: roles::adapter_for(role),
-                    model: Some(role.model.clone()),
+                    ladder: roles::resolve_ladder(role),
                 })
                 .collect();
 
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let health = ModelHealth::new();
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
             let outcome = council::run_council(
                 &question,
                 members,
-                chairman_adapter,
-                chairman_model,
+                chairman_ladder,
                 &store,
                 std::env::current_dir()?,
                 std::time::Duration::from_secs(timeout),
+                &health,
             )
             .await?;
             let path = transcripts.save("council", &outcome.transcript)?;
@@ -207,6 +207,20 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", outcome.synthesis);
             if !outcome.failed_members.is_empty() {
                 println!("\n(members failed: {})", outcome.failed_members.join(", "));
+            }
+            // Print any model fallbacks that occurred during the council run.
+            let fallbacks = outcome.transcript["fallbacks"].as_array();
+            if let Some(fbs) = fallbacks {
+                if !fbs.is_empty() {
+                    println!("\n(model fallbacks: {})", fbs.len());
+                    for fb in fbs {
+                        println!(
+                            "  ↳ {} → {}",
+                            fb["from"].as_str().unwrap_or("?"),
+                            fb["to"].as_str().unwrap_or("?")
+                        );
+                    }
+                }
             }
             println!("\ntranscript: {}", path.display());
         }
@@ -300,8 +314,7 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|role| CouncilMember {
                     label: format!("{}-{}", role.provider.as_str(), role.model),
-                    adapter: roles::adapter_for(role),
-                    model: Some(role.model.clone()),
+                    ladder: roles::resolve_ladder(role),
                 })
                 .collect();
 
@@ -376,8 +389,7 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|role| CouncilMember {
                     label: format!("{}-{}", role.provider.as_str(), role.model),
-                    adapter: roles::adapter_for(role),
-                    model: Some(role.model.clone()),
+                    ladder: roles::resolve_ladder(role),
                 })
                 .collect();
 
@@ -387,8 +399,7 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|role| CouncilMember {
                     label: format!("{}-{}", role.provider.as_str(), role.model),
-                    adapter: roles::adapter_for(role),
-                    model: Some(role.model.clone()),
+                    ladder: roles::resolve_ladder(role),
                 })
                 .collect();
 

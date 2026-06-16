@@ -1,17 +1,14 @@
 use super::prompts;
-use super::runner::{run_to_completion, RunStatus};
-use crate::adapters::{Adapter, RunRequest};
+use super::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
+use crate::adapters::RunRequest;
 use crate::quota::QuotaStore;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 pub struct CouncilMember {
     pub label: String,
-    pub adapter: Arc<dyn Adapter>,
-    /// Model passed to the CLI (`--model`/`-m`); None = CLI default.
-    pub model: Option<String>,
+    pub ladder: Vec<Rung>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -46,45 +43,57 @@ pub struct CouncilOutcome {
 pub async fn run_council(
     question: &str,
     members: Vec<CouncilMember>,
-    chairman: Arc<dyn Adapter>,
-    chairman_model: Option<String>,
+    chairman_ladder: Vec<Rung>,
     quota: &QuotaStore,
     cwd: PathBuf,
     timeout: Duration,
+    health: &ModelHealth,
 ) -> anyhow::Result<CouncilOutcome> {
+    let mut all_fallbacks: Vec<Fallback> = Vec::new();
+
     // Stage 1: independent answers, in parallel.
     let answer_prompt = prompts::council_answer(question);
-    // Collect owned tuples to avoid borrow-checker issues with parallel futures.
-    let member_data: Vec<(Arc<dyn Adapter>, Option<String>, String)> = members
+
+    // Pre-collect labels so futures can borrow them (labels outlive join_all).
+    let member_labels: Vec<String> = members.iter().map(|m| m.label.clone()).collect();
+
+    let futures: Vec<_> = members
         .iter()
-        .map(|m| (m.adapter.clone(), m.model.clone(), m.label.clone()))
-        .collect();
-    let futures: Vec<_> = member_data
-        .iter()
-        .map(|(adapter, model, _label)| {
-            let req = RunRequest {
-                prompt: answer_prompt.clone(),
-                model: model.clone(),
-                cwd: cwd.clone(),
-                advisory: true, // deliberation only — no file mutations
-                write: false,
-            };
-            run_to_completion(adapter.clone(), req, quota, timeout)
+        .zip(member_labels.iter())
+        .map(|(m, label)| {
+            let prompt = answer_prompt.clone();
+            let cwd = cwd.clone();
+            run_with_failover(
+                &m.ladder,
+                label.as_str(),
+                move |model| RunRequest {
+                    prompt: prompt.clone(),
+                    model,
+                    cwd: cwd.clone(),
+                    advisory: true,
+                    write: false,
+                },
+                quota,
+                health,
+                timeout,
+            )
         })
         .collect();
     let results = futures::future::join_all(futures).await;
 
     let mut answers: Vec<(String, String, String)> = Vec::new(); // (anon label, member label, text)
     let mut failed_members: Vec<String> = Vec::new();
-    for ((_, _, label), result) in member_data.iter().zip(results) {
+    for (label, result) in member_labels.iter().zip(results) {
         match result {
-            Ok(outcome)
-                if matches!(outcome.status, RunStatus::Completed)
-                    && !outcome.final_text.is_empty() =>
-            {
-                answers.push((String::new(), label.clone(), outcome.final_text));
+            Ok(fo) => {
+                all_fallbacks.extend(fo.fallbacks);
+                if !fo.outcome.final_text.is_empty() {
+                    answers.push((String::new(), label.clone(), fo.outcome.final_text));
+                } else {
+                    failed_members.push(label.clone());
+                }
             }
-            _ => failed_members.push(label.clone()),
+            Err(_) => failed_members.push(label.clone()),
         }
     }
     if answers.is_empty() {
@@ -106,60 +115,71 @@ pub async fn run_council(
         .map(|(label, _, text)| (label.as_str(), text.as_str()))
         .collect();
     let review_prompt = prompts::council_review(question, &anon_pairs);
-    // Collect surviving member data (owned) to avoid borrow issues.
-    let surviving: Vec<(Arc<dyn Adapter>, Option<String>, String)> = members
+
+    // Surviving members (those that produced an answer) participate in review.
+    let surviving_members: Vec<&CouncilMember> = members
         .iter()
         .filter(|m| !failed_members.contains(&m.label))
-        .map(|m| (m.adapter.clone(), m.model.clone(), m.label.clone()))
         .collect();
-    let review_futures: Vec<_> = surviving
+
+    // Pre-collect labels so futures can borrow them (labels outlive join_all).
+    let surviving_labels: Vec<String> = surviving_members.iter().map(|m| m.label.clone()).collect();
+
+    let review_futures: Vec<_> = surviving_members
         .iter()
-        .map(|(adapter, model, _label)| {
-            let req = RunRequest {
-                prompt: review_prompt.clone(),
-                model: model.clone(),
-                cwd: cwd.clone(),
-                advisory: true, // deliberation only — no file mutations
-                write: false,
-            };
-            run_to_completion(adapter.clone(), req, quota, timeout)
+        .zip(surviving_labels.iter())
+        .map(|(m, label)| {
+            let prompt = review_prompt.clone();
+            let cwd = cwd.clone();
+            run_with_failover(
+                &m.ladder,
+                label.as_str(),
+                move |model| RunRequest {
+                    prompt: prompt.clone(),
+                    model,
+                    cwd: cwd.clone(),
+                    advisory: true,
+                    write: false,
+                },
+                quota,
+                health,
+                timeout,
+            )
         })
         .collect();
     let review_results = futures::future::join_all(review_futures).await;
 
     let mut reviews: Vec<String> = Vec::new();
     let mut scores: Vec<(String, Option<Vec<Score>>)> = Vec::new();
-    for ((_, _, label), result) in surviving.iter().zip(review_results) {
-        if let Ok(outcome) = result {
-            if matches!(outcome.status, RunStatus::Completed) {
-                scores.push((label.clone(), parse_scores(&outcome.final_text)));
-                reviews.push(outcome.final_text);
-            }
+    for (m, result) in surviving_members.iter().zip(review_results) {
+        if let Ok(fo) = result {
+            all_fallbacks.extend(fo.fallbacks);
+            scores.push((m.label.clone(), parse_scores(&fo.outcome.final_text)));
+            reviews.push(fo.outcome.final_text);
         }
     }
 
     // Stage 3: chairman synthesis.
     let review_refs: Vec<&str> = reviews.iter().map(String::as_str).collect();
     let synthesis_prompt = prompts::council_synthesis(question, &anon_pairs, &review_refs);
-    let synthesis_outcome = run_to_completion(
-        chairman,
-        RunRequest {
-            prompt: synthesis_prompt,
-            model: chairman_model,
-            cwd,
-            advisory: true, // deliberation only — no file mutations
+
+    let synthesis_result = run_with_failover(
+        &chairman_ladder,
+        "chairman",
+        move |model| RunRequest {
+            prompt: synthesis_prompt.clone(),
+            model,
+            cwd: cwd.clone(),
+            advisory: true,
             write: false,
         },
         quota,
+        health,
         timeout,
     )
     .await?;
-    if !matches!(synthesis_outcome.status, RunStatus::Completed) {
-        anyhow::bail!(
-            "chairman failed to synthesize: {:?}",
-            synthesis_outcome.status
-        );
-    }
+    all_fallbacks.extend(synthesis_result.fallbacks);
+    let synthesis_outcome = synthesis_result.outcome;
 
     let transcript = serde_json::json!({
         "kind": "council",
@@ -176,6 +196,11 @@ pub async fn run_council(
             })).collect::<Vec<_>>()),
         })).collect::<Vec<_>>(),
         "synthesis": synthesis_outcome.final_text,
+        "fallbacks": all_fallbacks.iter().map(|fb| serde_json::json!({
+            "from": fb.from,
+            "to": fb.to,
+            "reason": fb.reason,
+        })).collect::<Vec<_>>(),
     });
 
     Ok(CouncilOutcome {

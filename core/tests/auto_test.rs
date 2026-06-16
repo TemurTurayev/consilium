@@ -1,11 +1,14 @@
 mod common;
 
 use common::{ScriptedAdapter, SequencedAdapter};
+use consilium::config::ModelCandidate;
 use consilium::event::Provider;
 use consilium::orchestrator::auto::{run_auto, AutoDeps};
 use consilium::orchestrator::conduct::{ConductDeps, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
+use consilium::orchestrator::resilience::Rung;
 use consilium::quota::QuotaStore;
+use std::sync::Arc;
 use std::time::Duration;
 
 // ─── helpers (copied from conduct_test.rs) ───────────────────────────────────
@@ -58,6 +61,26 @@ fn store() -> QuotaStore {
     QuotaStore::open_in_memory().unwrap()
 }
 
+/// Wrap a single adapter in a one-rung CouncilMember ladder.
+/// Task 6 will replace these with real multi-rung ladders.
+fn solo_worker(
+    label: &str,
+    provider: Provider,
+    model: &str,
+    adapter: Arc<dyn consilium::adapters::Adapter>,
+) -> CouncilMember {
+    CouncilMember {
+        label: label.into(),
+        ladder: vec![Rung {
+            candidate: ModelCandidate {
+                provider,
+                model: model.into(),
+            },
+            adapter,
+        }],
+    }
+}
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 // ─── Test 1: trivial_skips_council ───────────────────────────────────────────
@@ -98,20 +121,22 @@ async fn trivial_skips_council() {
                 adapter: conductor,
                 model: None,
             },
-            workers: vec![CouncilMember {
-                label: "codex-worker".into(),
-                adapter: worker,
-                model: None,
-            }],
+            workers: vec![solo_worker(
+                "codex-worker",
+                Provider::Codex,
+                "gpt-4",
+                worker.clone(),
+            )],
             supervisor: None,
             reviewer: None,
             arbiter: None,
         },
-        council_members: vec![CouncilMember {
-            label: "bad-member".into(),
-            adapter: std::sync::Arc::new(bad_council_member),
-            model: None,
-        }],
+        council_members: vec![solo_worker(
+            "bad-member",
+            Provider::Codex,
+            "gpt-4",
+            Arc::new(bad_council_member),
+        )],
         chairman: RoleHandle {
             adapter: std::sync::Arc::new(ScriptedAdapter::failing(
                 Provider::Claude,
@@ -187,20 +212,22 @@ async fn standard_runs_council_then_conduct() {
                 adapter: conductor,
                 model: None,
             },
-            workers: vec![CouncilMember {
-                label: "codex-worker".into(),
-                adapter: worker,
-                model: None,
-            }],
+            workers: vec![solo_worker(
+                "codex-worker",
+                Provider::Codex,
+                "gpt-4",
+                worker.clone(),
+            )],
             supervisor: None,
             reviewer: None,
             arbiter: None,
         },
-        council_members: vec![CouncilMember {
-            label: "claude-council".into(),
-            adapter: council_member_adapter,
-            model: None,
-        }],
+        council_members: vec![solo_worker(
+            "claude-council",
+            Provider::Claude,
+            "claude-opus",
+            council_member_adapter,
+        )],
         chairman: RoleHandle {
             adapter: chairman_adapter,
             model: None,
@@ -260,11 +287,12 @@ async fn check_command_failure_reported() {
                 adapter: conductor,
                 model: None,
             },
-            workers: vec![CouncilMember {
-                label: "codex-worker".into(),
-                adapter: worker,
-                model: None,
-            }],
+            workers: vec![solo_worker(
+                "codex-worker",
+                Provider::Codex,
+                "gpt-4",
+                worker.clone(),
+            )],
             supervisor: None,
             reviewer: None,
             arbiter: None,
@@ -329,11 +357,12 @@ async fn check_command_success() {
                 adapter: conductor,
                 model: None,
             },
-            workers: vec![CouncilMember {
-                label: "codex-worker".into(),
-                adapter: worker,
-                model: None,
-            }],
+            workers: vec![solo_worker(
+                "codex-worker",
+                Provider::Codex,
+                "gpt-4",
+                worker.clone(),
+            )],
             supervisor: None,
             reviewer: None,
             arbiter: None,

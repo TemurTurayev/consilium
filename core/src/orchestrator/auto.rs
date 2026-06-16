@@ -1,8 +1,10 @@
 //! Auto pipeline: triage → (optional council) → conduct → (optional check command).
 
 use crate::adapters::RunRequest;
+use crate::config::ModelCandidate;
 use crate::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use crate::orchestrator::council::{run_council, CouncilMember};
+use crate::orchestrator::resilience::{ModelHealth, Rung};
 use crate::orchestrator::runner::run_to_completion;
 use crate::quota::QuotaStore;
 use std::path::PathBuf;
@@ -48,6 +50,23 @@ pub async fn run_auto(
     let triage_adapter = deps.conduct.conductor.adapter.clone();
     let triage_model = deps.conduct.conductor.model.clone();
 
+    // Build a single-rung chairman ladder from the RoleHandle for council.
+    // Task 6 will replace this with a real multi-rung ladder from resolve_ladder.
+    let chairman_provider = deps.chairman.adapter.provider();
+    let chairman_model_str = deps
+        .chairman
+        .model
+        .clone()
+        .unwrap_or_else(|| "default".into());
+    let chairman_ladder: Vec<Rung> = vec![Rung {
+        candidate: ModelCandidate {
+            provider: chairman_provider,
+            model: chairman_model_str,
+        },
+        adapter: deps.chairman.adapter.clone(),
+    }];
+    let health = ModelHealth::new();
+
     let triage_req = RunRequest {
         prompt: prompts::auto_triage(task),
         model: triage_model,
@@ -72,11 +91,11 @@ pub async fn run_auto(
         let council_outcome = run_council(
             &question,
             deps.council_members,
-            deps.chairman.adapter,
-            deps.chairman.model,
+            chairman_ladder,
             quota,
             cwd.clone(),
             timeout,
+            &health,
         )
         .await?;
         let synthesis = council_outcome.synthesis.clone();

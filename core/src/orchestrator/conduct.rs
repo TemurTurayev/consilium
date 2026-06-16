@@ -246,8 +246,17 @@ pub async fn run_conduct(
     let mut subtask_entries: Vec<serde_json::Value> = Vec::new();
 
     // Worker providers for routing (stable slice across the loop).
-    let worker_providers: Vec<crate::event::Provider> =
-        workers.iter().map(|w| w.adapter.provider()).collect();
+    // Use the primary (first) rung of each worker's ladder for routing.
+    // Task 6 will replace run_to_completion here with run_with_failover.
+    let worker_providers: Vec<crate::event::Provider> = workers
+        .iter()
+        .map(|w| {
+            w.ladder
+                .first()
+                .map(|r| r.adapter.provider())
+                .unwrap_or(crate::event::Provider::Claude)
+        })
+        .collect();
 
     // ── Step 2: per-subtask loop ─────────────────────────────────────────────
     'subtask: for subtask in &plan.subtasks {
@@ -264,15 +273,21 @@ pub async fn run_conduct(
             let worker = &workers[worker_idx];
 
             // ── 2b: worker session ──────────────────────────────────────────
+            // Use the primary rung of the worker's ladder.
+            // Task 6 will replace this with run_with_failover over the full ladder.
+            let (worker_adapter, worker_model) = worker
+                .ladder
+                .first()
+                .map(|r| (r.adapter.clone(), Some(r.candidate.model.clone())))
+                .unwrap_or_else(|| unreachable!("worker ladder must be non-empty"));
             let worker_req = RunRequest {
                 prompt: current_prompt.clone(),
-                model: worker.model.clone(),
+                model: worker_model,
                 cwd: cwd.clone(),
                 advisory: false,
                 write: true,
             };
-            let worker_out =
-                run_to_completion(worker.adapter.clone(), worker_req, quota, timeout).await?;
+            let worker_out = run_to_completion(worker_adapter, worker_req, quota, timeout).await?;
 
             // Worker failure counts as a rework attempt.
             let (worker_text, worker_failed_msg) = match &worker_out.status {

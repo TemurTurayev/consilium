@@ -2,9 +2,11 @@ mod common;
 
 #[allow(unused_imports)]
 use common::{RecordingAdapter, ScriptedAdapter, SequencedAdapter};
+use consilium::config::ModelCandidate;
 use consilium::event::Provider;
 use consilium::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
+use consilium::orchestrator::resilience::Rung;
 use consilium::quota::QuotaStore;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -96,6 +98,26 @@ fn store() -> QuotaStore {
     QuotaStore::open_in_memory().unwrap()
 }
 
+/// Wrap a single adapter in a one-rung CouncilMember ladder.
+/// Task 6 will replace these with real multi-rung ladders.
+fn solo_worker(
+    label: &str,
+    provider: Provider,
+    model: &str,
+    adapter: Arc<dyn consilium::adapters::Adapter>,
+) -> CouncilMember {
+    CouncilMember {
+        label: label.into(),
+        ladder: vec![Rung {
+            candidate: ModelCandidate {
+                provider,
+                model: model.into(),
+            },
+            adapter,
+        }],
+    }
+}
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 // ─── Test 1: happy_path_single_subtask ─────────────────────────────────────
@@ -128,11 +150,12 @@ async fn happy_path_single_subtask() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
@@ -207,11 +230,12 @@ async fn rework_then_accept() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
@@ -267,11 +291,12 @@ async fn rework_exhaustion_fails() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
@@ -330,11 +355,12 @@ async fn supervisor_halt_aborts() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: Some(RoleHandle {
             adapter: supervisor,
             model: None,
@@ -413,11 +439,12 @@ async fn worker_failure_counts_as_attempt() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
@@ -476,11 +503,12 @@ async fn capture_failure_propagates_as_error() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
@@ -545,11 +573,12 @@ async fn two_subtasks_complete_in_order() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
@@ -620,11 +649,12 @@ async fn fail_on_second_preserves_first() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
@@ -712,11 +742,12 @@ async fn critical_review_forces_rework() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: Some(RoleHandle {
             adapter: reviewer,
@@ -801,11 +832,12 @@ async fn arbiter_ships_on_exhaustion() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: Some(RoleHandle {
             adapter: reviewer,
@@ -885,11 +917,12 @@ async fn arbiter_fails_on_exhaustion() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: Some(RoleHandle {
             adapter: reviewer,
@@ -956,11 +989,12 @@ async fn supervisor_ok_does_not_interfere() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: Some(RoleHandle {
             adapter: supervisor,
             model: None,
@@ -1075,11 +1109,12 @@ async fn supervisor_concern_threads_note_into_evaluation() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: Some(RoleHandle {
             adapter: supervisor,
             model: None,
@@ -1138,11 +1173,12 @@ async fn decompose_session_failure_surfaces_real_error() {
             adapter: conductor,
             model: None,
         },
-        workers: vec![CouncilMember {
-            label: "codex-worker".into(),
-            adapter: worker,
-            model: None,
-        }],
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
         supervisor: None,
         reviewer: None,
         arbiter: None,
