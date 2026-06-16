@@ -18,7 +18,8 @@ Named after the medical *consilium*: specialists from different fields gathering
 |---|---|---|
 | **M1 — Engine foundation** | CLI adapters, session manager, quota store, `doctor`/`run`/`quota` commands | ✅ Done — verified E2E |
 | **M2a — Deliberation** | `council` (anonymized peer review → chairman synthesis), `review` (diff audit with CI exit codes) | ✅ Done — verified on live providers |
-| **M2b — Execution** | `conduct` (conductor decomposes → workers edit real files → review gate → arbiter), `auto` pipeline, supervisor, quota-aware routing | ✅ Done — 125 tests, verified on live providers |
+| **M2b — Execution** | `conduct` (conductor decomposes → workers edit real files → review gate → arbiter), `auto` pipeline, supervisor, quota-aware routing | ✅ Done — verified on live providers |
+| **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — 151 tests, verified against a live model outage |
 | **M3 — Server & UI** | axum + WebSocket server, MCP attached mode, React web UI, quota dashboards | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
@@ -52,7 +53,41 @@ cargo run -q -- conduct "Add a CHANGELOG.md with a 0.1.0 entry"
 # check command (runs in a shell). Exit 1 if the run fails, is halted, or the
 # check fails.
 cargo run -q -- auto "Fix the typo in README.md" --check "cargo test"
+
+# Write a starter config you can edit, then probe which configured models are
+# actually reachable right now.
+cargo run -q -- init
+cargo run -q -- doctor --models
 ```
+
+## Resilience: model failover ladders
+
+Each role takes an ordered **ladder** of models, not one model. If the primary
+returns a model-unavailable error, Consilium demotes to the next rung — loudly —
+and marks the dead model so the rest of the run never retries it. A run never
+falls over because one model got pulled.
+
+```jsonc
+// consilium.config.json — `consilium init` writes a starter you can edit
+"conductor": {
+  "provider": "claude", "model": "claude-opus-4-8",
+  "fallbacks": [{ "provider": "claude", "model": "claude-sonnet-4-6" }]
+}
+```
+
+This is not hypothetical. When `claude-fable-5` was withdrawn, a `conduct` run
+with it as the conductor's primary recovered automatically:
+
+```
+↳ conductor fell back: claude/claude-fable-5 → claude/claude-opus-4-8 (model unavailable)
+↳ conductor fell back: claude/claude-fable-5 → claude/claude-opus-4-8 (known-dead)
+completed subtasks: [1]
+```
+
+Failure classification is per-provider and built from **real captured CLI error
+strings** — a rate-limited model is demoted but kept alive (it may recover);
+only a genuine model-unavailable error marks it dead for the run. Every demotion
+lands in the run transcript.
 
 Every deliberation writes a full JSON transcript to `~/.consilium/runs/` — including
 the anonymization map and per-reviewer scores, so you can audit who said what
