@@ -6,7 +6,7 @@ use consilium::config::ModelCandidate;
 use consilium::event::Provider;
 use consilium::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
-use consilium::orchestrator::resilience::Rung;
+use consilium::orchestrator::resilience::{ModelHealth, Rung};
 use consilium::quota::QuotaStore;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -99,7 +99,6 @@ fn store() -> QuotaStore {
 }
 
 /// Wrap a single adapter in a one-rung CouncilMember ladder.
-/// Task 6 will replace these with real multi-rung ladders.
 fn solo_worker(
     label: &str,
     provider: Provider,
@@ -116,6 +115,27 @@ fn solo_worker(
             adapter,
         }],
     }
+}
+
+/// Wrap a single adapter in a one-rung RoleHandle ladder.
+fn solo_role_handle(
+    provider: Provider,
+    model: &str,
+    adapter: Arc<dyn consilium::adapters::Adapter>,
+) -> RoleHandle {
+    RoleHandle {
+        ladder: vec![Rung {
+            candidate: ModelCandidate {
+                provider,
+                model: model.into(),
+            },
+            adapter,
+        }],
+    }
+}
+
+fn health() -> ModelHealth {
+    ModelHealth::new()
 }
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -146,10 +166,7 @@ async fn happy_path_single_subtask() {
     });
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -168,6 +185,7 @@ async fn happy_path_single_subtask() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -226,10 +244,7 @@ async fn rework_then_accept() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -248,6 +263,7 @@ async fn rework_then_accept() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -287,10 +303,7 @@ async fn rework_exhaustion_fails() {
     let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did thing"));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -309,6 +322,7 @@ async fn rework_exhaustion_fails() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -351,20 +365,14 @@ async fn supervisor_halt_aborts() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
             "gpt-4",
             worker.clone(),
         )],
-        supervisor: Some(RoleHandle {
-            adapter: supervisor,
-            model: None,
-        }),
+        supervisor: Some(solo_role_handle(Provider::Claude, "model", supervisor)),
         reviewer: None,
         arbiter: None,
     };
@@ -376,6 +384,7 @@ async fn supervisor_halt_aborts() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -403,14 +412,22 @@ async fn supervisor_halt_aborts() {
     assert_eq!(supervisor_entries[0]["status"], "halt");
 }
 
-// ─── Test 5: worker_failure_counts_as_attempt ──────────────────────────────
+// ─── Test 5: worker_all_rungs_failed_counts_as_attempt ────────────────────────
+// A single-rung worker that always fails exhausts all rungs (run_with_failover
+// retries Transient once; both attempts fail → Err). conduct treats that Err as
+// a rework attempt. On the second conduct-loop iteration (attempt_num=1) the
+// same worker's single rung now succeeds (SequencedAdapter advanced past the
+// two failing responses used internally by the transient-retry), so the subtask
+// eventually completes.
 
 #[tokio::test]
 async fn worker_failure_counts_as_attempt() {
     let repo = temp_repo();
     let quota = store();
 
-    // Conductor: plan → accept (after worker failure + retry)
+    // Conductor: plan → accept (after worker all-rungs-failed is treated as
+    // a rework attempt; second loop iteration uses the same worker which now
+    // succeeds).
     let conductor = Arc::new(SequencedAdapter::new(
         Provider::Claude,
         vec![
@@ -422,11 +439,16 @@ async fn worker_failure_counts_as_attempt() {
         ],
     ));
 
-    // Worker: step 0 fails, step 1 succeeds and creates the file
+    // Worker: steps 0 and 1 fail (Transient → retry uses step 1 → still fails
+    // → all 1 rung exhausted → Err). Step 2 succeeds and creates the file.
+    // Conduct attempt_num=0: internal call 1 → step 0 fail, retry → step 1 fail
+    //   → Err → rework attempt recorded in transcript.
+    // Conduct attempt_num=1: internal call 1 → step 2 (ok) → succeeds.
     let worker = Arc::new(SequencedAdapter::new(
         Provider::Codex,
         vec![
-            ScriptedAdapter::failing(Provider::Codex, "worker error: quota exceeded"),
+            ScriptedAdapter::failing(Provider::Codex, "worker error: transient1"),
+            ScriptedAdapter::failing(Provider::Codex, "worker error: transient2"),
             ScriptedAdapter {
                 pre_script: "echo 'recovered' > recovered.txt".into(),
                 ..ScriptedAdapter::ok_with_text(Provider::Codex, "recovered successfully")
@@ -435,10 +457,7 @@ async fn worker_failure_counts_as_attempt() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -457,6 +476,7 @@ async fn worker_failure_counts_as_attempt() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -464,14 +484,14 @@ async fn worker_failure_counts_as_attempt() {
     assert_eq!(outcome.completed, vec![1]);
     assert!(outcome.failed.is_none());
 
-    // Transcript: 2 attempts; first attempt feedback contains the worker error
+    // Transcript: 2 attempts; first attempt feedback records the all-rungs-failed error
     let entries = outcome.transcript["subtasks"].as_array().unwrap();
     let attempts = entries[0]["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 2);
     let first_feedback = attempts[0]["feedback"].as_str().unwrap_or("");
     assert!(
-        first_feedback.contains("quota exceeded") || first_feedback.contains("worker error"),
-        "first attempt feedback should contain the worker error, got: {first_feedback}"
+        first_feedback.contains("failed"),
+        "first attempt feedback should record the worker failure, got: {first_feedback}"
     );
 }
 
@@ -499,10 +519,7 @@ async fn capture_failure_propagates_as_error() {
     });
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -521,6 +538,7 @@ async fn capture_failure_propagates_as_error() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await;
 
@@ -569,10 +587,7 @@ async fn two_subtasks_complete_in_order() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -591,6 +606,7 @@ async fn two_subtasks_complete_in_order() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -645,10 +661,7 @@ async fn fail_on_second_preserves_first() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -667,6 +680,7 @@ async fn fail_on_second_preserves_first() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -738,10 +752,7 @@ async fn critical_review_forces_rework() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -749,10 +760,7 @@ async fn critical_review_forces_rework() {
             worker.clone(),
         )],
         supervisor: None,
-        reviewer: Some(RoleHandle {
-            adapter: reviewer,
-            model: None,
-        }),
+        reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
         arbiter: None,
     };
 
@@ -763,6 +771,7 @@ async fn critical_review_forces_rework() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -828,10 +837,7 @@ async fn arbiter_ships_on_exhaustion() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -839,14 +845,8 @@ async fn arbiter_ships_on_exhaustion() {
             worker.clone(),
         )],
         supervisor: None,
-        reviewer: Some(RoleHandle {
-            adapter: reviewer,
-            model: None,
-        }),
-        arbiter: Some(RoleHandle {
-            adapter: arbiter,
-            model: None,
-        }),
+        reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
+        arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
     };
 
     let outcome = run_conduct(
@@ -856,6 +856,7 @@ async fn arbiter_ships_on_exhaustion() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -913,10 +914,7 @@ async fn arbiter_fails_on_exhaustion() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -924,14 +922,8 @@ async fn arbiter_fails_on_exhaustion() {
             worker.clone(),
         )],
         supervisor: None,
-        reviewer: Some(RoleHandle {
-            adapter: reviewer,
-            model: None,
-        }),
-        arbiter: Some(RoleHandle {
-            adapter: arbiter,
-            model: None,
-        }),
+        reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
+        arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
     };
 
     let outcome = run_conduct(
@@ -941,6 +933,7 @@ async fn arbiter_fails_on_exhaustion() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -985,20 +978,14 @@ async fn supervisor_ok_does_not_interfere() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
             "gpt-4",
             worker.clone(),
         )],
-        supervisor: Some(RoleHandle {
-            adapter: supervisor,
-            model: None,
-        }),
+        supervisor: Some(solo_role_handle(Provider::Claude, "model", supervisor)),
         reviewer: None,
         arbiter: None,
     };
@@ -1010,6 +997,7 @@ async fn supervisor_ok_does_not_interfere() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -1105,20 +1093,14 @@ async fn supervisor_concern_threads_note_into_evaluation() {
     ));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
             "gpt-4",
             worker.clone(),
         )],
-        supervisor: Some(RoleHandle {
-            adapter: supervisor,
-            model: None,
-        }),
+        supervisor: Some(solo_role_handle(Provider::Claude, "model", supervisor)),
         reviewer: None,
         arbiter: None,
     };
@@ -1130,6 +1112,7 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         &quota,
         repo.path().to_path_buf(),
         TIMEOUT,
+        &health(),
     )
     .await
     .unwrap();
@@ -1169,10 +1152,7 @@ async fn decompose_session_failure_surfaces_real_error() {
     let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "unused"));
 
     let deps = ConductDeps {
-        conductor: RoleHandle {
-            adapter: conductor,
-            model: None,
-        },
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
         workers: vec![solo_worker(
             "codex-worker",
             Provider::Codex,
@@ -1184,12 +1164,105 @@ async fn decompose_session_failure_surfaces_real_error() {
         arbiter: None,
     };
 
-    let err = run_conduct("t", "", deps, &quota, repo.path().to_path_buf(), TIMEOUT)
-        .await
-        .unwrap_err();
+    let err = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap_err();
     let msg = err.to_string();
+    // With failover, a single-rung conductor whose only rung fails produces:
+    // "conductor: all N model rungs failed: ..."
+    // The important invariant: NOT "conductor produced no plan" (the model failure
+    // is a real infrastructure error, not a parse failure).
     assert!(
-        msg.contains("conductor decompose failed"),
-        "expected decompose-failure message, got: {msg}"
+        msg.contains("conductor") && msg.contains("failed"),
+        "expected a conductor-failure message, got: {msg}"
+    );
+    assert!(
+        !msg.contains("produced no plan"),
+        "infra failure must not masquerade as 'no plan', got: {msg}"
+    );
+}
+
+// ─── conduct_worker_falls_back: worker's primary model is dead, ladder recovers ─
+
+#[tokio::test]
+async fn conduct_worker_falls_back() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor: plan (1 subtask) then accept.
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "create file", "create out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    // Worker ladder: rung 0 = a dead model (ModelUnavailable), rung 1 = writes the file.
+    let dead_rung = Rung {
+        candidate: ModelCandidate {
+            provider: Provider::Claude,
+            model: "claude-fable-5".into(),
+        },
+        adapter: Arc::new(ScriptedAdapter::failing(
+            Provider::Claude,
+            "There's an issue with the selected model (claude-fable-5). It may not exist or you may not have access to it.",
+        )),
+    };
+    let live_rung = Rung {
+        candidate: ModelCandidate {
+            provider: Provider::Claude,
+            model: "claude-opus-4-8".into(),
+        },
+        adapter: Arc::new(ScriptedAdapter {
+            pre_script: "echo 'hello' > out.txt".into(),
+            ..ScriptedAdapter::ok_with_text(Provider::Claude, "created out.txt")
+        }),
+    };
+    let worker = CouncilMember {
+        label: "claude-worker".into(),
+        ladder: vec![dead_rung, live_rung],
+    };
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "claude-opus-4-8", conductor),
+        workers: vec![worker],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+    };
+
+    let outcome = run_conduct(
+        "create a file",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    assert!(
+        repo.path().join("out.txt").exists(),
+        "fallback model should have created out.txt"
+    );
+    let fallbacks = outcome.transcript["fallbacks"].as_array().unwrap();
+    assert!(
+        !fallbacks.is_empty(),
+        "a worker model-unavailable demotion should be recorded in transcript fallbacks"
     );
 }

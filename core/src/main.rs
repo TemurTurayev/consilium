@@ -299,6 +299,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             use consilium::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
             use consilium::orchestrator::council::CouncilMember;
+            use consilium::orchestrator::resilience::ModelHealth;
             use consilium::orchestrator::{roles, transcript::TranscriptStore};
 
             let config = consilium::config::Config::load(Some(std::path::Path::new(
@@ -318,23 +319,20 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .collect();
 
+            let health = ModelHealth::new();
             let deps = ConductDeps {
                 conductor: RoleHandle {
-                    adapter: roles::adapter_for(&config.roles.conductor),
-                    model: Some(config.roles.conductor.model.clone()),
+                    ladder: roles::resolve_ladder(&config.roles.conductor),
                 },
                 workers,
                 supervisor: Some(RoleHandle {
-                    adapter: roles::adapter_for(&config.roles.supervisor),
-                    model: Some(config.roles.supervisor.model.clone()),
+                    ladder: roles::resolve_ladder(&config.roles.supervisor),
                 }),
                 reviewer: Some(RoleHandle {
-                    adapter: roles::adapter_for(&config.roles.reviewer),
-                    model: Some(config.roles.reviewer.model.clone()),
+                    ladder: roles::resolve_ladder(&config.roles.reviewer),
                 }),
                 arbiter: Some(RoleHandle {
-                    adapter: roles::adapter_for(&config.roles.chairman),
-                    model: Some(config.roles.chairman.model.clone()),
+                    ladder: roles::resolve_ladder(&config.roles.chairman),
                 }),
             };
 
@@ -346,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
                 &store,
                 cwd,
                 std::time::Duration::from_secs(timeout),
+                &health,
             )
             .await?;
             let path = transcripts.save("conduct", &outcome.transcript)?;
@@ -356,6 +355,21 @@ async fn main() -> anyhow::Result<()> {
             }
             if let Some(ref reason) = outcome.failed {
                 println!("failed: {reason}");
+            }
+            // Print any model fallbacks that occurred during the conduct run.
+            let fallbacks = outcome.transcript["fallbacks"].as_array();
+            if let Some(fbs) = fallbacks {
+                if !fbs.is_empty() {
+                    println!("\n(model fallbacks: {})", fbs.len());
+                    for fb in fbs {
+                        println!(
+                            "  ↳ {} → {} ({})",
+                            fb["from"].as_str().unwrap_or("?"),
+                            fb["to"].as_str().unwrap_or("?"),
+                            fb["reason"].as_str().unwrap_or("?"),
+                        );
+                    }
+                }
             }
             println!("transcript: {}", path.display());
 
@@ -406,27 +420,22 @@ async fn main() -> anyhow::Result<()> {
             let deps = AutoDeps {
                 conduct: ConductDeps {
                     conductor: RoleHandle {
-                        adapter: roles::adapter_for(&config.roles.conductor),
-                        model: Some(config.roles.conductor.model.clone()),
+                        ladder: roles::resolve_ladder(&config.roles.conductor),
                     },
                     workers,
                     supervisor: Some(RoleHandle {
-                        adapter: roles::adapter_for(&config.roles.supervisor),
-                        model: Some(config.roles.supervisor.model.clone()),
+                        ladder: roles::resolve_ladder(&config.roles.supervisor),
                     }),
                     reviewer: Some(RoleHandle {
-                        adapter: roles::adapter_for(&config.roles.reviewer),
-                        model: Some(config.roles.reviewer.model.clone()),
+                        ladder: roles::resolve_ladder(&config.roles.reviewer),
                     }),
                     arbiter: Some(RoleHandle {
-                        adapter: roles::adapter_for(&config.roles.chairman),
-                        model: Some(config.roles.chairman.model.clone()),
+                        ladder: roles::resolve_ladder(&config.roles.chairman),
                     }),
                 },
                 council_members,
                 chairman: RoleHandle {
-                    adapter: roles::adapter_for(&config.roles.chairman),
-                    model: Some(config.roles.chairman.model.clone()),
+                    ladder: roles::resolve_ladder(&config.roles.chairman),
                 },
             };
 
@@ -466,6 +475,21 @@ async fn main() -> anyhow::Result<()> {
                 println!("check: {}", if passed { "passed" } else { "FAILED" });
                 if !output.is_empty() {
                     println!("check output:\n{output}");
+                }
+            }
+            // Print any model fallbacks that occurred during the auto run.
+            let fallbacks = outcome.transcript["fallbacks"].as_array();
+            if let Some(fbs) = fallbacks {
+                if !fbs.is_empty() {
+                    println!("\n(model fallbacks: {})", fbs.len());
+                    for fb in fbs {
+                        println!(
+                            "  ↳ {} → {} ({})",
+                            fb["from"].as_str().unwrap_or("?"),
+                            fb["to"].as_str().unwrap_or("?"),
+                            fb["reason"].as_str().unwrap_or("?"),
+                        );
+                    }
                 }
             }
             println!("transcript: {}", path.display());

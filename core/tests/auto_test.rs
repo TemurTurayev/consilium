@@ -81,6 +81,23 @@ fn solo_worker(
     }
 }
 
+/// Wrap a single adapter in a one-rung RoleHandle ladder.
+fn solo_role_handle(
+    provider: Provider,
+    model: &str,
+    adapter: Arc<dyn consilium::adapters::Adapter>,
+) -> RoleHandle {
+    RoleHandle {
+        ladder: vec![Rung {
+            candidate: ModelCandidate {
+                provider,
+                model: model.into(),
+            },
+            adapter,
+        }],
+    }
+}
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 // ─── Test 1: trivial_skips_council ───────────────────────────────────────────
@@ -117,10 +134,7 @@ async fn trivial_skips_council() {
 
     let deps = AutoDeps {
         conduct: ConductDeps {
-            conductor: RoleHandle {
-                adapter: conductor,
-                model: None,
-            },
+            conductor: solo_role_handle(Provider::Claude, "claude-opus-4-8", conductor),
             workers: vec![solo_worker(
                 "codex-worker",
                 Provider::Codex,
@@ -137,13 +151,14 @@ async fn trivial_skips_council() {
             "gpt-4",
             Arc::new(bad_council_member),
         )],
-        chairman: RoleHandle {
-            adapter: std::sync::Arc::new(ScriptedAdapter::failing(
+        chairman: solo_role_handle(
+            Provider::Claude,
+            "claude-opus-4-8",
+            std::sync::Arc::new(ScriptedAdapter::failing(
                 Provider::Claude,
                 "chairman should not be called",
             )),
-            model: None,
-        },
+        ),
     };
 
     let outcome = run_auto(
@@ -208,10 +223,7 @@ async fn standard_runs_council_then_conduct() {
 
     let deps = AutoDeps {
         conduct: ConductDeps {
-            conductor: RoleHandle {
-                adapter: conductor,
-                model: None,
-            },
+            conductor: solo_role_handle(Provider::Claude, "claude-opus-4-8", conductor),
             workers: vec![solo_worker(
                 "codex-worker",
                 Provider::Codex,
@@ -228,10 +240,7 @@ async fn standard_runs_council_then_conduct() {
             "claude-opus",
             council_member_adapter,
         )],
-        chairman: RoleHandle {
-            adapter: chairman_adapter,
-            model: None,
-        },
+        chairman: solo_role_handle(Provider::Claude, "claude-opus-4-8", chairman_adapter),
     };
 
     let outcome = run_auto(
@@ -283,10 +292,7 @@ async fn check_command_failure_reported() {
 
     let deps = AutoDeps {
         conduct: ConductDeps {
-            conductor: RoleHandle {
-                adapter: conductor,
-                model: None,
-            },
+            conductor: solo_role_handle(Provider::Claude, "claude-opus-4-8", conductor),
             workers: vec![solo_worker(
                 "codex-worker",
                 Provider::Codex,
@@ -298,13 +304,14 @@ async fn check_command_failure_reported() {
             arbiter: None,
         },
         council_members: vec![],
-        chairman: RoleHandle {
-            adapter: std::sync::Arc::new(ScriptedAdapter::ok_with_text(
+        chairman: solo_role_handle(
+            Provider::Claude,
+            "claude-opus-4-8",
+            std::sync::Arc::new(ScriptedAdapter::ok_with_text(
                 Provider::Claude,
                 "chairman not called for trivial",
             )),
-            model: None,
-        },
+        ),
     };
 
     let outcome = run_auto(
@@ -353,10 +360,7 @@ async fn check_command_success() {
 
     let deps = AutoDeps {
         conduct: ConductDeps {
-            conductor: RoleHandle {
-                adapter: conductor,
-                model: None,
-            },
+            conductor: solo_role_handle(Provider::Claude, "claude-opus-4-8", conductor),
             workers: vec![solo_worker(
                 "codex-worker",
                 Provider::Codex,
@@ -368,13 +372,14 @@ async fn check_command_success() {
             arbiter: None,
         },
         council_members: vec![],
-        chairman: RoleHandle {
-            adapter: std::sync::Arc::new(ScriptedAdapter::ok_with_text(
+        chairman: solo_role_handle(
+            Provider::Claude,
+            "claude-opus-4-8",
+            std::sync::Arc::new(ScriptedAdapter::ok_with_text(
                 Provider::Claude,
                 "chairman not called for trivial",
             )),
-            model: None,
-        },
+        ),
     };
 
     let outcome = run_auto(

@@ -1,11 +1,9 @@
 //! Auto pipeline: triage → (optional council) → conduct → (optional check command).
 
 use crate::adapters::RunRequest;
-use crate::config::ModelCandidate;
 use crate::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use crate::orchestrator::council::{run_council, CouncilMember};
-use crate::orchestrator::resilience::{ModelHealth, Rung};
-use crate::orchestrator::runner::run_to_completion;
+use crate::orchestrator::resilience::{run_with_failover, ModelHealth};
 use crate::quota::QuotaStore;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,6 +11,7 @@ use std::time::Duration;
 pub struct AutoDeps {
     pub conduct: ConductDeps,
     pub council_members: Vec<CouncilMember>,
+    /// Chairman for council synthesis — a ladder-bearing RoleHandle.
     pub chairman: RoleHandle,
 }
 
@@ -27,12 +26,15 @@ pub struct AutoOutcome {
 
 /// Full auto pipeline:
 ///
-/// 1. Triage the task via the conductor adapter (advisory, advisory parse fail-safe → standard).
+/// 1. Triage the task via the conductor's ladder (advisory, fail-safe → standard).
 /// 2. Trivial → `run_conduct(task, "", ...)` directly.
 ///    Standard → `run_council` for planning synthesis → `run_conduct(task, &synthesis, ...)`.
 /// 3. If fully completed (no halted, no failed) and `check_command` is Some:
 ///    run `sh -c <cmd>` in cwd (std::process), capture exit code + last ~2 KiB of output.
 /// 4. Build a composed transcript.
+///
+/// ONE `ModelHealth` is created here and threaded into both `run_council` and
+/// `run_conduct`, so a model that dies during planning is skipped during execution.
 pub async fn run_auto(
     task: &str,
     deps: AutoDeps,
@@ -44,42 +46,41 @@ pub async fn run_auto(
     use super::conduct::parse_triage;
     use super::prompts;
 
-    // ── 1. Triage ────────────────────────────────────────────────────────────
-    // Clone the conductor adapter+model out of deps.conduct BEFORE conduct
-    // consumes deps.conduct. (An Arc clone is O(1) and borrow-checker-safe.)
-    let triage_adapter = deps.conduct.conductor.adapter.clone();
-    let triage_model = deps.conduct.conductor.model.clone();
-
-    // Build a single-rung chairman ladder from the RoleHandle for council.
-    // Task 6 will replace this with a real multi-rung ladder from resolve_ladder.
-    let chairman_provider = deps.chairman.adapter.provider();
-    let chairman_model_str = deps
-        .chairman
-        .model
-        .clone()
-        .unwrap_or_else(|| "default".into());
-    let chairman_ladder: Vec<Rung> = vec![Rung {
-        candidate: ModelCandidate {
-            provider: chairman_provider,
-            model: chairman_model_str,
-        },
-        adapter: deps.chairman.adapter.clone(),
-    }];
+    // ONE ModelHealth for the entire auto run (planning + execution share it).
     let health = ModelHealth::new();
 
-    let triage_req = RunRequest {
-        prompt: prompts::auto_triage(task),
-        model: triage_model,
-        cwd: cwd.clone(),
-        advisory: true,
-        write: false,
+    // ── 1. Triage ────────────────────────────────────────────────────────────
+    // Use the conductor's ladder (the same one conduct will use for decompose).
+    // Borrow the conductor ladder reference before deps.conduct is moved.
+    let triage_fo = {
+        let prompt = prompts::auto_triage(task);
+        let cwd2 = cwd.clone();
+        run_with_failover(
+            &deps.conduct.conductor.ladder,
+            "triage",
+            move |model| RunRequest {
+                prompt: prompt.clone(),
+                model,
+                cwd: cwd2.clone(),
+                advisory: true,
+                write: false,
+            },
+            quota,
+            &health,
+            timeout,
+        )
+        .await?
     };
-    let triage_out = run_to_completion(triage_adapter, triage_req, quota, timeout).await?;
+    // Triage fallbacks are composed into the auto transcript below.
+    let triage_fallbacks = triage_fo.fallbacks;
 
     // Fail-safe: if triage output doesn't parse, default to standard (full pipeline).
-    let trivial = parse_triage(&triage_out.final_text)
+    let trivial = parse_triage(&triage_fo.outcome.final_text)
         .map(|t| t.is_trivial())
         .unwrap_or(false);
+
+    // chairman ladder comes from deps.chairman.ladder (RoleHandle → ladder).
+    let chairman_ladder = deps.chairman.ladder;
 
     // ── 2. Council (standard only) → conduct ─────────────────────────────────
     let (context, council_synthesis, council_transcript) = if trivial {
@@ -103,8 +104,16 @@ pub async fn run_auto(
         (synthesis.clone(), Some(synthesis), council_tx)
     };
 
-    let conduct_outcome =
-        run_conduct(task, &context, deps.conduct, quota, cwd.clone(), timeout).await?;
+    let conduct_outcome = run_conduct(
+        task,
+        &context,
+        deps.conduct,
+        quota,
+        cwd.clone(),
+        timeout,
+        &health,
+    )
+    .await?;
 
     // ── 3. Optional check command ─────────────────────────────────────────────
     let check = if conduct_outcome.halted.is_none()
@@ -132,6 +141,22 @@ pub async fn run_auto(
     };
 
     // ── 4. Transcript ─────────────────────────────────────────────────────────
+    // Compose run-wide fallbacks: triage + council (in council transcript) +
+    // conduct. The council's fallbacks are already in council_transcript["fallbacks"].
+    // For the auto-level "fallbacks" array we surface triage + conduct fallbacks
+    // (council fallbacks are accessible nested in council_transcript).
+    let conduct_fallbacks = conduct_outcome
+        .transcript
+        .get("fallbacks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut auto_fallbacks: Vec<serde_json::Value> = triage_fallbacks
+        .iter()
+        .map(|fb| serde_json::json!({"from": fb.from, "to": fb.to, "reason": fb.reason}))
+        .collect();
+    auto_fallbacks.extend(conduct_fallbacks);
+
     let transcript = serde_json::json!({
         "kind": "auto",
         "task": task,
@@ -139,6 +164,7 @@ pub async fn run_auto(
         "council_synthesis": council_synthesis,
         "council": council_transcript,
         "conduct": conduct_outcome.transcript,
+        "fallbacks": auto_fallbacks,
         "check": check.as_ref().map(|(passed, output)| serde_json::json!({
             "passed": passed,
             "output": output,

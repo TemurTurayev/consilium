@@ -1,14 +1,13 @@
 //! Conduct contracts: structs, parsers, and orchestration (`run_conduct`).
 
-use crate::adapters::{Adapter, RunRequest};
+use crate::adapters::RunRequest;
 use crate::orchestrator::changes::capture_changes;
 use crate::orchestrator::council::CouncilMember;
+use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
 use crate::orchestrator::routing::pick_worker_by_provider;
-use crate::orchestrator::runner::{run_to_completion, RunStatus};
 use crate::quota::QuotaStore;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
@@ -153,15 +152,16 @@ pub fn parse_arbiter(text: &str) -> Option<ArbiterVerdict> {
 
 // ─── Orchestration contracts ─────────────────────────────────────────────────
 
+/// A role's failover ladder: one or more (candidate, adapter) rungs, primary
+/// first. Every model call goes through `run_with_failover` over this ladder.
 pub struct RoleHandle {
-    pub adapter: Arc<dyn Adapter>,
-    pub model: Option<String>,
+    pub ladder: Vec<Rung>,
 }
 
 pub struct ConductDeps {
     pub conductor: RoleHandle,
-    /// Workers available for routing. Reuses the label/adapter/model triple from
-    /// the council module — no new type needed.
+    /// Workers available for routing. Reuses the label/ladder triple from the
+    /// council module — no new type needed.
     pub workers: Vec<CouncilMember>,
     pub supervisor: Option<RoleHandle>,
     pub reviewer: Option<RoleHandle>,
@@ -188,11 +188,15 @@ pub const MAX_REWORKS: u32 = 2;
 /// 1. Decompose: conductor (advisory) calls `conduct_decompose` → parse plan.
 /// 2. For each subtask sequentially:
 ///    a. Route to least-loaded worker via `pick_worker_by_provider`.
-///    b. Worker session (write:true, advisory:false).
+///    b. Worker session (write:true, advisory:false) via run_with_failover.
 ///    c. `capture_changes` on cwd.
 ///    d. Supervisor gate (if configured) — Halt aborts the run.
 ///    e. Conductor evaluation (advisory) — Accept / Rework / Fail.
-///    f. Rework: re-prompt worker (up to MAX_REWORKS); worker Failed/TimedOut counts as a rework attempt.
+///    f. Rework: re-prompt worker (up to MAX_REWORKS); all-rungs-fail on the
+///       worker counts as a rework attempt.
+///
+/// All model calls go through `run_with_failover` with the shared `health`
+/// registry, so a model that dies during planning is skipped during execution.
 pub async fn run_conduct(
     task: &str,
     context: &str,
@@ -200,36 +204,46 @@ pub async fn run_conduct(
     quota: &QuotaStore,
     cwd: PathBuf,
     timeout: Duration,
+    health: &ModelHealth,
 ) -> anyhow::Result<ConductOutcome> {
     use super::prompts;
 
-    // ── extract owned handles so we can move them into async blocks freely ──
-    let conductor_adapter = deps.conductor.adapter.clone();
-    let conductor_model = deps.conductor.model.clone();
+    // ── extract owned handles ─────────────────────────────────────────────────
+    let conductor_ladder = deps.conductor.ladder;
     let supervisor = deps.supervisor;
     let reviewer = deps.reviewer;
     let arbiter = deps.arbiter;
     let workers = deps.workers;
 
+    // Accumulate all run-wide fallbacks for the transcript.
+    let mut all_fallbacks: Vec<Fallback> = Vec::new();
+
     // ── Step 1: decompose ────────────────────────────────────────────────────
-    let decompose_req = RunRequest {
-        prompt: prompts::conduct_decompose(task, context),
-        model: conductor_model.clone(),
-        cwd: cwd.clone(),
-        advisory: true,
-        write: false,
+    // run_with_failover bails when ALL rungs fail — that IS the infra-failure
+    // case. On Ok, the outcome is always Completed (failover only returns on
+    // success). So we propagate the Err directly via `?` and then check for an
+    // unparseable (but technically Completed) plan separately.
+    let decompose_fo = {
+        let prompt = prompts::conduct_decompose(task, context);
+        let cwd2 = cwd.clone();
+        run_with_failover(
+            &conductor_ladder,
+            "conductor",
+            move |model| RunRequest {
+                prompt: prompt.clone(),
+                model,
+                cwd: cwd2.clone(),
+                advisory: true,
+                write: false,
+            },
+            quota,
+            health,
+            timeout,
+        )
+        .await?
     };
-    let decompose_out =
-        run_to_completion(conductor_adapter.clone(), decompose_req, quota, timeout).await?;
-    // Distinguish an infrastructure failure (model 404, timeout) from a
-    // completed-but-unparseable plan — otherwise a dead conductor masquerades as
-    // "produced no plan" and the real cause (e.g. an inaccessible model) is lost.
-    match &decompose_out.status {
-        RunStatus::Completed => {}
-        RunStatus::Failed(e) => anyhow::bail!("conductor decompose failed: {e}"),
-        RunStatus::TimedOut => anyhow::bail!("conductor decompose timed out"),
-    }
-    let plan = parse_plan(&decompose_out.final_text)
+    all_fallbacks.extend(decompose_fo.fallbacks);
+    let plan = parse_plan(&decompose_fo.outcome.final_text)
         .filter(|p| !p.subtasks.is_empty())
         .ok_or_else(|| anyhow::anyhow!("conductor produced no plan"))?;
 
@@ -245,15 +259,13 @@ pub async fn run_conduct(
     let mut failed: Option<String> = None;
     let mut subtask_entries: Vec<serde_json::Value> = Vec::new();
 
-    // Worker providers for routing (stable slice across the loop).
-    // Use the primary (first) rung of each worker's ladder for routing.
-    // Task 6 will replace run_to_completion here with run_with_failover.
+    // Worker providers for routing: use the primary (first) rung's provider.
     let worker_providers: Vec<crate::event::Provider> = workers
         .iter()
         .map(|w| {
             w.ladder
                 .first()
-                .map(|r| r.adapter.provider())
+                .map(|r| r.candidate.provider)
                 .unwrap_or(crate::event::Provider::Claude)
         })
         .collect();
@@ -272,35 +284,40 @@ pub async fn run_conduct(
             let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
             let worker = &workers[worker_idx];
 
-            // ── 2b: worker session ──────────────────────────────────────────
-            // Use the primary rung of the worker's ladder.
-            // Task 6 will replace this with run_with_failover over the full ladder.
-            let (worker_adapter, worker_model) = worker
-                .ladder
-                .first()
-                .map(|r| (r.adapter.clone(), Some(r.candidate.model.clone())))
-                .unwrap_or_else(|| unreachable!("worker ladder must be non-empty"));
-            let worker_req = RunRequest {
-                prompt: current_prompt.clone(),
-                model: worker_model,
-                cwd: cwd.clone(),
-                advisory: false,
-                write: true,
+            // ── 2b: worker session via failover ─────────────────────────────
+            // run_with_failover returns Err only when ALL rungs fail — treat
+            // that as a worker-failed-attempt (feedback = the error message).
+            let worker_label = worker.label.clone();
+            let worker_result = {
+                let prompt = current_prompt.clone();
+                let cwd2 = cwd.clone();
+                run_with_failover(
+                    &worker.ladder,
+                    &worker_label,
+                    move |model| RunRequest {
+                        prompt: prompt.clone(),
+                        model,
+                        cwd: cwd2.clone(),
+                        advisory: false,
+                        write: true,
+                    },
+                    quota,
+                    health,
+                    timeout,
+                )
+                .await
             };
-            let worker_out = run_to_completion(worker_adapter, worker_req, quota, timeout).await?;
 
-            // Worker failure counts as a rework attempt.
-            let (worker_text, worker_failed_msg) = match &worker_out.status {
-                RunStatus::Completed => (worker_out.final_text.clone(), None),
-                RunStatus::Failed(e) => (String::new(), Some(e.clone())),
-                RunStatus::TimedOut => (String::new(), Some("worker timed out".to_string())),
+            let (worker_text, worker_failed_msg) = match worker_result {
+                Ok(fo) => {
+                    all_fallbacks.extend(fo.fallbacks);
+                    (fo.outcome.final_text, None)
+                }
+                Err(e) => (String::new(), Some(e.to_string())),
             };
 
             if let Some(err_msg) = worker_failed_msg {
-                // Record this as a rework-attempt entry. `worker` lives on the
-                // attempt (not the subtask, as the plan sketched) because
-                // routing is per-attempt — each retry may land on a different
-                // worker.
+                // All worker rungs failed — counts as a rework attempt.
                 attempts.push(serde_json::json!({
                     "attempt": attempt_num,
                     "worker": worker.label,
@@ -328,9 +345,7 @@ pub async fn run_conduct(
             }
 
             // ── 2c: capture changes ─────────────────────────────────────────
-            // Capture failure is an infrastructure fault (e.g. cwd is no longer
-            // a git repo), not worker-quality feedback — propagate loudly rather
-            // than burning the rework budget on guaranteed-futile attempts.
+            // Capture failure is an infrastructure fault — propagate loudly.
             let changes = capture_changes(&cwd)?;
             previous_changes = changes.clone();
 
@@ -338,19 +353,31 @@ pub async fn run_conduct(
             let supervisor_note: Option<String>;
             if let Some(ref sup) = supervisor {
                 let progress = build_progress(&completed, subtask, &changes);
-                let sup_req = RunRequest {
-                    prompt: prompts::supervisor_gate(task, &progress),
-                    model: sup.model.clone(),
-                    cwd: cwd.clone(),
-                    advisory: true,
-                    write: false,
+                let fo = {
+                    let prompt = prompts::supervisor_gate(task, &progress);
+                    let cwd2 = cwd.clone();
+                    run_with_failover(
+                        &sup.ladder,
+                        "supervisor",
+                        move |model| RunRequest {
+                            prompt: prompt.clone(),
+                            model,
+                            cwd: cwd2.clone(),
+                            advisory: true,
+                            write: false,
+                        },
+                        quota,
+                        health,
+                        timeout,
+                    )
+                    .await?
                 };
-                let sup_out =
-                    run_to_completion(sup.adapter.clone(), sup_req, quota, timeout).await?;
-                let verdict = parse_supervisor(&sup_out.final_text).unwrap_or(SupervisorVerdict {
-                    status: SupervisorStatus::Concern,
-                    note: "supervisor output unparseable".to_string(),
-                });
+                all_fallbacks.extend(fo.fallbacks);
+                let verdict =
+                    parse_supervisor(&fo.outcome.final_text).unwrap_or(SupervisorVerdict {
+                        status: SupervisorStatus::Concern,
+                        note: "supervisor output unparseable".to_string(),
+                    });
 
                 supervisor_entries.push(serde_json::json!({
                     "status": status_str(&verdict.status),
@@ -380,29 +407,36 @@ pub async fn run_conduct(
             }
 
             // ── 2e: conductor evaluation ────────────────────────────────────
-            let eval_req = RunRequest {
-                prompt: prompts::conduct_evaluation(
+            // run_with_failover Err means all conductor rungs are dead.
+            let eval_fo = {
+                let prompt = prompts::conduct_evaluation(
                     &subtask.prompt,
                     &changes,
                     &worker_text,
                     supervisor_note.as_deref(),
-                ),
-                model: conductor_model.clone(),
-                cwd: cwd.clone(),
-                advisory: true,
-                write: false,
+                );
+                let cwd2 = cwd.clone();
+                run_with_failover(
+                    &conductor_ladder,
+                    "conductor",
+                    move |model| RunRequest {
+                        prompt: prompt.clone(),
+                        model,
+                        cwd: cwd2.clone(),
+                        advisory: true,
+                        write: false,
+                    },
+                    quota,
+                    health,
+                    timeout,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("conductor evaluation failed: {e}"))?
             };
-            let eval_out =
-                run_to_completion(conductor_adapter.clone(), eval_req, quota, timeout).await?;
-            // A conductor infra failure must bail, not charge the worker's
-            // rework budget — only a Completed evaluation gets parsed.
-            match &eval_out.status {
-                RunStatus::Completed => {}
-                RunStatus::Failed(e) => anyhow::bail!("conductor evaluation failed: {e}"),
-                RunStatus::TimedOut => anyhow::bail!("conductor evaluation timed out"),
-            }
+            all_fallbacks.extend(eval_fo.fallbacks);
+
             // Fail-safe: unparseable evaluation → Rework (never silent accept).
-            let evaluation = parse_evaluation(&eval_out.final_text).unwrap_or(Evaluation {
+            let evaluation = parse_evaluation(&eval_fo.outcome.final_text).unwrap_or(Evaluation {
                 decision: EvalDecision::Rework,
                 feedback: "evaluation output unparseable".to_string(),
             });
@@ -426,18 +460,18 @@ pub async fn run_conduct(
                 EvalDecision::Accept => {
                     // ── 2f: review gate (if configured, advisory) ───────────
                     if let Some(ref rev) = reviewer {
-                        let review_result = super::review::run_review(
+                        let (review_result, rev_fallbacks) = super::review::run_review_ladder(
                             &changes,
-                            rev.adapter.clone(),
-                            rev.model.clone(),
+                            &rev.ladder,
+                            health,
                             quota,
                             cwd.clone(),
                             timeout,
                         )
                         .await?;
+                        all_fallbacks.extend(rev_fallbacks);
 
-                        // Determine whether review blocks: critical findings OR
-                        // unparseable verdict (fail-closed, consistent with CLI gate).
+                        // Determine whether review blocks.
                         let review_blocks = match &review_result.verdict {
                             Some(v) => v.has_critical(),
                             None => true, // unparseable → fail-closed
@@ -456,7 +490,6 @@ pub async fn run_conduct(
                             None => "reviewer output unparseable".to_string(),
                         };
 
-                        // Record review outcome in the attempt entry (already pushed above).
                         let review_status = if review_result.verdict.is_none() {
                             "unparseable"
                         } else if review_blocks {
@@ -478,31 +511,36 @@ pub async fn run_conduct(
                             if attempt_num >= MAX_REWORKS as usize {
                                 // Exhausted with review still blocking → try arbiter.
                                 if let Some(ref arb) = arbiter {
-                                    let arb_req = RunRequest {
-                                        prompt: prompts::arbiter_decide(
+                                    let arb_fo = {
+                                        let prompt = prompts::arbiter_decide(
                                             &subtask.prompt,
                                             &changes,
                                             &findings_text,
-                                        ),
-                                        model: arb.model.clone(),
-                                        cwd: cwd.clone(),
-                                        advisory: true,
-                                        write: false,
+                                        );
+                                        let cwd2 = cwd.clone();
+                                        run_with_failover(
+                                            &arb.ladder,
+                                            "arbiter",
+                                            move |model| RunRequest {
+                                                prompt: prompt.clone(),
+                                                model,
+                                                cwd: cwd2.clone(),
+                                                advisory: true,
+                                                write: false,
+                                            },
+                                            quota,
+                                            health,
+                                            timeout,
+                                        )
+                                        .await?
                                     };
-                                    let arb_out = run_to_completion(
-                                        arb.adapter.clone(),
-                                        arb_req,
-                                        quota,
-                                        timeout,
-                                    )
-                                    .await?;
+                                    all_fallbacks.extend(arb_fo.fallbacks);
                                     // Fail-safe: unparseable → Fail.
-                                    let arb_verdict = parse_arbiter(&arb_out.final_text).unwrap_or(
-                                        ArbiterVerdict {
+                                    let arb_verdict = parse_arbiter(&arb_fo.outcome.final_text)
+                                        .unwrap_or(ArbiterVerdict {
                                             decision: ArbiterDecision::Fail,
                                             reason: "arbiter output unparseable".to_string(),
-                                        },
-                                    );
+                                        });
 
                                     if arb_verdict.decision == ArbiterDecision::Ship {
                                         completed.push(subtask.id);
@@ -603,6 +641,17 @@ pub async fn run_conduct(
         }
     }
 
+    let fallbacks_json: Vec<serde_json::Value> = all_fallbacks
+        .iter()
+        .map(|fb| {
+            serde_json::json!({
+                "from": fb.from,
+                "to": fb.to,
+                "reason": fb.reason,
+            })
+        })
+        .collect();
+
     let transcript = serde_json::json!({
         "kind": "conduct",
         "task": task,
@@ -611,6 +660,7 @@ pub async fn run_conduct(
         "completed": completed,
         "halted": halted,
         "failed": failed,
+        "fallbacks": fallbacks_json,
     });
 
     Ok(ConductOutcome {

@@ -1,4 +1,5 @@
 use super::prompts;
+use super::resilience::{run_with_failover, ModelHealth, Rung};
 use super::runner::{run_to_completion, RunStatus};
 use crate::adapters::{Adapter, RunRequest};
 use crate::quota::QuotaStore;
@@ -101,6 +102,57 @@ pub async fn run_review(
         raw_review: outcome.final_text,
         transcript,
     })
+}
+
+/// Review using a failover ladder. Wraps `run_with_failover` and parses the
+/// verdict. The old `run_review` (single adapter+model) is kept as-is so the
+/// M2a review CLI and its tests are unchanged.
+pub async fn run_review_ladder(
+    diff: &str,
+    ladder: &[Rung],
+    health: &ModelHealth,
+    quota: &QuotaStore,
+    cwd: PathBuf,
+    timeout: Duration,
+) -> anyhow::Result<(ReviewResult, Vec<super::resilience::Fallback>)> {
+    let prompt = prompts::diff_review(diff);
+    let fo = run_with_failover(
+        ladder,
+        "reviewer",
+        move |model| RunRequest {
+            prompt: prompt.clone(),
+            model,
+            cwd: cwd.clone(),
+            advisory: true,
+            write: false,
+        },
+        quota,
+        health,
+        timeout,
+    )
+    .await?;
+    let outcome = fo.outcome;
+    let fallbacks = fo.fallbacks;
+    if !matches!(outcome.status, super::runner::RunStatus::Completed) {
+        anyhow::bail!("reviewer failed: {:?}", outcome.status);
+    }
+    let verdict = parse_verdict(&outcome.final_text);
+    let diff_preview: String = diff.chars().take(32_768).collect();
+    let transcript = serde_json::json!({
+        "kind": "review",
+        "diff_bytes": diff.len(),
+        "diff_preview": diff_preview,
+        "raw_review": outcome.final_text,
+        "parse_ok": verdict.is_some(),
+    });
+    Ok((
+        ReviewResult {
+            verdict,
+            raw_review: outcome.final_text,
+            transcript,
+        },
+        fallbacks,
+    ))
 }
 
 #[cfg(test)]
