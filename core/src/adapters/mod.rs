@@ -23,7 +23,8 @@ pub struct RunRequest {
     /// council/review must never mutate files.
     ///
     /// INVARIANT: `advisory` and `write` must not both be true (enforced by a
-    /// debug_assert in sessions::spawn). Design note: two orthogonal bools
+    /// hard `bail!` in sessions::spawn — real in release builds too). Design
+    /// note: two orthogonal bools
     /// rather than a RunMode enum — they govern independent provider behaviors;
     /// an enum would need three variants to preserve the advisory-only case.
     pub write: bool,

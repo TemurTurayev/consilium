@@ -15,3 +15,6 @@ dist/
 
 # Consilium local runtime state (usage.db)
 .consilium/
+
+# User-written config from `consilium init` (don't commit it into this repo)
+consilium.config.json
