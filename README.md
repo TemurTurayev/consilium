@@ -17,9 +17,9 @@ Named after the medical *consilium*: specialists from different fields gathering
 | Milestone | Scope | State |
 |---|---|---|
 | **M1 — Engine foundation** | CLI adapters, session manager, quota store, `doctor`/`run`/`quota` commands | ✅ Done — verified E2E |
-| **M2a — Deliberation** | `council` (anonymized peer review → chairman synthesis), `review` (diff audit with CI exit codes) | ✅ Done — 72 tests, verified on live providers |
-| **M2b — Execution** | `conduct` (conductor/workers), `auto` pipeline, supervisor, quota-aware routing | 🚧 Next |
-| **M3 — Server & UI** | axum + WebSocket server, MCP attached mode, React web UI, quota dashboards | Planned |
+| **M2a — Deliberation** | `council` (anonymized peer review → chairman synthesis), `review` (diff audit with CI exit codes) | ✅ Done — verified on live providers |
+| **M2b — Execution** | `conduct` (conductor decomposes → workers edit real files → review gate → arbiter), `auto` pipeline, supervisor, quota-aware routing | ✅ Done — 125 tests, verified on live providers |
+| **M3 — Server & UI** | axum + WebSocket server, MCP attached mode, React web UI, quota dashboards | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Quick start
@@ -42,6 +42,15 @@ cargo run -q -- council "Async Rust: when is spawning a task per request wrong?"
 # Audit a diff with the reviewer role. Exit codes: 0 no critical findings,
 # 2 critical findings, 3 reviewer output unparseable (fails closed).
 git diff | cargo run -q -- review --diff-file /dev/stdin
+
+# Execution: a conductor decomposes the task, routes subtasks to the worker
+# with the freest quota, each worker edits real files, a reviewer audits the
+# diff, and a supervisor watches. Runs in a git repo.
+cargo run -q -- conduct "Add a CHANGELOG.md with a 0.1.0 entry"
+
+# The full pipeline: triage → (council plan if non-trivial) → conduct → optional
+# check command. Exit 1 if the run fails, is halted, or the check fails.
+cargo run -q -- auto "Fix the typo in README.md" --check "cargo test"
 ```
 
 Every deliberation writes a full JSON transcript to `~/.consilium/runs/` — including
