@@ -2,7 +2,10 @@
 //! claude-stream-json script through a real child process, so session
 //! spawning/streaming is exercised end-to-end without spending any quota.
 
-use consilium::adapters::{claude::ClaudeAdapter, Adapter, RunRequest};
+use consilium::adapters::{
+    claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter, Adapter, FailureKind,
+    RunRequest,
+};
 use consilium::event::{AgentEvent, Provider};
 use std::sync::{Arc, Mutex};
 
@@ -59,6 +62,15 @@ impl Adapter for ScriptedAdapter {
     }
     fn cli_binary(&self) -> &'static str {
         "sh"
+    }
+    /// Delegates to the real adapter for this provider so tests exercise real
+    /// failure classification rather than the trait default (Transient).
+    fn classify_failure(&self, error: &str) -> FailureKind {
+        match self.provider {
+            Provider::Claude => ClaudeAdapter.classify_failure(error),
+            Provider::Codex => CodexAdapter.classify_failure(error),
+            Provider::Gemini => GeminiAdapter.classify_failure(error),
+        }
     }
     fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
         debug_assert!(
