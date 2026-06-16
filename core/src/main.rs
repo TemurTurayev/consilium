@@ -43,6 +43,26 @@ enum Command {
         #[arg(long, default_value_t = 600)]
         timeout: u64,
     },
+    /// Conduct a coding task: conductor decomposes → workers execute → review gate
+    Conduct {
+        task: String,
+        /// Additional context for the conductor (e.g. relevant architecture notes)
+        #[arg(long)]
+        context: Option<String>,
+        /// Hard per-session timeout in seconds
+        #[arg(long, default_value_t = 900)]
+        timeout: u64,
+    },
+    /// Auto pipeline: triage → (council) → conduct → optional check command
+    Auto {
+        task: String,
+        /// Shell command to run after conduct completes (exit code determines success)
+        #[arg(long)]
+        check: Option<String>,
+        /// Hard per-session timeout in seconds
+        #[arg(long, default_value_t = 900)]
+        timeout: u64,
+    },
 }
 
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
@@ -256,6 +276,195 @@ async fn main() -> anyhow::Result<()> {
             println!("\ntranscript: {}", path.display());
             if result.verdict.as_ref().is_some_and(|v| v.has_critical()) {
                 std::process::exit(2);
+            }
+        }
+        Command::Conduct {
+            task,
+            context,
+            timeout,
+        } => {
+            use consilium::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
+            use consilium::orchestrator::council::CouncilMember;
+            use consilium::orchestrator::{roles, transcript::TranscriptStore};
+
+            let config = consilium::config::Config::load(Some(std::path::Path::new(
+                "consilium.config.json",
+            )))?;
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
+            let cwd = std::env::current_dir()?;
+
+            let workers: Vec<CouncilMember> = config
+                .roles
+                .workers
+                .iter()
+                .map(|role| CouncilMember {
+                    label: format!("{}-{}", role.provider.as_str(), role.model),
+                    adapter: roles::adapter_for(role),
+                    model: Some(role.model.clone()),
+                })
+                .collect();
+
+            let deps = ConductDeps {
+                conductor: RoleHandle {
+                    adapter: roles::adapter_for(&config.roles.conductor),
+                    model: Some(config.roles.conductor.model.clone()),
+                },
+                workers,
+                supervisor: Some(RoleHandle {
+                    adapter: roles::adapter_for(&config.roles.supervisor),
+                    model: Some(config.roles.supervisor.model.clone()),
+                }),
+                reviewer: Some(RoleHandle {
+                    adapter: roles::adapter_for(&config.roles.reviewer),
+                    model: Some(config.roles.reviewer.model.clone()),
+                }),
+                arbiter: Some(RoleHandle {
+                    adapter: roles::adapter_for(&config.roles.chairman),
+                    model: Some(config.roles.chairman.model.clone()),
+                }),
+            };
+
+            let ctx = context.as_deref().unwrap_or("");
+            let outcome = run_conduct(
+                &task,
+                ctx,
+                deps,
+                &store,
+                cwd,
+                std::time::Duration::from_secs(timeout),
+            )
+            .await?;
+            let path = transcripts.save("conduct", &outcome.transcript)?;
+
+            println!("completed subtasks: {:?}", outcome.completed);
+            if let Some(ref reason) = outcome.halted {
+                println!("halted: {reason}");
+            }
+            if let Some(ref reason) = outcome.failed {
+                println!("failed: {reason}");
+            }
+            println!("transcript: {}", path.display());
+
+            let success = outcome.halted.is_none()
+                && outcome.failed.is_none()
+                && !outcome.completed.is_empty();
+            if !success {
+                std::process::exit(1);
+            }
+        }
+        Command::Auto {
+            task,
+            check,
+            timeout,
+        } => {
+            use consilium::orchestrator::auto::{run_auto, AutoDeps};
+            use consilium::orchestrator::conduct::{ConductDeps, RoleHandle};
+            use consilium::orchestrator::council::CouncilMember;
+            use consilium::orchestrator::{roles, transcript::TranscriptStore};
+
+            let config = consilium::config::Config::load(Some(std::path::Path::new(
+                "consilium.config.json",
+            )))?;
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
+            let cwd = std::env::current_dir()?;
+
+            let workers: Vec<CouncilMember> = config
+                .roles
+                .workers
+                .iter()
+                .map(|role| CouncilMember {
+                    label: format!("{}-{}", role.provider.as_str(), role.model),
+                    adapter: roles::adapter_for(role),
+                    model: Some(role.model.clone()),
+                })
+                .collect();
+
+            let council_members: Vec<CouncilMember> = config
+                .roles
+                .workers
+                .iter()
+                .map(|role| CouncilMember {
+                    label: format!("{}-{}", role.provider.as_str(), role.model),
+                    adapter: roles::adapter_for(role),
+                    model: Some(role.model.clone()),
+                })
+                .collect();
+
+            let deps = AutoDeps {
+                conduct: ConductDeps {
+                    conductor: RoleHandle {
+                        adapter: roles::adapter_for(&config.roles.conductor),
+                        model: Some(config.roles.conductor.model.clone()),
+                    },
+                    workers,
+                    supervisor: Some(RoleHandle {
+                        adapter: roles::adapter_for(&config.roles.supervisor),
+                        model: Some(config.roles.supervisor.model.clone()),
+                    }),
+                    reviewer: Some(RoleHandle {
+                        adapter: roles::adapter_for(&config.roles.reviewer),
+                        model: Some(config.roles.reviewer.model.clone()),
+                    }),
+                    arbiter: Some(RoleHandle {
+                        adapter: roles::adapter_for(&config.roles.chairman),
+                        model: Some(config.roles.chairman.model.clone()),
+                    }),
+                },
+                council_members,
+                chairman: RoleHandle {
+                    adapter: roles::adapter_for(&config.roles.chairman),
+                    model: Some(config.roles.chairman.model.clone()),
+                },
+            };
+
+            let outcome = run_auto(
+                &task,
+                deps,
+                &store,
+                cwd,
+                std::time::Duration::from_secs(timeout),
+                check.as_deref(),
+            )
+            .await?;
+            let path = transcripts.save("auto", &outcome.transcript)?;
+
+            println!(
+                "triage: {}",
+                if outcome.triage_trivial {
+                    "trivial"
+                } else {
+                    "standard"
+                }
+            );
+            if let Some(ref synthesis) = outcome.council_synthesis {
+                println!(
+                    "council synthesis: {}",
+                    synthesis.chars().take(120).collect::<String>()
+                );
+            }
+            println!("completed subtasks: {:?}", outcome.conduct.completed);
+            if let Some(ref reason) = outcome.conduct.halted {
+                println!("halted: {reason}");
+            }
+            if let Some(ref reason) = outcome.conduct.failed {
+                println!("failed: {reason}");
+            }
+            if let Some((passed, ref output)) = outcome.check {
+                println!("check: {}", if passed { "passed" } else { "FAILED" });
+                if !output.is_empty() {
+                    println!("check output:\n{output}");
+                }
+            }
+            println!("transcript: {}", path.display());
+
+            let success = outcome.conduct.halted.is_none()
+                && outcome.conduct.failed.is_none()
+                && !outcome.conduct.completed.is_empty()
+                && outcome.check.as_ref().is_none_or(|(passed, _)| *passed);
+            if !success {
+                std::process::exit(1);
             }
         }
     }

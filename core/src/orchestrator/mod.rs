@@ -1,3 +1,4 @@
+pub mod auto;
 pub mod changes;
 pub mod conduct;
 pub mod council;
