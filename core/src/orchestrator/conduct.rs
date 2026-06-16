@@ -410,6 +410,7 @@ pub async fn run_conduct(
                     &subtask.prompt,
                     &changes,
                     &worker_text,
+                    "(not run)",
                     supervisor_note.as_deref(),
                 );
                 let cwd2 = cwd.clone();
@@ -764,7 +765,13 @@ mod tests {
 
     #[test]
     fn evaluation_template_example_parses() {
-        let p = crate::orchestrator::prompts::conduct_evaluation("t", "diff", "report", None);
+        let p = crate::orchestrator::prompts::conduct_evaluation(
+            "t",
+            "diff",
+            "report",
+            "(not run)",
+            None,
+        );
         assert!(parse_evaluation(&p).is_some());
     }
 

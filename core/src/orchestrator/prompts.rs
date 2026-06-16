@@ -66,6 +66,7 @@ pub fn conduct_evaluation(
     subtask_prompt: &str,
     changes: &str,
     worker_report: &str,
+    verify: &str,
     supervisor_note: Option<&str>,
 ) -> String {
     let supervisor = supervisor_note
@@ -73,9 +74,13 @@ pub fn conduct_evaluation(
         .unwrap_or_default();
     format!(
         "You are the conductor reviewing a worker's completed subtask. Judge \
-         ONLY whether the changes fulfil the subtask — not style preferences.\n\n\
+         whether the changes fulfil the subtask. Build/test results are AUTHORITATIVE: \
+         if tests or build failed, you must NOT accept — request rework citing the \
+         failure. If no verifier ran, treat your judgment as unverified and be \
+         conservative.\n\n\
          Subtask given to the worker:\n{subtask_prompt}\n\n\
          Changes made (diff + new files):\n<changes>\n{changes}\n</changes>\n\n\
+         Build/test/lint result:\n<verify>\n{verify}\n</verify>\n\n\
          Worker's report:\n<worker_report>\n{worker_report}\n</worker_report>\n{supervisor}\n\
          Output EXACTLY one JSON code block — decision is accept | rework | fail \
          (rework requires concrete, actionable feedback):\n```json\n{{\"decision\":\"accept\",\"feedback\":\"\"}}\n```"
