@@ -49,7 +49,8 @@ git diff | cargo run -q -- review --diff-file /dev/stdin
 cargo run -q -- conduct "Add a CHANGELOG.md with a 0.1.0 entry"
 
 # The full pipeline: triage → (council plan if non-trivial) → conduct → optional
-# check command. Exit 1 if the run fails, is halted, or the check fails.
+# check command (runs in a shell). Exit 1 if the run fails, is halted, or the
+# check fails.
 cargo run -q -- auto "Fix the typo in README.md" --check "cargo test"
 ```
 

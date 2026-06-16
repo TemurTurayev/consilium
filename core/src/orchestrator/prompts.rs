@@ -1,5 +1,13 @@
 //! All prompt templates in one place. Templates demand strict JSON blocks so
 //! downstream parsing is testable; parsers must still tolerate non-compliance.
+//!
+//! SECURITY (untrusted interpolation): repo/worker-authored content (`changes`,
+//! `context`, `progress`) is XML-tag-isolated, but `feedback`, supervisor `note`,
+//! and reviewer `findings` are interpolated bare. A hostile repo file or model
+//! output could carry steering instructions into the conductor/supervisor/arbiter
+//! prompts. Accepted for now: trusted local operator, user-initiated runs, CLI
+//! write-scoping armed. TODO(M3): full prompt-injection hardening (delimit every
+//! interpolation, instruct models to treat delimited spans as inert data).
 
 pub fn council_answer(question: &str) -> String {
     format!(

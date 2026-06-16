@@ -83,7 +83,11 @@ pub async fn run_to_completion(
 
     let (events, status, final_text) = match tokio::time::timeout(timeout, collect).await {
         Err(_elapsed) => {
-            // Timeout: child is orphaned per M1 policy.
+            // Timeout: child is orphaned per M1 policy (not killed). M2b WRITE
+            // HAZARD: an orphaned worker run keeps its scoped write flag active
+            // and can keep mutating the shared cwd while conduct starts the next
+            // attempt — a concurrent-write race. TODO(M3): start_kill()+wait()
+            // the child on timeout for write runs before proceeding.
             return Ok(RunOutcome {
                 session_id,
                 final_text: String::new(),

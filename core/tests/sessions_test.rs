@@ -149,10 +149,10 @@ async fn missing_binary_returns_spawn_error() {
 }
 
 /// The advisory+write combination is contradictory (deliberation never writes)
-/// and must be rejected by the spawn invariant in debug builds.
+/// and must be rejected by the spawn invariant in EVERY build (hard bail, not a
+/// debug_assert — release binaries must enforce it too).
 #[tokio::test]
-#[should_panic(expected = "contradictory RunRequest")]
-async fn advisory_plus_write_combination_panics_in_debug() {
+async fn advisory_plus_write_combination_is_rejected() {
     let adapter = Arc::new(CrashingAdapter);
     let bad = RunRequest {
         prompt: "x".into(),
@@ -161,5 +161,6 @@ async fn advisory_plus_write_combination_panics_in_debug() {
         advisory: true,
         write: true,
     };
-    let _ = sessions::spawn(adapter, bad);
+    let err = sessions::spawn(adapter, bad).unwrap_err();
+    assert!(err.to_string().contains("contradictory RunRequest"));
 }
