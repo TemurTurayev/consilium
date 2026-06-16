@@ -35,7 +35,7 @@ impl Adapter for CodexAdapter {
 
     fn classify_failure(&self, error: &str) -> FailureKind {
         let e = error.to_ascii_lowercase();
-        if e.contains("model is not supported") || e.contains("invalid_request_error") {
+        if e.contains("model is not supported") {
             FailureKind::ModelUnavailable
         } else if e.contains("usage limit") || e.contains("rate limit") || e.contains("429") {
             FailureKind::RateLimited
@@ -235,6 +235,12 @@ mod tests {
             CodexAdapter.classify_failure("stream error: usage limit reached"),
             FailureKind::RateLimited
         );
+    }
+
+    #[test]
+    fn context_length_error_is_transient_not_model_unavailable() {
+        let msg = "This model's maximum context length is 4096 tokens. You requested 8000.";
+        assert_eq!(CodexAdapter.classify_failure(msg), FailureKind::Transient);
     }
 
     /// Runs only when real fixtures have been recorded via script/record_fixtures.sh.

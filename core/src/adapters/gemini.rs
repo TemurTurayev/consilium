@@ -44,7 +44,7 @@ impl Adapter for GeminiAdapter {
 
     fn classify_failure(&self, error: &str) -> FailureKind {
         let e = error.to_ascii_lowercase();
-        if e.contains("code: 404") || e.contains("not found") || e.contains("critical error") {
+        if e.contains("code: 404") || e.contains("unexpected critical error") {
             FailureKind::ModelUnavailable
         } else if e.contains("resource_exhausted") || e.contains("429") || e.contains("quota") {
             FailureKind::RateLimited
@@ -227,6 +227,12 @@ mod tests {
             GeminiAdapter.classify_failure("Error: RESOURCE_EXHAUSTED (429)"),
             FailureKind::RateLimited
         );
+    }
+
+    #[test]
+    fn tool_file_not_found_is_transient_not_model_unavailable() {
+        let e = "process exited with exit status: 1; stderr tail: bash: /workspace/script.sh: not found";
+        assert_eq!(GeminiAdapter.classify_failure(e), FailureKind::Transient);
     }
 
     /// Runs against the real recorded fixture (exists since Task 4).
