@@ -118,8 +118,12 @@ pub async fn run_verify(cwd: &Path, cfg: Option<&VerifyConfig>) -> VerifyOutcome
                 }
             }
             Err(e) => {
-                // Could not even launch the command — blocking, treat as failure.
-                passed = false;
+                // Could not even launch the command. Blocking for build/test;
+                // lint stays advisory in EVERY failure mode (a missing linter
+                // must not trap a run).
+                if label != "lint" {
+                    passed = false;
+                }
                 summary.push_str(&format!("[{label}] LAUNCH-ERROR: {cmd}: {e}\n"));
             }
         }
@@ -226,6 +230,20 @@ mod tests {
         assert!(out.ran);
         assert!(out.passed, "lint failure must not block accept");
         assert!(out.summary.contains("lint"));
+    }
+
+    #[tokio::test]
+    async fn run_verify_lint_launch_error_does_not_block() {
+        let d = tmp();
+        // lint binary does not exist -> launch error, but lint is advisory
+        let cfg = VerifyConfig {
+            test: Some("true".into()),
+            build: None,
+            lint: Some("consilium-no-such-linter-xyz".into()),
+        };
+        let out = run_verify(d.path(), Some(&cfg)).await;
+        assert!(out.ran);
+        assert!(out.passed, "a missing linter must not block accept");
     }
 
     #[tokio::test]
