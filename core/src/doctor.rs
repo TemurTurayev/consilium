@@ -51,9 +51,123 @@ pub fn run_doctor() -> Vec<CliStatus> {
         .collect()
 }
 
+// ── Model probing ──────────────────────────────────────────────────────────────
+
+use crate::adapters::{Adapter, FailureKind, RunRequest};
+use crate::config::{Config, ModelCandidate};
+use crate::event::Provider;
+use crate::orchestrator::runner::{run_to_completion, RunStatus};
+use crate::quota::QuotaStore;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Result of probing one (provider, model) pair for liveness.
+#[derive(Debug)]
+pub struct ModelProbe {
+    pub provider: Provider,
+    pub model: String,
+    pub ok: bool,
+    /// Human-readable detail: "ok", "unavailable", "rate-limited", or "transient: …"
+    pub detail: String,
+}
+
+/// Maps a `FailureKind` to a short human-readable status label.
+///
+/// This is a pure function — unit-testable without any I/O.
+pub fn probe_label(kind: FailureKind) -> &'static str {
+    match kind {
+        FailureKind::ModelUnavailable => "unavailable",
+        FailureKind::RateLimited => "rate-limited",
+        FailureKind::Transient => "transient failure",
+    }
+}
+
+/// Collects the distinct (provider, model) pairs across all role ladders in a
+/// `Config`. Deduplication is done by (provider, model) string — if the same
+/// model appears in multiple roles (e.g. conductor primary + chairman fallback)
+/// it is only probed once.
+///
+/// This is a pure function — unit-testable without any I/O.
+pub fn collect_distinct_model_pairs(config: &Config) -> Vec<ModelCandidate> {
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut pairs: Vec<ModelCandidate> = Vec::new();
+
+    let all_roles: Vec<&crate::config::RoleConfig> = {
+        let r = &config.roles;
+        let mut v: Vec<&crate::config::RoleConfig> =
+            vec![&r.conductor, &r.chairman, &r.reviewer, &r.supervisor];
+        v.extend(r.workers.iter());
+        v
+    };
+
+    for role in all_roles {
+        for candidate in role.ladder() {
+            let key = (
+                candidate.provider.as_str().to_string(),
+                candidate.model.clone(),
+            );
+            if seen.insert(key) {
+                pairs.push(candidate);
+            }
+        }
+    }
+    pairs
+}
+
+/// Probes one (provider, model) pair by running a tiny "Reply with: ok" prompt
+/// through the provider's adapter. Spends a small amount of quota on the
+/// provider. This function is intentionally NOT unit-tested (it spawns a real
+/// CLI); test the pure helpers (`probe_label`, `collect_distinct_model_pairs`)
+/// instead.
+pub async fn probe_model(adapter: Arc<dyn Adapter>, model: &str, quota: &QuotaStore) -> ModelProbe {
+    let provider = adapter.provider();
+    let req = RunRequest {
+        prompt: "Reply with: ok".into(),
+        model: Some(model.to_string()),
+        cwd: std::env::temp_dir(),
+        advisory: true,
+        write: false,
+    };
+    let timeout = Duration::from_secs(30);
+    match run_to_completion(adapter.clone(), req, quota, timeout).await {
+        Ok(outcome) => match outcome.status {
+            RunStatus::Completed => ModelProbe {
+                provider,
+                model: model.to_string(),
+                ok: true,
+                detail: "ok".to_string(),
+            },
+            RunStatus::Failed(ref e) => {
+                let kind = adapter.classify_failure(e);
+                ModelProbe {
+                    provider,
+                    model: model.to_string(),
+                    ok: false,
+                    detail: format!("{}: {}", probe_label(kind), e),
+                }
+            }
+            RunStatus::TimedOut => ModelProbe {
+                provider,
+                model: model.to_string(),
+                ok: false,
+                detail: "timed out".to_string(),
+            },
+        },
+        Err(e) => ModelProbe {
+            provider,
+            model: model.to_string(),
+            ok: false,
+            detail: format!("transient failure: {e}"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::event::Provider;
 
     fn fake_bin_dir_script(name: &str, script: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -98,5 +212,77 @@ mod tests {
         let status = check_with_path("silentcli", Some(dir.path().as_os_str()));
         assert!(status.found);
         assert!(status.version.is_none());
+    }
+
+    // ── Pure helper unit tests ────────────────────────────────────────────────
+
+    #[test]
+    fn probe_label_maps_failure_kind() {
+        assert_eq!(probe_label(FailureKind::ModelUnavailable), "unavailable");
+        assert_eq!(probe_label(FailureKind::RateLimited), "rate-limited");
+        assert_eq!(probe_label(FailureKind::Transient), "transient failure");
+    }
+
+    #[test]
+    fn collects_distinct_models_across_ladders() {
+        // Build a Config where conductor + chairman share the same primary (opus)
+        // and conductor has a sonnet fallback — result should deduplicate opus
+        // and include sonnet once.
+        let config = Config::default();
+        let pairs = collect_distinct_model_pairs(&config);
+
+        // There must be at least one entry per distinct model.
+        assert!(!pairs.is_empty(), "should have at least one model pair");
+
+        // claude-opus-4-8 appears as conductor primary AND chairman primary —
+        // it should appear only once.
+        let opus_count = pairs
+            .iter()
+            .filter(|c| c.model == "claude-opus-4-8" && c.provider == Provider::Claude)
+            .count();
+        assert_eq!(opus_count, 1, "opus should be deduplicated across roles");
+
+        // claude-sonnet-4-6 is a fallback for both conductor and chairman —
+        // it should also appear only once.
+        let sonnet_count = pairs
+            .iter()
+            .filter(|c| c.model == "claude-sonnet-4-6" && c.provider == Provider::Claude)
+            .count();
+        assert_eq!(sonnet_count, 1, "sonnet fallback should be deduplicated");
+    }
+
+    #[test]
+    fn collects_distinct_models_with_overlapping_fallbacks() {
+        // Construct a minimal Config with explicit overlapping fallbacks.
+        let json = r#"{
+          "roles": {
+            "conductor": {
+              "provider": "claude", "model": "opus",
+              "fallbacks": [{"provider": "codex", "model": "gpt-x"}]
+            },
+            "chairman":  {
+              "provider": "claude", "model": "opus",
+              "fallbacks": [{"provider": "codex", "model": "gpt-x"}]
+            },
+            "workers":   [{"provider": "codex", "model": "gpt-x"}],
+            "reviewer":  {"provider": "codex", "model": "gpt-x"},
+            "supervisor": {"provider": "gemini", "model": "gemini-pro"}
+          }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let pairs = collect_distinct_model_pairs(&config);
+
+        // Only 3 distinct (provider,model) pairs: (claude,opus), (codex,gpt-x), (gemini,gemini-pro)
+        assert_eq!(
+            pairs.len(),
+            3,
+            "expected 3 distinct pairs, got {}",
+            pairs.len()
+        );
+
+        let has = |p: Provider, m: &str| pairs.iter().any(|c| c.provider == p && c.model == m);
+        assert!(has(Provider::Claude, "opus"));
+        assert!(has(Provider::Codex, "gpt-x"));
+        assert!(has(Provider::Gemini, "gemini-pro"));
     }
 }

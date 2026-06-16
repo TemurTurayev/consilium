@@ -14,7 +14,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Check that agent CLIs are installed and authenticated
-    Doctor,
+    Doctor {
+        /// Also probe each configured model's availability (spends a tiny amount
+        /// of provider quota — one "Reply with: ok" call per distinct model).
+        #[arg(long)]
+        models: bool,
+    },
     /// Run a single prompt through one agent (smoke test)
     Run {
         #[arg(long)]
@@ -80,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Doctor => {
+        Command::Doctor { models } => {
             let mut all_ok = true;
             // check_with_path uses std::process::Command (blocking); acceptable for a
             // one-shot CLI diagnostic — no async work runs concurrently with this arm.
@@ -102,6 +107,46 @@ async fn main() -> anyhow::Result<()> {
                 println!("  gemini: npm install -g @google/gemini-cli");
                 println!("  claude: see https://code.claude.com");
                 std::process::exit(1);
+            }
+
+            if models {
+                use consilium::adapters::{
+                    claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter,
+                };
+                use consilium::doctor::{collect_distinct_model_pairs, probe_model};
+                use consilium::event::Provider;
+                use std::sync::Arc;
+
+                let config = consilium::config::Config::load(Some(std::path::Path::new(
+                    "consilium.config.json",
+                )))?;
+                let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+                let pairs = collect_distinct_model_pairs(&config);
+
+                println!("\n── Model availability ──");
+                let mut any_failed = false;
+                for candidate in pairs {
+                    let adapter: Arc<dyn consilium::adapters::Adapter> = match candidate.provider {
+                        Provider::Claude => Arc::new(ClaudeAdapter),
+                        Provider::Codex => Arc::new(CodexAdapter),
+                        Provider::Gemini => Arc::new(GeminiAdapter),
+                    };
+                    let probe = probe_model(adapter, &candidate.model, &store).await;
+                    if probe.ok {
+                        println!("  ✓ {}/{}", candidate.provider.as_str(), candidate.model);
+                    } else {
+                        any_failed = true;
+                        println!(
+                            "  ✗ {}/{} — {}",
+                            candidate.provider.as_str(),
+                            candidate.model,
+                            probe.detail
+                        );
+                    }
+                }
+                if any_failed {
+                    std::process::exit(1);
+                }
             }
         }
         Command::Run {
