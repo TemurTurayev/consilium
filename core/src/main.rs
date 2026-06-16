@@ -68,6 +68,12 @@ enum Command {
         #[arg(long, default_value_t = 900)]
         timeout: u64,
     },
+    /// Write a starter consilium.config.json in the current directory
+    Init {
+        /// Overwrite an existing consilium.config.json
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
@@ -546,6 +552,19 @@ async fn main() -> anyhow::Result<()> {
             if !success {
                 std::process::exit(1);
             }
+        }
+        Command::Init { force } => {
+            let target = std::env::current_dir()?.join("consilium.config.json");
+            if target.exists() && !force {
+                eprintln!("consilium.config.json already exists; use --force to overwrite");
+                std::process::exit(1);
+            }
+            let cfg = consilium::config::Config::default();
+            let json = cfg.to_pretty_json()?;
+            // Count roles: conductor + chairman + workers + reviewer + supervisor
+            let n_roles = 2 + cfg.roles.workers.len() + 1 + 1;
+            std::fs::write(&target, &json)?;
+            println!("wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)");
         }
     }
     Ok(())

@@ -130,6 +130,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Serialize the config to pretty-printed JSON.
+    pub fn to_pretty_json(&self) -> anyhow::Result<String> {
+        serde_json::to_string_pretty(self).map_err(Into::into)
+    }
+
     /// Load from path; missing file → defaults. Parse error → Err (never silently default).
     pub fn load(path: Option<&Path>) -> anyhow::Result<Config> {
         let Some(path) = path else {
@@ -230,6 +235,22 @@ mod tests {
         let cfg = Config::default();
         let ladder = cfg.roles.conductor.ladder();
         assert!(ladder.len() >= 2, "conductor should fall back below opus");
+        assert_eq!(ladder[0].model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn default_config_round_trips_through_json() {
+        let original = Config::default();
+        let json = original
+            .to_pretty_json()
+            .expect("serialization should succeed");
+        let parsed: Config = serde_json::from_str(&json).expect("emitted JSON must be valid");
+        let ladder = parsed.roles.conductor.ladder();
+        assert_eq!(
+            ladder.len(),
+            2,
+            "conductor ladder should have 2 rungs after round-trip"
+        );
         assert_eq!(ladder[0].model, "claude-opus-4-8");
     }
 }
