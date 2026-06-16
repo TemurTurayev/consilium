@@ -186,14 +186,11 @@ pub const MAX_REWORKS: u32 = 2;
 ///
 /// Flow:
 /// 1. Decompose: conductor (advisory) calls `conduct_decompose` → parse plan.
-/// 2. For each subtask sequentially:
-///    a. Route to least-loaded worker via `pick_worker_by_provider`.
-///    b. Worker session (write:true, advisory:false) via run_with_failover.
-///    c. `capture_changes` on cwd.
-///    d. Supervisor gate (if configured) — Halt aborts the run.
-///    e. Conductor evaluation (advisory) — Accept / Rework / Fail.
-///    f. Rework: re-prompt worker (up to MAX_REWORKS); all-rungs-fail on the
-///       worker counts as a rework attempt.
+/// 2. For each subtask sequentially: route to least-loaded worker
+///    (`pick_worker_by_provider`); run the worker (write:true, advisory:false)
+///    via run_with_failover; `capture_changes` on cwd; supervisor gate (Halt
+///    aborts the run); conductor evaluation (Accept / Rework / Fail); rework
+///    re-prompts the worker up to MAX_REWORKS (all-rungs-fail counts as an attempt).
 ///
 /// All model calls go through `run_with_failover` with the shared `health`
 /// registry, so a model that dies during planning is skipped during execution.
