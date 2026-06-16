@@ -1116,3 +1116,44 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         "evaluation prompt must contain the supervisor note; got:\n{eval_prompt}"
     );
 }
+
+// ─── Test: conductor decompose infra-failure surfaces, not "no plan" ───────
+
+#[tokio::test]
+async fn decompose_session_failure_surfaces_real_error() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor session itself fails (e.g. model 404) — this must NOT be
+    // reported as "conductor produced no plan".
+    let conductor = Arc::new(ScriptedAdapter::failing(
+        Provider::Claude,
+        "model claude-fable-5 not accessible",
+    ));
+
+    let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "unused"));
+
+    let deps = ConductDeps {
+        conductor: RoleHandle {
+            adapter: conductor,
+            model: None,
+        },
+        workers: vec![CouncilMember {
+            label: "codex-worker".into(),
+            adapter: worker,
+            model: None,
+        }],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+    };
+
+    let err = run_conduct("t", "", deps, &quota, repo.path().to_path_buf(), TIMEOUT)
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("conductor decompose failed"),
+        "expected decompose-failure message, got: {msg}"
+    );
+}

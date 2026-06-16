@@ -168,6 +168,7 @@ pub struct ConductDeps {
     pub arbiter: Option<RoleHandle>,
 }
 
+#[derive(Debug)]
 pub struct ConductOutcome {
     /// Accepted subtask ids, in order.
     pub completed: Vec<u32>,
@@ -220,6 +221,14 @@ pub async fn run_conduct(
     };
     let decompose_out =
         run_to_completion(conductor_adapter.clone(), decompose_req, quota, timeout).await?;
+    // Distinguish an infrastructure failure (model 404, timeout) from a
+    // completed-but-unparseable plan — otherwise a dead conductor masquerades as
+    // "produced no plan" and the real cause (e.g. an inaccessible model) is lost.
+    match &decompose_out.status {
+        RunStatus::Completed => {}
+        RunStatus::Failed(e) => anyhow::bail!("conductor decompose failed: {e}"),
+        RunStatus::TimedOut => anyhow::bail!("conductor decompose timed out"),
+    }
     let plan = parse_plan(&decompose_out.final_text)
         .filter(|p| !p.subtasks.is_empty())
         .ok_or_else(|| anyhow::anyhow!("conductor produced no plan"))?;

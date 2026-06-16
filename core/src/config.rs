@@ -77,11 +77,11 @@ impl Default for Config {
                 conductor: RoleConfig {
                     effort: Some("high".into()),
                     mode: Some("attached".into()),
-                    ..RoleConfig::new(Provider::Claude, "claude-fable-5")
+                    ..RoleConfig::new(Provider::Claude, "claude-opus-4-8")
                 },
                 chairman: RoleConfig {
                     effort: Some("high".into()),
-                    ..RoleConfig::new(Provider::Claude, "claude-fable-5")
+                    ..RoleConfig::new(Provider::Claude, "claude-opus-4-8")
                 },
                 workers: vec![
                     RoleConfig::new(Provider::Codex, "gpt-5.4"),
