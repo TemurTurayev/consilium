@@ -2,11 +2,23 @@ use crate::event::Provider;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// One rung of a role's failover ladder: a concrete (provider, model) pair.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCandidate {
+    pub provider: Provider,
+    pub model: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleConfig {
     pub provider: Provider,
     pub model: String,
+    /// Ordered failover candidates tried after the primary (provider, model)
+    /// when it is unavailable or rate-limited. Empty = no failover.
+    #[serde(default)]
+    pub fallbacks: Vec<ModelCandidate>,
     #[serde(default)]
     pub effort: Option<String>,
     #[serde(default)]
@@ -20,10 +32,21 @@ impl RoleConfig {
         Self {
             provider,
             model: model.into(),
+            fallbacks: Vec::new(),
             effort: None,
             mode: None,
             intervention_threshold: None,
         }
+    }
+
+    /// Full ordered ladder: primary first, then declared fallbacks.
+    pub fn ladder(&self) -> Vec<ModelCandidate> {
+        let mut rungs = vec![ModelCandidate {
+            provider: self.provider,
+            model: self.model.clone(),
+        }];
+        rungs.extend(self.fallbacks.iter().cloned());
+        rungs
     }
 }
 
@@ -77,10 +100,18 @@ impl Default for Config {
                 conductor: RoleConfig {
                     effort: Some("high".into()),
                     mode: Some("attached".into()),
+                    fallbacks: vec![ModelCandidate {
+                        provider: Provider::Claude,
+                        model: "claude-sonnet-4-6".into(),
+                    }],
                     ..RoleConfig::new(Provider::Claude, "claude-opus-4-8")
                 },
                 chairman: RoleConfig {
                     effort: Some("high".into()),
+                    fallbacks: vec![ModelCandidate {
+                        provider: Provider::Claude,
+                        model: "claude-sonnet-4-6".into(),
+                    }],
                     ..RoleConfig::new(Provider::Claude, "claude-opus-4-8")
                 },
                 workers: vec![
@@ -163,5 +194,42 @@ mod tests {
             "reviewer":{"provider":"codex","model":"x"},
             "supervisor":{"provider":"gemini","model":"x"}}}"#;
         assert!(serde_json::from_str::<Config>(json).is_err());
+    }
+
+    #[test]
+    fn role_without_fallbacks_parses_and_has_single_rung_ladder() {
+        let r: RoleConfig = serde_json::from_value(serde_json::json!({
+            "provider": "claude", "model": "claude-opus-4-8"
+        }))
+        .unwrap();
+        assert!(r.fallbacks.is_empty());
+        let ladder = r.ladder();
+        assert_eq!(ladder.len(), 1);
+        assert_eq!(ladder[0].provider, Provider::Claude);
+        assert_eq!(ladder[0].model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn role_with_fallbacks_builds_ordered_ladder() {
+        let r: RoleConfig = serde_json::from_value(serde_json::json!({
+            "provider": "claude", "model": "claude-opus-4-8",
+            "fallbacks": [
+                {"provider": "claude", "model": "claude-sonnet-4-6"},
+                {"provider": "codex", "model": "gpt-5.4"}
+            ]
+        }))
+        .unwrap();
+        let ladder = r.ladder();
+        assert_eq!(ladder.len(), 3);
+        assert_eq!(ladder[1].model, "claude-sonnet-4-6");
+        assert_eq!(ladder[2].provider, Provider::Codex);
+    }
+
+    #[test]
+    fn default_conductor_has_a_sonnet_fallback() {
+        let cfg = Config::default();
+        let ladder = cfg.roles.conductor.ladder();
+        assert!(ladder.len() >= 2, "conductor should fall back below opus");
+        assert_eq!(ladder[0].model, "claude-opus-4-8");
     }
 }
