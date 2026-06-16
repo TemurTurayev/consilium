@@ -1,6 +1,6 @@
 mod common;
 
-use common::ScriptedAdapter;
+use common::{ScriptedAdapter, SequencedAdapter, SpawnFailAdapter};
 use consilium::adapters::{Adapter, RunRequest};
 use consilium::config::ModelCandidate;
 use consilium::event::Provider;
@@ -122,7 +122,13 @@ async fn all_rungs_fail_returns_error() {
     )
     .await
     .unwrap_err();
-    assert!(err.to_string().contains("all 2 model rungs failed"));
+    let msg = err.to_string();
+    assert!(msg.contains("all 2 model rungs failed"));
+    // Bail carries each rung's failure reason (not just the count).
+    assert!(
+        msg.contains("model unavailable"),
+        "bail message should carry a rung failure reason, got: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -145,16 +151,9 @@ async fn dead_rung_is_skipped_on_reuse() {
             )),
         ),
     ];
-    let res = run_with_failover(
-        &ladder,
-        "x",
-        req,
-        &store,
-        &health,
-        Duration::from_secs(30),
-    )
-    .await
-    .unwrap();
+    let res = run_with_failover(&ladder, "x", req, &store, &health, Duration::from_secs(30))
+        .await
+        .unwrap();
     assert_eq!(res.outcome.final_text, "via-sonnet");
     assert_eq!(res.rung_used, 1);
     // skipped-because-dead is still recorded as a fallback for transparency
@@ -162,4 +161,108 @@ async fn dead_rung_is_skipped_on_reuse() {
         .fallbacks
         .iter()
         .any(|f| f.reason.contains("known-dead")));
+}
+
+#[tokio::test]
+async fn rate_limited_model_is_demoted_but_not_marked_dead() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let health = ModelHealth::new();
+    let ladder = vec![
+        rung(
+            Provider::Claude,
+            "opus",
+            Arc::new(ScriptedAdapter::failing(
+                Provider::Claude,
+                "Claude usage limit reached; try again later",
+            )),
+        ),
+        rung(
+            Provider::Claude,
+            "sonnet",
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Claude, "recovered")),
+        ),
+    ];
+    let res = run_with_failover(
+        &ladder,
+        "conductor",
+        req,
+        &store,
+        &health,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.rung_used, 1);
+    assert_eq!(res.fallbacks.len(), 1);
+    assert!(res.fallbacks[0].reason.contains("rate limited"));
+    // LOAD-BEARING: a rate-limited model must demote but is NOT permanently
+    // dead — a later use of the same model may succeed once the limit resets.
+    assert!(!health.is_dead(Provider::Claude, "opus"));
+}
+
+#[tokio::test]
+async fn spawn_error_demotes_to_next_rung() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let health = ModelHealth::new();
+    let ladder = vec![
+        rung(
+            Provider::Claude,
+            "missing-binary-model",
+            Arc::new(SpawnFailAdapter::new(Provider::Claude)),
+        ),
+        rung(
+            Provider::Claude,
+            "sonnet",
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Claude, "recovered")),
+        ),
+    ];
+    let res = run_with_failover(
+        &ladder,
+        "conductor",
+        req,
+        &store,
+        &health,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    // A launch failure on rung 0 demotes — it does NOT abort the ladder.
+    assert_eq!(res.rung_used, 1);
+    assert_eq!(res.outcome.final_text, "recovered");
+    assert!(!res.fallbacks.is_empty());
+    // A spawn error is local/transient, NOT evidence the model is dead.
+    assert!(!health.is_dead(Provider::Claude, "missing-binary-model"));
+}
+
+#[tokio::test]
+async fn transient_retry_recovers_on_same_rung() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let health = ModelHealth::new();
+    let ladder = vec![rung(
+        Provider::Claude,
+        "opus",
+        Arc::new(SequencedAdapter::new(
+            Provider::Claude,
+            vec![
+                ScriptedAdapter::failing(Provider::Claude, "connection reset by peer"),
+                ScriptedAdapter::ok_with_text(Provider::Claude, "recovered"),
+            ],
+        )),
+    )];
+    let res = run_with_failover(
+        &ladder,
+        "conductor",
+        req,
+        &store,
+        &health,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    // Transient failure retried once on the SAME rung and recovered → no demotion.
+    assert_eq!(res.rung_used, 0);
+    assert!(res.fallbacks.is_empty());
+    assert_eq!(res.outcome.final_text, "recovered");
+    // model_used reflects the rung that produced the outcome.
+    assert_eq!(res.model_used, "claude/opus");
 }

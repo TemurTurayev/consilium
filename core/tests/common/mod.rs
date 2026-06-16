@@ -135,6 +135,38 @@ impl Adapter for SequencedAdapter {
     }
 }
 
+/// An adapter whose `build_command` points at a binary that does not exist, so
+/// `sessions::spawn` returns an `Err` at LAUNCH (before any event is emitted).
+/// Exercises the failover engine's spawn-error path: a launch failure must
+/// demote to the next rung WITHOUT aborting the ladder and WITHOUT marking the
+/// model dead. `classify_failure` is left as the trait default (Transient).
+#[allow(dead_code)]
+pub struct SpawnFailAdapter {
+    pub provider: Provider,
+}
+
+#[allow(dead_code)]
+impl SpawnFailAdapter {
+    pub fn new(provider: Provider) -> Self {
+        Self { provider }
+    }
+}
+
+impl Adapter for SpawnFailAdapter {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+    fn cli_binary(&self) -> &'static str {
+        "consilium-no-such-binary-xyz9"
+    }
+    fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+        tokio::process::Command::new("consilium-no-such-binary-xyz9")
+    }
+    fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
+        ClaudeAdapter.parse_line(line)
+    }
+}
+
 /// Wraps an inner [`ScriptedAdapter`] and records each `build_command` call's
 /// prompt, advisory flag, and write flag into a shared log. Lets integration
 /// tests assert what prompts were fed to a role (e.g. that a supervisor note
