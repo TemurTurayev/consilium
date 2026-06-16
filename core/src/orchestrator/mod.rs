@@ -10,3 +10,4 @@ pub mod roles;
 pub mod routing;
 pub mod runner;
 pub mod transcript;
+pub mod verify;

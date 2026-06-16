@@ -86,11 +86,27 @@ pub struct QuotaConfig {
     pub codex: CodexQuotaConfig,
 }
 
+/// Explicit build/test/lint commands for grounding conduct's accept/rework.
+/// Any field None falls back to ecosystem auto-detection; if neither yields a
+/// command, that check is skipped (recorded as "did not run").
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyConfig {
+    #[serde(default)]
+    pub build: Option<String>,
+    #[serde(default)]
+    pub test: Option<String>,
+    #[serde(default)]
+    pub lint: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub roles: RolesConfig,
     #[serde(default)]
     pub quota: QuotaConfig,
+    #[serde(default)]
+    pub verify: Option<VerifyConfig>,
 }
 
 impl Default for Config {
@@ -125,6 +141,7 @@ impl Default for Config {
                 },
             },
             quota: QuotaConfig::default(),
+            verify: None,
         }
     }
 }
@@ -252,5 +269,19 @@ mod tests {
             "conductor ladder should have 2 rungs after round-trip"
         );
         assert_eq!(ladder[0].model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn verify_config_parses() {
+        let json = r#"{"roles":{"conductor":{"provider":"claude","model":"m"},
+            "chairman":{"provider":"claude","model":"m"},"workers":[],
+            "reviewer":{"provider":"codex","model":"m"},
+            "supervisor":{"provider":"gemini","model":"m"}},
+            "verify":{"test":"cargo test","build":"cargo build"}}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        let v = cfg.verify.unwrap();
+        assert_eq!(v.test.as_deref(), Some("cargo test"));
+        assert_eq!(v.build.as_deref(), Some("cargo build"));
+        assert!(v.lint.is_none());
     }
 }
