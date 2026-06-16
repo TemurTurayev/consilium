@@ -9,7 +9,7 @@ Named after the medical *consilium*: specialists from different fields gathering
 ## Why
 
 - **Subscriptions, not API keys.** Consilium never calls provider APIs directly — it runs the official CLIs authenticated with your existing Claude Max / ChatGPT / Google plans. All their features keep working; nothing gray-zone.
-- **Quota economics changed.** Since June 15, 2026, Anthropic meters `claude -p` (headless) against a separate monthly credit instead of the flat subscription pool. Consilium's architecture is built around this: heavy lifting goes to the workers with the freest quota, and the planned *attached mode* (M3) keeps the conductor inside your interactive Claude Code session via MCP, where flat subscription limits still apply.
+- **Built for shifting quota rules.** A June 2026 plan to meter `claude -p` (headless) against a separate credit was put on hold on June 17, 2026 — headless Claude currently runs on flat subscription limits, same as interactive. Consilium doesn't depend on either outcome: heavy lifting routes to the worker with the freest quota, and the *attached mode* (M3) can keep the conductor inside your interactive Claude Code session via MCP — useful insurance if metered headless usage returns.
 - **Accurate accounting is the headline feature.** Provider token semantics genuinely differ — we verified each against recorded real CLI output (see table below). Most tools get at least one of them wrong.
 
 ## Status
@@ -138,7 +138,7 @@ Verified against recorded real CLI outputs (`core/tests/fixtures/*/recorded/`):
 
 - **`council`** — the [llm-council](https://github.com/karpathy/llm-council) pattern ported to coding agents on subscriptions: independent answers → anonymized cross-review → chairman synthesis.
 - **`auto`** (default mode) — council for planning, conductor for execution, cross-review per subtask, supervisor watching everything ("reads a lot, writes rarely" — input tokens are cheap).
-- **Attached conductor** — your interactive Claude Code session orchestrates workers through Consilium's MCP server, spending subscription limits instead of the programmatic credit.
+- **Attached conductor** — your interactive Claude Code session orchestrates workers through Consilium's MCP server: richer context, and resilient to any future return of metered headless usage.
 
 ## License
 

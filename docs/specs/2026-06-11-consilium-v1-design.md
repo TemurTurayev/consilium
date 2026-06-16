@@ -25,18 +25,20 @@ MIT license, public GitHub repository.
 
 ## 3. Economic model (critical!)
 
-Starting **June 15, 2026** Anthropic moves `claude -p` / Agent SDK out of the flat subscription pool:
-a separate monthly credit — Pro $20, Max 5x **$100**, Max 20x $200 (dollar-equivalent to API usage).
-**Interactive Claude Code remains on normal subscription limits.** Codex CLI operates
-within ChatGPT subscription limits (5-hour + weekly windows), Gemini CLI — daily
-quotas on the Google account.
+**Update 2026-06-17:** A planned change to move `claude -p` / Agent SDK off the flat
+subscription pool onto a separate monthly credit (Pro $20 / Max 5x $100 / Max 20x $200)
+was **put on hold**. Headless Claude currently runs on flat subscription limits, same as
+interactive — there is no separate credit to spend right now. Anthropic is reworking the
+plan and will give advance notice. The design below treats the repricing as a *possible
+future*, not a current fact; Consilium works either way. Codex CLI operates within ChatGPT
+subscription limits (5-hour + weekly windows), Gemini CLI — daily quotas on the Google account.
 
 Architectural implications:
 
-1. **Attached mode is the primary answer to the repricing**: the conductor lives in an interactive Claude Code session (subscription, flat) and controls the engine via MCP; only Codex/Gemini run headless. Claude's programmatic credit is barely spent.
+1. **Attached mode is insurance, not a forced workaround**: the conductor *can* live in an interactive Claude Code session and drive the engine via MCP. Today this is mainly about richer context; if metered headless usage returns, it also keeps the conductor on flat subscription limits. Detached (`claude -p`) is currently just as economical.
 2. **Claude is the low-frequency brain**: planning, arbitration, synthesis. Default routing does not send bulk code generation to it (Claude worker on Sonnet is a deliberate user choice in config, under quota-module control).
 3. **Codex + Gemini are the workhorses**: draft generation, research, routine edits.
-4. **The quota module tracks four pools separately**: Claude programmatic credit ($), Claude interactive (windows), ChatGPT (windows), Gemini (daily quotas). Spend visibility is a headline product feature.
+4. **The quota module tracks each pool separately**: Claude (subscription windows; or a programmatic-credit pool if the repricing returns), ChatGPT (windows), Gemini (daily quotas). Spend visibility is a headline product feature regardless.
 5. Optional API-key fallback to a provider, but the default is subscriptions.
 
 ## 4. Architecture
