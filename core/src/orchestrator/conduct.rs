@@ -1,10 +1,12 @@
 //! Conduct contracts: structs, parsers, and orchestration (`run_conduct`).
 
 use crate::adapters::RunRequest;
+use crate::config::VerifyConfig;
 use crate::orchestrator::changes::capture_changes;
 use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
 use crate::orchestrator::routing::pick_worker_by_provider;
+use crate::orchestrator::verify;
 use crate::quota::QuotaStore;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -166,6 +168,9 @@ pub struct ConductDeps {
     pub supervisor: Option<RoleHandle>,
     pub reviewer: Option<RoleHandle>,
     pub arbiter: Option<RoleHandle>,
+    /// Optional build/test/lint verifier. When Some, `run_verify` is called
+    /// after each worker attempt and a failed build/test overrides Accept→Rework.
+    pub verify: Option<VerifyConfig>,
 }
 
 #[derive(Debug)]
@@ -211,6 +216,7 @@ pub async fn run_conduct(
     let reviewer = deps.reviewer;
     let arbiter = deps.arbiter;
     let workers = deps.workers;
+    let verify_cfg = deps.verify;
 
     // Accumulate all run-wide fallbacks for the transcript.
     let mut all_fallbacks: Vec<Fallback> = Vec::new();
@@ -315,12 +321,14 @@ pub async fn run_conduct(
 
             if let Some(err_msg) = worker_failed_msg {
                 // All worker rungs failed — counts as a rework attempt.
+                // No verify ran because the worker itself failed.
                 attempts.push(serde_json::json!({
                     "attempt": attempt_num,
                     "worker": worker.label,
                     "decision": "rework",
                     "feedback": err_msg,
                     "changes_chars": 0,
+                    "verify": "not_run",
                 }));
                 if attempt_num >= MAX_REWORKS as usize {
                     failed = Some(format!(
@@ -345,6 +353,11 @@ pub async fn run_conduct(
             // Capture failure is an infrastructure fault — propagate loudly.
             let changes = capture_changes(&cwd)?;
             previous_changes = changes.clone();
+
+            // ── 2c2: verify (build/test/lint) ───────────────────────────────
+            // Runs after every worker attempt. A failed build/test overrides
+            // Accept→Rework (grounding rule); lint failure is advisory only.
+            let verify_outcome = verify::run_verify(&cwd, verify_cfg.as_ref()).await;
 
             // ── 2d: supervisor gate ─────────────────────────────────────────
             let supervisor_note: Option<String>;
@@ -405,12 +418,17 @@ pub async fn run_conduct(
 
             // ── 2e: conductor evaluation ────────────────────────────────────
             // run_with_failover Err means all conductor rungs are dead.
+            let verify_summary_for_prompt = if verify_outcome.ran {
+                verify_outcome.summary.as_str()
+            } else {
+                "(no verifier ran)"
+            };
             let eval_fo = {
                 let prompt = prompts::conduct_evaluation(
                     &subtask.prompt,
                     &changes,
                     &worker_text,
-                    "(not run)",
+                    verify_summary_for_prompt,
                     supervisor_note.as_deref(),
                 );
                 let cwd2 = cwd.clone();
@@ -434,10 +452,35 @@ pub async fn run_conduct(
             all_fallbacks.extend(eval_fo.fallbacks);
 
             // Fail-safe: unparseable evaluation → Rework (never silent accept).
-            let evaluation = parse_evaluation(&eval_fo.outcome.final_text).unwrap_or(Evaluation {
-                decision: EvalDecision::Rework,
-                feedback: "evaluation output unparseable".to_string(),
-            });
+            let mut evaluation =
+                parse_evaluation(&eval_fo.outcome.final_text).unwrap_or(Evaluation {
+                    decision: EvalDecision::Rework,
+                    feedback: "evaluation output unparseable".to_string(),
+                });
+
+            // ── GROUNDING RULE (keystone) ───────────────────────────────────
+            // If verify ran and failed, the subtask CANNOT be accepted this
+            // attempt — regardless of the conductor's text opinion. Override
+            // Accept→Rework with the failure summary as feedback. Passed or
+            // not-run → conductor's decision stands.
+            if verify_outcome.ran
+                && !verify_outcome.passed
+                && evaluation.decision == EvalDecision::Accept
+            {
+                evaluation = Evaluation {
+                    decision: EvalDecision::Rework,
+                    feedback: format!(
+                        "Build/test failed; fix before acceptance:\n{}",
+                        verify_outcome.summary
+                    ),
+                };
+            }
+
+            let verify_status = match (verify_outcome.ran, verify_outcome.passed) {
+                (false, _) => "not_run",
+                (true, true) => "passed",
+                (true, false) => "failed",
+            };
 
             let decision_str = match evaluation.decision {
                 EvalDecision::Accept => "accept",
@@ -452,6 +495,7 @@ pub async fn run_conduct(
                 "decision": decision_str,
                 "feedback": evaluation.feedback,
                 "changes_chars": changes.len(),
+                "verify": verify_status,
             }));
 
             match evaluation.decision {

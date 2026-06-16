@@ -2,7 +2,7 @@ mod common;
 
 #[allow(unused_imports)]
 use common::{RecordingAdapter, ScriptedAdapter, SequencedAdapter};
-use consilium::config::ModelCandidate;
+use consilium::config::{ModelCandidate, VerifyConfig};
 use consilium::event::Provider;
 use consilium::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
@@ -176,6 +176,7 @@ async fn happy_path_single_subtask() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome: ConductOutcome = run_conduct(
@@ -254,6 +255,7 @@ async fn rework_then_accept() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -313,6 +315,7 @@ async fn rework_exhaustion_fails() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -375,6 +378,7 @@ async fn supervisor_halt_aborts() {
         supervisor: Some(solo_role_handle(Provider::Claude, "model", supervisor)),
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -467,6 +471,7 @@ async fn worker_failure_counts_as_attempt() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -529,6 +534,7 @@ async fn capture_failure_propagates_as_error() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let result = run_conduct(
@@ -597,6 +603,7 @@ async fn two_subtasks_complete_in_order() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -671,6 +678,7 @@ async fn fail_on_second_preserves_first() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -762,6 +770,7 @@ async fn critical_review_forces_rework() {
         supervisor: None,
         reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -847,6 +856,7 @@ async fn arbiter_ships_on_exhaustion() {
         supervisor: None,
         reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
         arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -924,6 +934,7 @@ async fn arbiter_fails_on_exhaustion() {
         supervisor: None,
         reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
         arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -988,6 +999,7 @@ async fn supervisor_ok_does_not_interfere() {
         supervisor: Some(solo_role_handle(Provider::Claude, "model", supervisor)),
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -1103,6 +1115,7 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         supervisor: Some(solo_role_handle(Provider::Claude, "model", supervisor)),
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -1162,6 +1175,7 @@ async fn decompose_session_failure_surfaces_real_error() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let err = run_conduct(
@@ -1241,6 +1255,7 @@ async fn conduct_worker_falls_back() {
         supervisor: None,
         reviewer: None,
         arbiter: None,
+        verify: None,
     };
 
     let outcome = run_conduct(
@@ -1265,4 +1280,142 @@ async fn conduct_worker_falls_back() {
         !fallbacks.is_empty(),
         "a worker model-unavailable demotion should be recorded in transcript fallbacks"
     );
+}
+
+// ─── Test 16: failing_tests_force_rework_even_if_conductor_would_accept ──────
+// Grounding rule keystone: when verify ran and failed, Accept is overridden to
+// Rework regardless of the conductor's text opinion.
+// Attempt 1: worker writes "bad" to out.txt → verify (grep -q good out.txt) fails
+//            → conductor would accept but grounding rule forces Rework.
+// Attempt 2: worker writes "good" to out.txt → verify passes → accept stands.
+// Expected: completed == [1], attempts[0].decision=="rework", attempts[0].verify=="failed",
+//           attempts[1].decision=="accept", attempts[1].verify=="passed".
+
+#[tokio::test]
+async fn failing_tests_force_rework_even_if_conductor_would_accept() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // Conductor: plan, then accept twice (it WOULD accept both attempts)
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    // Worker attempt 1: writes "bad" to out.txt; attempt 2: writes "good" to out.txt.
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo bad > out.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+            },
+            ScriptedAdapter {
+                pre_script: "echo good > out.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "fixed it")
+            },
+        ],
+    ));
+
+    // Verify: a test command that passes only when out.txt contains "good".
+    let verify = VerifyConfig {
+        test: Some("grep -q good out.txt".into()),
+        build: None,
+        lint: None,
+    };
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: Some(verify),
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 2);
+    // Attempt 1: conductor would accept but verify failed → grounding override → rework
+    assert_eq!(attempts[0]["decision"], "rework");
+    assert_eq!(attempts[0]["verify"], "failed");
+    // Attempt 2: verify passed → conductor's accept stands
+    assert_eq!(attempts[1]["decision"], "accept");
+    assert_eq!(attempts[1]["verify"], "passed");
+}
+
+// ─── Test 17: no_verifier_is_recorded_as_unverified ──────────────────────────
+// When no verify config is given and the temp repo has no ecosystem markers
+// (no Cargo.toml, package.json, etc.), verify does not run and the transcript
+// records "not_run" for the attempt.
+
+#[tokio::test]
+async fn no_verifier_is_recorded_as_unverified() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+
+    // No verify config; temp repo has no Cargo.toml etc. — auto-detection yields nothing.
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts[0]["verify"], "not_run");
 }

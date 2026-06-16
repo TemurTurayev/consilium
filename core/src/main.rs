@@ -385,6 +385,7 @@ async fn main() -> anyhow::Result<()> {
                 arbiter: Some(RoleHandle {
                     ladder: roles::resolve_ladder(&config.roles.chairman),
                 }),
+                verify: config.verify.clone(),
             };
 
             let ctx = context.as_deref().unwrap_or("");
@@ -483,6 +484,7 @@ async fn main() -> anyhow::Result<()> {
                     arbiter: Some(RoleHandle {
                         ladder: roles::resolve_ladder(&config.roles.chairman),
                     }),
+                    verify: config.verify.clone(),
                 },
                 council_members,
                 chairman: RoleHandle {
