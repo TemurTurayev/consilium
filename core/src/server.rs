@@ -108,8 +108,11 @@ struct WsSink {
 }
 impl ProgressSink for WsSink {
     fn on_event(&self, ev: &AgentEvent) {
-        if let Ok(json) = serde_json::to_string(ev) {
-            let _ = self.tx.send(json);
+        match serde_json::to_string(ev) {
+            Ok(json) => {
+                let _ = self.tx.send(json);
+            }
+            Err(e) => tracing::warn!(error = %e, "ws: failed to serialize event; dropping"),
         }
     }
 }
