@@ -107,6 +107,44 @@ pub fn capture_changes(cwd: &Path) -> Result<String> {
     Ok(result)
 }
 
+/// Read-only list of repo-relative paths with uncommitted changes (modified,
+/// added, deleted, or untracked), sorted and deduped. Backs the worker
+/// blackboard's "files modified this run" signal. Best-effort: callers degrade
+/// to an empty list on error — this is cosmetic context, never load-bearing
+/// (unlike `capture_changes`, whose failure must surface).
+pub fn capture_changed_files(cwd: &Path) -> Result<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(cwd)
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git status failed in {} (exit {}): {}",
+            cwd.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut files: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            // porcelain v1: two status chars + a space + the path. Renames are
+            // "R  old -> new" — keep the post-arrow path. Paths with special
+            // chars are git-quoted.
+            let path = line.get(3..)?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            let path = path.rsplit(" -> ").next().unwrap_or(path);
+            Some(path.trim_matches('"').to_string())
+        })
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +222,24 @@ mod tests {
         let c = capture_changes(repo.path()).unwrap();
         assert!(c.contains("truncated"));
         assert!(c.contains('ж')); // content survived, boundary-safe
+    }
+
+    #[test]
+    fn capture_changed_files_lists_modified_and_untracked() {
+        let repo = temp_repo();
+        std::fs::write(repo.path().join("tracked.txt"), "v1\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "add", "-q"]);
+        std::fs::write(repo.path().join("tracked.txt"), "v2\n").unwrap(); // modified
+        std::fs::write(repo.path().join("untracked.rs"), "fn x() {}\n").unwrap(); // untracked
+        let files = capture_changed_files(repo.path()).unwrap();
+        assert!(files.contains(&"tracked.txt".to_string()), "got {files:?}");
+        assert!(files.contains(&"untracked.rs".to_string()), "got {files:?}");
+    }
+
+    #[test]
+    fn capture_changed_files_empty_on_clean_tree() {
+        let repo = temp_repo();
+        assert!(capture_changed_files(repo.path()).unwrap().is_empty());
     }
 }

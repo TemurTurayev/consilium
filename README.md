@@ -93,6 +93,11 @@ prompt text, so the stateless-process architecture is untouched):
   so the conductor has cross-subtask awareness. The ledger summary is mechanical
   only — no worker text leaks into it — and every block is XML-isolated and
   char-capped so cost stays bounded.
+- **Worker blackboard** — worker N's initial prompt inherits a read-only,
+  mechanical roster of the prior finished subtasks (id/title/status, no verify
+  digest, no feedback) plus the files already modified this run, so it can build
+  on — and avoid clobbering — what came before. Workers never see the conductor's
+  feedback or attempt history.
 
 ```jsonc
 // consilium.config.json — on by default; tune caps or switch off
@@ -100,7 +105,9 @@ prompt text, so the stateless-process architecture is untouched):
 ```
 
 Empty blocks are elided, so a first attempt / single-subtask run pays nothing.
-Recorded in the transcript per subtask as `status` + `summary`.
+Recorded in the transcript per subtask as `status` + `summary`. (Subtasks run
+sequentially over disjoint files; per-subtask git-worktree isolation is deferred
+until parallel workers land.)
 
 ## Resilience: model failover ladders
 
