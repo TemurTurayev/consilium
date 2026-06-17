@@ -1,5 +1,6 @@
 use crate::adapters::{Adapter, RunRequest};
 use crate::event::AgentEvent;
+use crate::orchestrator::progress;
 use crate::quota::QuotaStore;
 use crate::sessions;
 use std::sync::Arc;
@@ -71,6 +72,10 @@ pub async fn run_to_completion(
                 }
                 _ => {}
             }
+            // Live tap: forward each event to the task-local progress sink as it
+            // arrives (M3b). No-op when no sink is installed (CLI/tests) → behavior
+            // identical to before. Kept before the move-push below.
+            progress::emit(&ev);
             events.push(ev);
         }
 
