@@ -14,6 +14,12 @@
 //! digest only (no verbatim worker text); attempt_history carries the conductor's
 //! own feedback. Both are XML-isolated like the trusted blocks above, so they do
 //! not reintroduce the bare-interpolation hole.
+//!
+//! The worker blackboard (`prior_work`, on the INITIAL worker prompt) is a strict
+//! subset shown to WORKERS: a mechanical roster of prior finished subtasks
+//! (id/title/status) + files modified this run. Workers never see the conductor's
+//! `plan_ledger` (verify digests) or any subtask's `feedback`/`attempt_history`
+//! (the prose-bearing fields) — only this XML-isolated mechanical roster.
 
 /// Render an optional XML-isolated context block. `None` → empty string, so a
 /// prompt carrying no extra context stays byte-identical to its bare form.
@@ -73,6 +79,22 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
          Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
          Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
     )
+}
+
+/// Wraps a worker's INITIAL subtask prompt with the read-only `prior_work`
+/// blackboard (mechanical roster of prior finished subtasks + files modified this
+/// run). `None` → the bare subtask prompt, byte-identical to the pre-blackboard
+/// behavior. Workers see only this mechanical roster, never cross-subtask
+/// feedback or attempt history.
+pub fn conduct_initial(subtask_prompt: &str, prior_work: Option<&str>) -> String {
+    match prior_work {
+        None => subtask_prompt.to_string(),
+        Some(pw) => format!(
+            "{subtask_prompt}\n\n\
+             Earlier subtasks in THIS run are already done — read-only context. Your \
+             work must NOT overlap their files:\n<prior_work>\n{pw}\n</prior_work>"
+        ),
+    }
 }
 
 pub fn conduct_evaluation(
@@ -249,5 +271,19 @@ mod tests {
         let arb = arbiter_decide("s", "c", "f", Some("L"), Some("H"));
         assert!(arb.contains("<plan_ledger>\nL\n</plan_ledger>"));
         assert!(arb.contains("<attempt_history>\nH\n</attempt_history>"));
+    }
+
+    #[test]
+    fn initial_prompt_is_byte_identical_without_blackboard() {
+        let p = "Create src/foo.rs with a pub fn bar().";
+        assert_eq!(conduct_initial(p, None), p);
+    }
+
+    #[test]
+    fn initial_prompt_wraps_blackboard_when_some() {
+        let p = conduct_initial("do the thing", Some("- subtask 1 \"mathops\": completed"));
+        assert!(p.starts_with("do the thing"));
+        assert!(p.contains("<prior_work>\n- subtask 1 \"mathops\": completed\n</prior_work>"));
+        assert!(p.contains("read-only context"));
     }
 }

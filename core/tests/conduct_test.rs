@@ -1963,3 +1963,264 @@ async fn multi_rework_history_accumulates() {
         "accumulated history must contain both prior feedbacks; got:\n{third}"
     );
 }
+
+// ─── P0 #3: worker blackboard ───────────────────────────────────────────────
+
+// Worker N's INITIAL prompt inherits a mechanical roster of prior finished
+// subtasks + the files this run already touched.
+#[tokio::test]
+async fn blackboard_threads_prior_subtasks_to_worker() {
+    let repo = temp_repo();
+    let quota = store();
+    let wlog: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[
+                    (1, "build_math", "create m.rs"),
+                    (2, "build_text", "create t.rs"),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    // The worker records its prompts and writes a distinct file per subtask.
+    let worker = Arc::new(RecordingSequenced::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo m > m.rs".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did sub1")
+            },
+            ScriptedAdapter {
+                pre_script: "echo t > t.rs".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did sub2")
+            },
+        ],
+        wlog.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1, 2]);
+
+    let calls = wlog.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "worker runs once per subtask, got {}",
+        calls.len()
+    );
+    // Subtask 1: no prior work → bare prompt, no blackboard.
+    assert!(
+        !calls[0].0.contains("<prior_work>"),
+        "first worker must have no prior_work block"
+    );
+    // Subtask 2: inherits the roster + the file subtask 1 created.
+    let w2 = &calls[1].0;
+    assert!(
+        w2.contains("<prior_work>"),
+        "second worker must get a prior_work block; got:\n{w2}"
+    );
+    assert!(
+        w2.contains("build_math") && w2.contains("completed"),
+        "roster must show subtask 1 completed; got:\n{w2}"
+    );
+    assert!(
+        w2.contains("m.rs"),
+        "blackboard must list the file subtask 1 created; got:\n{w2}"
+    );
+    // The files line lists ONLY m.rs — subtask 2's own t.rs isn't written yet, so
+    // the this-run filter excludes it. (The worker's own subtask prompt
+    // "create t.rs" naturally mentions t.rs, so scope the check to the files line.)
+    assert!(
+        w2.contains("files modified this run: m.rs\n</prior_work>"),
+        "files line must list only m.rs, not subtask 2's own t.rs; got:\n{w2}"
+    );
+    assert!(
+        !w2.contains("verify:"),
+        "blackboard is mechanical — no verify digest may leak to the worker"
+    );
+}
+
+// Roster + file list accumulate across 3+ subtasks: subtask 3's worker sees
+// both prior subtasks and both files they created.
+#[tokio::test]
+async fn blackboard_accumulates_across_three_subtasks() {
+    let repo = temp_repo();
+    let quota = store();
+    let wlog: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[
+                    (1, "build_a", "create a.rs"),
+                    (2, "build_b", "create b.rs"),
+                    (3, "build_c", "create c.rs"),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(RecordingSequenced::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo a > a.rs".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did a")
+            },
+            ScriptedAdapter {
+                pre_script: "echo b > b.rs".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did b")
+            },
+            ScriptedAdapter {
+                pre_script: "echo c > c.rs".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did c")
+            },
+        ],
+        wlog.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1, 2, 3]);
+
+    let calls = wlog.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        3,
+        "worker runs once per subtask, got {}",
+        calls.len()
+    );
+    let w3 = &calls[2].0;
+    // Subtask 3's worker sees both prior subtasks and both prior files.
+    assert!(
+        w3.contains("build_a") && w3.contains("build_b"),
+        "got:\n{w3}"
+    );
+    // Files line lists only the prior subtasks' files (sorted), not subtask 3's
+    // own c.rs (not written yet). Scope to the files line — the subtask prompt
+    // "create c.rs" itself mentions c.rs.
+    assert!(
+        w3.contains("files modified this run: a.rs, b.rs\n</prior_work>"),
+        "files line must list only prior a.rs, b.rs (not subtask 3's own c.rs); got:\n{w3}"
+    );
+}
+
+// With memory off, the worker's prompt is byte-identical to the raw subtask
+// prompt — no blackboard ever appears.
+#[tokio::test]
+async fn blackboard_disabled_is_byte_identical() {
+    let repo = temp_repo();
+    let quota = store();
+    let wlog: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[
+                    (1, "build_math", "create m.rs"),
+                    (2, "build_text", "create t.rs"),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(RecordingSequenced::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo m > m.rs".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did sub1")
+            },
+            ScriptedAdapter {
+                pre_script: "echo t > t.rs".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did sub2")
+            },
+        ],
+        wlog.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: ConductorMemoryConfig {
+            enabled: false,
+            ledger_char_cap: 1500,
+            attempt_history_char_cap: 800,
+        },
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1, 2]);
+
+    let calls = wlog.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    for (p, _, _) in calls.iter() {
+        assert!(!p.contains("<prior_work>"), "memory off → no blackboard");
+    }
+    // Byte-identity: subtask 1's worker prompt is exactly the raw subtask prompt.
+    assert_eq!(calls[0].0, "create m.rs");
+}

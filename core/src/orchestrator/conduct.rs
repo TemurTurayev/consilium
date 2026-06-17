@@ -2,7 +2,7 @@
 
 use crate::adapters::RunRequest;
 use crate::config::{ConductorMemoryConfig, VerifyConfig};
-use crate::orchestrator::changes::capture_changes;
+use crate::orchestrator::changes::{capture_changed_files, capture_changes};
 use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
 use crate::orchestrator::routing::pick_worker_by_provider;
@@ -280,19 +280,35 @@ pub async fn run_conduct(
         })
         .collect();
 
+    // Files already dirty at run start — so the worker blackboard reports only
+    // what THIS run changed. Best-effort (cosmetic context, never load-bearing).
+    let run_start_files = capture_changed_files(&cwd).unwrap_or_default();
+
     // ── Step 2: per-subtask loop ─────────────────────────────────────────────
+    // Subtasks run SEQUENTIALLY in the shared `cwd` and (per the decompose
+    // contract) touch DISJOINT files, so a later worker reading the live tree
+    // cannot clobber an earlier one. Worktree-per-subtask isolation is deferred
+    // until real parallel workers land (it would also break the cross-subtask
+    // inheritance the blackboard provides by starting each worker from HEAD).
     'subtask: for subtask in &plan.subtasks {
         let mut attempts: Vec<serde_json::Value> = Vec::new();
         let mut supervisor_entries: Vec<serde_json::Value> = Vec::new();
 
-        // Current prompt starts as the subtask prompt; rework replaces it.
         let original_prompt = subtask.prompt.clone();
-        let mut current_prompt = original_prompt.clone();
         let mut previous_changes = String::new();
         // Cross-subtask ledger: folded status of the prior finished subtasks.
         // Stable for this whole subtask — `subtask_entries` only grows at the
         // terminal sites, which end this iteration.
         let ledger_str = mem_ledger(mem_on, &subtask_entries, ledger_cap);
+        // Worker blackboard (read-only inheritance, INITIAL prompt only): the
+        // mechanical roster of prior finished subtasks + files this run touched.
+        let changed_this_run: Vec<String> = capture_changed_files(&cwd)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| !run_start_files.contains(f))
+            .collect();
+        let blackboard = mem_blackboard(mem_on, &subtask_entries, &changed_this_run, ledger_cap);
+        let mut current_prompt = prompts::conduct_initial(&original_prompt, blackboard.as_deref());
         for attempt_num in 0..=(MAX_REWORKS as usize) {
             // ── 2a: route ────────────────────────────────────────────────────
             let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
@@ -933,6 +949,52 @@ fn mem_history(on: bool, attempts: &[serde_json::Value], cap: usize) -> Option<S
     }
 }
 
+const BLACKBOARD_ELIDED: &str = "(… earlier subtasks elided)";
+
+/// Worker-facing blackboard: a mechanical roster of prior FINISHED subtasks
+/// (status only — NO verify digest, NO feedback) plus the files modified this
+/// run. `None` when there is nothing to show. Mechanical content only — this is
+/// the read-only subset workers may see (vs. the conductor's richer ledger).
+fn render_blackboard(
+    prior_entries: &[serde_json::Value],
+    changed_files: &[String],
+    cap: usize,
+) -> Option<String> {
+    if prior_entries.is_empty() && changed_files.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = prior_entries
+        .iter()
+        .map(|e| {
+            let id = e.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let title = e.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            format!("- subtask {id} \"{title}\": {status}")
+        })
+        .collect();
+    if !changed_files.is_empty() {
+        lines.push(format!(
+            "- files modified this run: {}",
+            changed_files.join(", ")
+        ));
+    }
+    Some(fold_lines(&lines, cap, BLACKBOARD_ELIDED))
+}
+
+/// Memory-gated blackboard render: `None` when memory is off.
+fn mem_blackboard(
+    on: bool,
+    prior_entries: &[serde_json::Value],
+    changed_files: &[String],
+    cap: usize,
+) -> Option<String> {
+    if on {
+        render_blackboard(prior_entries, changed_files, cap)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,6 +1126,53 @@ mod tests {
         assert!(h.len() <= cap, "history {} exceeds cap {cap}", h.len());
         assert!(h.contains(HISTORY_ELIDED));
         assert!(h.contains("attempt 29"), "most-recent attempt must be kept");
+    }
+
+    #[test]
+    fn render_blackboard_empty_is_none() {
+        assert!(render_blackboard(&[], &[], 100).is_none());
+    }
+
+    #[test]
+    fn render_blackboard_files_only_when_no_prior_subtasks() {
+        // No prior subtasks but files already changed this run → still Some.
+        let b = render_blackboard(&[], &["src/lib.rs".to_string()], 200).unwrap();
+        assert!(b.contains("files modified this run: src/lib.rs"));
+        assert!(!b.contains("subtask"));
+    }
+
+    #[test]
+    fn render_blackboard_is_status_only_and_lists_files() {
+        // An entry whose attempts carry sensitive feedback + a verify digest in
+        // its summary — neither may surface in the worker blackboard.
+        let entry = build_subtask_entry(
+            1,
+            "mathops",
+            "completed",
+            &[serde_json::json!({
+                "attempt": 0, "decision": "accept", "verify": "passed",
+                "feedback": "SECRET conductor note",
+            })],
+            &[],
+        );
+        let files = vec!["src/mathops.rs".to_string()];
+        let b = render_blackboard(&[entry], &files, 500).unwrap();
+        assert!(b.contains("- subtask 1 \"mathops\": completed"));
+        assert!(b.contains("files modified this run: src/mathops.rs"));
+        // mechanical only: no verify digest, no feedback prose
+        assert!(
+            !b.contains("verify:"),
+            "blackboard must not carry the verify digest"
+        );
+        assert!(!b.contains("SECRET"), "blackboard must not carry feedback");
+    }
+
+    #[test]
+    fn mem_blackboard_off_is_none() {
+        let entries = vec![build_subtask_entry(1, "t", "completed", &[], &[])];
+        let files = vec!["a".to_string()];
+        assert!(mem_blackboard(false, &entries, &files, 100).is_none());
+        assert!(mem_blackboard(true, &entries, &files, 100).is_some());
     }
 
     #[test]
