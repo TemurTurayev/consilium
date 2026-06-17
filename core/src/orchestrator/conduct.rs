@@ -1,7 +1,7 @@
 //! Conduct contracts: structs, parsers, and orchestration (`run_conduct`).
 
 use crate::adapters::RunRequest;
-use crate::config::VerifyConfig;
+use crate::config::{ConductorMemoryConfig, VerifyConfig};
 use crate::orchestrator::changes::capture_changes;
 use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
@@ -171,6 +171,10 @@ pub struct ConductDeps {
     /// Optional build/test/lint verifier. When Some, `run_verify` is called
     /// after each worker attempt and a failed build/test overrides Accept→Rework.
     pub verify: Option<VerifyConfig>,
+    /// Conductor working memory (plan ledger + attempt history). When enabled,
+    /// folded prior-subtask status + this subtask's prior attempts are injected
+    /// into the conductor-facing prompts. `Default` is enabled.
+    pub memory: ConductorMemoryConfig,
 }
 
 #[derive(Debug)]
@@ -217,6 +221,9 @@ pub async fn run_conduct(
     let arbiter = deps.arbiter;
     let workers = deps.workers;
     let verify_cfg = deps.verify;
+    let mem_on = deps.memory.enabled;
+    let ledger_cap = deps.memory.ledger_char_cap;
+    let hist_cap = deps.memory.attempt_history_char_cap;
 
     // Accumulate all run-wide fallbacks for the transcript.
     let mut all_fallbacks: Vec<Fallback> = Vec::new();
@@ -282,6 +289,10 @@ pub async fn run_conduct(
         let original_prompt = subtask.prompt.clone();
         let mut current_prompt = original_prompt.clone();
         let mut previous_changes = String::new();
+        // Cross-subtask ledger: folded status of the prior finished subtasks.
+        // Stable for this whole subtask — `subtask_entries` only grows at the
+        // terminal sites, which end this iteration.
+        let ledger_str = mem_ledger(mem_on, &subtask_entries, ledger_cap);
         for attempt_num in 0..=(MAX_REWORKS as usize) {
             // ── 2a: route ────────────────────────────────────────────────────
             let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
@@ -335,17 +346,24 @@ pub async fn run_conduct(
                         "subtask {} exhausted reworks (last: {})",
                         subtask.id, err_msg
                     ));
-                    subtask_entries.push(serde_json::json!({
-                        "id": subtask.id,
-                        "title": subtask.title,
-                        "attempts": attempts,
-                        "supervisor": supervisor_entries,
-                    }));
+                    subtask_entries.push(build_subtask_entry(
+                        subtask.id,
+                        &subtask.title,
+                        "failed",
+                        &attempts,
+                        &supervisor_entries,
+                    ));
                     break 'subtask;
                 }
-                // Prepare rework prompt for next attempt.
-                current_prompt =
-                    prompts::conduct_rework(&original_prompt, &previous_changes, &err_msg);
+                // Prepare rework prompt for next attempt. History includes the
+                // just-recorded failed round.
+                let history = mem_history(mem_on, &attempts, hist_cap);
+                current_prompt = prompts::conduct_rework(
+                    &original_prompt,
+                    &previous_changes,
+                    &err_msg,
+                    history.as_deref(),
+                );
                 continue;
             }
 
@@ -359,12 +377,21 @@ pub async fn run_conduct(
             // Accept→Rework (grounding rule); lint failure is advisory only.
             let verify_outcome = verify::run_verify(&cwd, verify_cfg.as_ref()).await;
 
+            // History of PRIOR attempts (the current round isn't recorded until
+            // after evaluation), for the supervisor + conductor evaluation.
+            let prior_history = mem_history(mem_on, &attempts, hist_cap);
+
             // ── 2d: supervisor gate ─────────────────────────────────────────
             let supervisor_note: Option<String>;
             if let Some(ref sup) = supervisor {
                 let progress = build_progress(&completed, subtask, &changes);
                 let fo = {
-                    let prompt = prompts::supervisor_gate(task, &progress);
+                    let prompt = prompts::supervisor_gate(
+                        task,
+                        &progress,
+                        ledger_str.as_deref(),
+                        prior_history.as_deref(),
+                    );
                     let cwd2 = cwd.clone();
                     run_with_failover(
                         &sup.ladder,
@@ -397,12 +424,13 @@ pub async fn run_conduct(
                 match verdict.status {
                     SupervisorStatus::Halt => {
                         halted = Some(verdict.note.clone());
-                        subtask_entries.push(serde_json::json!({
-                            "id": subtask.id,
-                            "title": subtask.title,
-                            "attempts": attempts,
-                            "supervisor": supervisor_entries,
-                        }));
+                        subtask_entries.push(build_subtask_entry(
+                            subtask.id,
+                            &subtask.title,
+                            "halted",
+                            &attempts,
+                            &supervisor_entries,
+                        ));
                         break 'subtask;
                     }
                     SupervisorStatus::Concern => {
@@ -430,6 +458,8 @@ pub async fn run_conduct(
                     &worker_text,
                     verify_summary_for_prompt,
                     supervisor_note.as_deref(),
+                    ledger_str.as_deref(),
+                    prior_history.as_deref(),
                 );
                 let cwd2 = cwd.clone();
                 run_with_failover(
@@ -553,11 +583,14 @@ pub async fn run_conduct(
                             if attempt_num >= MAX_REWORKS as usize {
                                 // Exhausted with review still blocking → try arbiter.
                                 if let Some(ref arb) = arbiter {
+                                    let arb_history = mem_history(mem_on, &attempts, hist_cap);
                                     let arb_fo = {
                                         let prompt = prompts::arbiter_decide(
                                             &subtask.prompt,
                                             &changes,
                                             &findings_text,
+                                            ledger_str.as_deref(),
+                                            arb_history.as_deref(),
                                         );
                                         let cwd2 = cwd.clone();
                                         run_with_failover(
@@ -586,32 +619,46 @@ pub async fn run_conduct(
 
                                     if arb_verdict.decision == ArbiterDecision::Ship {
                                         completed.push(subtask.id);
-                                        subtask_entries.push(serde_json::json!({
-                                            "id": subtask.id,
-                                            "title": subtask.title,
-                                            "attempts": attempts,
-                                            "supervisor": supervisor_entries,
-                                            "arbiter": {
-                                                "decision": "ship",
-                                                "reason": arb_verdict.reason,
-                                            },
-                                        }));
+                                        let mut entry = build_subtask_entry(
+                                            subtask.id,
+                                            &subtask.title,
+                                            "completed",
+                                            &attempts,
+                                            &supervisor_entries,
+                                        );
+                                        if let Some(obj) = entry.as_object_mut() {
+                                            obj.insert(
+                                                "arbiter".to_string(),
+                                                serde_json::json!({
+                                                    "decision": "ship",
+                                                    "reason": arb_verdict.reason,
+                                                }),
+                                            );
+                                        }
+                                        subtask_entries.push(entry);
                                         continue 'subtask;
                                     } else {
                                         failed = Some(format!(
                                             "subtask {} arbiter failed: {}",
                                             subtask.id, arb_verdict.reason
                                         ));
-                                        subtask_entries.push(serde_json::json!({
-                                            "id": subtask.id,
-                                            "title": subtask.title,
-                                            "attempts": attempts,
-                                            "supervisor": supervisor_entries,
-                                            "arbiter": {
-                                                "decision": "fail",
-                                                "reason": arb_verdict.reason,
-                                            },
-                                        }));
+                                        let mut entry = build_subtask_entry(
+                                            subtask.id,
+                                            &subtask.title,
+                                            "failed",
+                                            &attempts,
+                                            &supervisor_entries,
+                                        );
+                                        if let Some(obj) = entry.as_object_mut() {
+                                            obj.insert(
+                                                "arbiter".to_string(),
+                                                serde_json::json!({
+                                                    "decision": "fail",
+                                                    "reason": arb_verdict.reason,
+                                                }),
+                                            );
+                                        }
+                                        subtask_entries.push(entry);
                                         break 'subtask;
                                     }
                                 }
@@ -621,30 +668,37 @@ pub async fn run_conduct(
                                     "subtask {} exhausted {} rework attempts (review gate): {}",
                                     subtask.id, MAX_REWORKS, findings_text
                                 ));
-                                subtask_entries.push(serde_json::json!({
-                                    "id": subtask.id,
-                                    "title": subtask.title,
-                                    "attempts": attempts,
-                                    "supervisor": supervisor_entries,
-                                }));
+                                subtask_entries.push(build_subtask_entry(
+                                    subtask.id,
+                                    &subtask.title,
+                                    "failed",
+                                    &attempts,
+                                    &supervisor_entries,
+                                ));
                                 break 'subtask;
                             }
 
                             // Not yet exhausted — rework with review findings.
-                            current_prompt =
-                                prompts::conduct_rework(&original_prompt, &changes, &findings_text);
+                            let history = mem_history(mem_on, &attempts, hist_cap);
+                            current_prompt = prompts::conduct_rework(
+                                &original_prompt,
+                                &changes,
+                                &findings_text,
+                                history.as_deref(),
+                            );
                             continue;
                         }
                     }
 
                     // Review clean (or no reviewer) → accept.
                     completed.push(subtask.id);
-                    subtask_entries.push(serde_json::json!({
-                        "id": subtask.id,
-                        "title": subtask.title,
-                        "attempts": attempts,
-                        "supervisor": supervisor_entries,
-                    }));
+                    subtask_entries.push(build_subtask_entry(
+                        subtask.id,
+                        &subtask.title,
+                        "completed",
+                        &attempts,
+                        &supervisor_entries,
+                    ));
                     continue 'subtask;
                 }
                 EvalDecision::Fail => {
@@ -652,12 +706,13 @@ pub async fn run_conduct(
                         "subtask {} failed: {}",
                         subtask.id, evaluation.feedback
                     ));
-                    subtask_entries.push(serde_json::json!({
-                        "id": subtask.id,
-                        "title": subtask.title,
-                        "attempts": attempts,
-                        "supervisor": supervisor_entries,
-                    }));
+                    subtask_entries.push(build_subtask_entry(
+                        subtask.id,
+                        &subtask.title,
+                        "failed",
+                        &attempts,
+                        &supervisor_entries,
+                    ));
                     break 'subtask;
                 }
                 EvalDecision::Rework => {
@@ -667,17 +722,23 @@ pub async fn run_conduct(
                             "subtask {} exhausted {} rework attempts: {}",
                             subtask.id, MAX_REWORKS, evaluation.feedback
                         ));
-                        subtask_entries.push(serde_json::json!({
-                            "id": subtask.id,
-                            "title": subtask.title,
-                            "attempts": attempts,
-                            "supervisor": supervisor_entries,
-                        }));
+                        subtask_entries.push(build_subtask_entry(
+                            subtask.id,
+                            &subtask.title,
+                            "failed",
+                            &attempts,
+                            &supervisor_entries,
+                        ));
                         break 'subtask;
                     }
                     // Prepare rework for the next iteration.
-                    current_prompt =
-                        prompts::conduct_rework(&original_prompt, &changes, &evaluation.feedback);
+                    let history = mem_history(mem_on, &attempts, hist_cap);
+                    current_prompt = prompts::conduct_rework(
+                        &original_prompt,
+                        &changes,
+                        &evaluation.feedback,
+                        history.as_deref(),
+                    );
                 }
             }
         }
@@ -703,6 +764,11 @@ pub async fn run_conduct(
         "halted": halted,
         "failed": failed,
         "fallbacks": fallbacks_json,
+        "conductor_memory": {
+            "enabled": mem_on,
+            "ledger_char_cap": ledger_cap,
+            "attempt_history_char_cap": hist_cap,
+        },
     });
 
     Ok(ConductOutcome {
@@ -729,6 +795,144 @@ fn build_progress(completed: &[u32], current: &Subtask, changes: &str) -> String
     )
 }
 
+// ─── ConductorMemory: ledger + attempt history ───────────────────────────────
+
+const LEDGER_ELIDED: &str = "(… earlier subtasks elided)";
+const HISTORY_ELIDED: &str = "(… earlier attempts elided)";
+
+/// The verify status of the most recent attempt, for the mechanical summary.
+fn last_verify(attempts: &[serde_json::Value]) -> &str {
+    attempts
+        .last()
+        .and_then(|a| a.get("verify"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("-")
+}
+
+/// THE single place a finished-subtask transcript entry is built, so `status` +
+/// `summary` can never be forgotten at one of the many terminal sites. `summary`
+/// is MECHANICAL ONLY (status + verify digest) — no worker/feedback text leaks
+/// into the cross-subtask ledger. Arbiter sites insert an extra `arbiter` field
+/// on the returned object before pushing.
+fn build_subtask_entry(
+    id: u32,
+    title: &str,
+    status: &str,
+    attempts: &[serde_json::Value],
+    supervisor: &[serde_json::Value],
+) -> serde_json::Value {
+    let summary = format!("{status} (verify: {})", last_verify(attempts));
+    serde_json::json!({
+        "id": id,
+        "title": title,
+        "status": status,
+        "summary": summary,
+        "attempts": attempts,
+        "supervisor": supervisor,
+    })
+}
+
+/// Char-boundary-safe prefix truncation (keep the head).
+fn truncate_head(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    &s[..i]
+}
+
+/// Fold lines into at most `cap` chars, keeping the MOST-RECENT lines (the tail
+/// of `lines`). If any are dropped, prepend `marker` — counted inside the budget
+/// so the rendered block never exceeds `cap`.
+fn fold_lines(lines: &[String], cap: usize, marker: &str) -> String {
+    let full = lines.join("\n");
+    if full.len() <= cap {
+        return full;
+    }
+    // Pathologically small cap: not even the marker fits. Return a bounded marker
+    // so the rendered block is still guaranteed `<= cap` (never panics, never leaks).
+    if cap < marker.len() + 1 {
+        return truncate_head(marker, cap).to_string();
+    }
+    let budget = cap.saturating_sub(marker.len() + 1); // +1 for the marker's newline
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for line in lines.iter().rev() {
+        let add = line.len() + if kept.is_empty() { 0 } else { 1 };
+        if used + add > budget {
+            break;
+        }
+        used += add;
+        kept.push(line.as_str());
+    }
+    kept.reverse();
+    if kept.is_empty() {
+        // Even the single most-recent line overflows: keep a bounded prefix.
+        let last = lines.last().map(|s| s.as_str()).unwrap_or("");
+        return format!("{marker}\n{}", truncate_head(last, budget));
+    }
+    format!("{marker}\n{}", kept.join("\n"))
+}
+
+/// Folded plan ledger of prior FINISHED subtasks (the entries already pushed).
+/// `None` when there are none. Mechanical content only (id/title/status/summary).
+fn render_ledger(prior_entries: &[serde_json::Value], cap: usize) -> Option<String> {
+    if prior_entries.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = prior_entries
+        .iter()
+        .map(|e| {
+            let id = e.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let title = e.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let summary = e.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+            format!("- subtask {id} \"{title}\": {summary}")
+        })
+        .collect();
+    Some(fold_lines(&lines, cap, LEDGER_ELIDED))
+}
+
+/// Folded attempt history for the current subtask. `None` when there are no
+/// prior attempts. Carries the conductor's own feedback so it stops repeating
+/// itself; the caller's template XML-isolates it.
+fn render_attempt_history(attempts: &[serde_json::Value], cap: usize) -> Option<String> {
+    if attempts.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = attempts
+        .iter()
+        .map(|a| {
+            let n = a.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0);
+            let decision = a.get("decision").and_then(|v| v.as_str()).unwrap_or("");
+            let verify = a.get("verify").and_then(|v| v.as_str()).unwrap_or("");
+            let feedback = a.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
+            format!("- attempt {n}: {decision} (verify: {verify}) — {feedback}")
+        })
+        .collect();
+    Some(fold_lines(&lines, cap, HISTORY_ELIDED))
+}
+
+/// Memory-gated ledger render: `None` when memory is off.
+fn mem_ledger(on: bool, prior_entries: &[serde_json::Value], cap: usize) -> Option<String> {
+    if on {
+        render_ledger(prior_entries, cap)
+    } else {
+        None
+    }
+}
+
+/// Memory-gated attempt-history render: `None` when memory is off.
+fn mem_history(on: bool, attempts: &[serde_json::Value], cap: usize) -> Option<String> {
+    if on {
+        render_attempt_history(attempts, cap)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,6 +951,119 @@ mod tests {
     fn malformed_plan_returns_none() {
         assert!(parse_plan("no json at all").is_none());
         assert!(parse_plan(r#"{"subtasks": broken"#).is_none());
+    }
+
+    // ── ConductorMemory renderers ───────────────────────────────────────────
+
+    #[test]
+    fn render_ledger_and_history_empty_are_none() {
+        assert!(render_ledger(&[], 100).is_none());
+        assert!(render_attempt_history(&[], 100).is_none());
+    }
+
+    #[test]
+    fn build_subtask_entry_summary_is_mechanical_only() {
+        // Feedback with sensitive text must NOT reach the cross-subtask ledger.
+        let attempts = vec![serde_json::json!({
+            "attempt": 0, "worker": "w", "decision": "accept",
+            "feedback": "SECRET worker feedback text", "changes_chars": 3, "verify": "passed",
+        })];
+        let entry = build_subtask_entry(1, "title", "completed", &attempts, &[]);
+        assert_eq!(entry["status"], "completed");
+        assert_eq!(entry["summary"], "completed (verify: passed)");
+        assert!(
+            !entry["summary"].as_str().unwrap().contains("SECRET"),
+            "no feedback text may leak into the ledger summary"
+        );
+    }
+
+    #[test]
+    fn last_verify_uses_the_most_recent_attempt() {
+        let attempts = vec![
+            serde_json::json!({"attempt":0,"decision":"rework","verify":"failed","feedback":"x"}),
+            serde_json::json!({"attempt":1,"decision":"accept","verify":"passed","feedback":""}),
+        ];
+        assert_eq!(last_verify(&attempts), "passed");
+        assert_eq!(last_verify(&[]), "-");
+    }
+
+    #[test]
+    fn render_ledger_folds_under_cap_with_marker() {
+        let entries: Vec<serde_json::Value> = (1..=20)
+            .map(|i| build_subtask_entry(i, "t", "completed", &[], &[]))
+            .collect();
+        let cap = 120;
+        let rendered = render_ledger(&entries, cap).unwrap();
+        assert!(
+            rendered.len() <= cap,
+            "rendered ledger {} exceeds cap {cap}",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains(LEDGER_ELIDED),
+            "an elided ledger must carry the marker"
+        );
+        assert!(
+            rendered.contains("subtask 20"),
+            "the most-recent subtask must be kept"
+        );
+    }
+
+    #[test]
+    fn render_ledger_fits_uses_all_lines_no_marker() {
+        let entries: Vec<serde_json::Value> = (1..=2)
+            .map(|i| build_subtask_entry(i, "t", "completed", &[], &[]))
+            .collect();
+        let rendered = render_ledger(&entries, 1000).unwrap();
+        assert!(!rendered.contains(LEDGER_ELIDED));
+        assert!(rendered.contains("subtask 1"));
+        assert!(rendered.contains("subtask 2"));
+    }
+
+    #[test]
+    fn render_attempt_history_includes_feedback_and_decision() {
+        let attempts = vec![
+            serde_json::json!({"attempt":0,"decision":"rework","verify":"failed","feedback":"add docs"}),
+        ];
+        let h = render_attempt_history(&attempts, 500).unwrap();
+        assert!(h.contains("attempt 0"));
+        assert!(h.contains("rework"));
+        assert!(h.contains("add docs"));
+    }
+
+    #[test]
+    fn mem_gates_return_none_when_off() {
+        let entries = vec![build_subtask_entry(1, "t", "completed", &[], &[])];
+        assert!(mem_ledger(false, &entries, 100).is_none());
+        assert!(mem_history(false, &entries, 100).is_none());
+        assert!(mem_ledger(true, &entries, 100).is_some());
+    }
+
+    #[test]
+    fn fold_lines_bounds_even_tiny_cap() {
+        let lines = vec!["aaaa".to_string(), "bbbb".to_string(), "cccc".to_string()];
+        // cap smaller than the marker → output is a bounded marker, still <= cap.
+        for cap in [1usize, 3, 5, 10] {
+            let out = fold_lines(&lines, cap, LEDGER_ELIDED);
+            assert!(out.len() <= cap, "fold output {out:?} exceeds cap {cap}");
+        }
+    }
+
+    #[test]
+    fn render_attempt_history_respects_cap() {
+        let attempts: Vec<serde_json::Value> = (0..30)
+            .map(|n| {
+                serde_json::json!({
+                    "attempt": n, "decision": "rework", "verify": "failed",
+                    "feedback": "some moderately long feedback text here",
+                })
+            })
+            .collect();
+        let cap = 200;
+        let h = render_attempt_history(&attempts, cap).unwrap();
+        assert!(h.len() <= cap, "history {} exceeds cap {cap}", h.len());
+        assert!(h.contains(HISTORY_ELIDED));
+        assert!(h.contains("attempt 29"), "most-recent attempt must be kept");
     }
 
     #[test]
@@ -815,13 +1132,15 @@ mod tests {
             "report",
             "(not run)",
             None,
+            None,
+            None,
         );
         assert!(parse_evaluation(&p).is_some());
     }
 
     #[test]
     fn supervisor_template_example_parses() {
-        let p = crate::orchestrator::prompts::supervisor_gate("task", "progress");
+        let p = crate::orchestrator::prompts::supervisor_gate("task", "progress", None, None);
         assert!(parse_supervisor(&p).is_some());
     }
 
@@ -855,7 +1174,9 @@ mod tests {
 
     #[test]
     fn arbiter_template_example_parses() {
-        let p = crate::orchestrator::prompts::arbiter_decide("subtask", "changes", "findings");
+        let p = crate::orchestrator::prompts::arbiter_decide(
+            "subtask", "changes", "findings", None, None,
+        );
         let v = parse_arbiter(&p).expect("arbiter template example must parse");
         // Template example decision is "ship".
         assert_eq!(v.decision, ArbiterDecision::Ship);

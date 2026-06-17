@@ -79,6 +79,29 @@ Why: research on agent self-correction is clear that a model judging its own wor
 the whole accept/rework loop. Every attempt's verify status (`passed` / `failed`
 / `not_run`) lands in the run transcript.
 
+## Conductor memory: it remembers across the run
+
+By default the conductor carries a working memory **within** a run (it travels as
+prompt text, so the stateless-process architecture is untouched):
+
+- **Cumulative attempt history** — when a subtask is reworked, the conductor's
+  next judgment and the worker's next attempt both see *every* prior round's
+  decision + feedback, not just the last one. It stops re-issuing the same
+  feedback and oscillating.
+- **Plan ledger** — each subtask's conductor prompt carries a folded status line
+  for the prior finished subtasks (id, title, completed/failed + verify digest),
+  so the conductor has cross-subtask awareness. The ledger summary is mechanical
+  only — no worker text leaks into it — and every block is XML-isolated and
+  char-capped so cost stays bounded.
+
+```jsonc
+// consilium.config.json — on by default; tune caps or switch off
+"conductorMemory": { "enabled": true, "ledgerCharCap": 1500, "attemptHistoryCharCap": 800 }
+```
+
+Empty blocks are elided, so a first attempt / single-subtask run pays nothing.
+Recorded in the transcript per subtask as `status` + `summary`.
+
 ## Resilience: model failover ladders
 
 Each role takes an ordered **ladder** of models, not one model. If the primary

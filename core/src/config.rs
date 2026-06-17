@@ -100,13 +100,59 @@ pub struct VerifyConfig {
     pub lint: Option<String>,
 }
 
+/// Conductor working memory: a live plan ledger (prior subtasks' status) plus the
+/// current subtask's cumulative attempt history, injected as XML-isolated prompt
+/// text into the conductor-facing stages (evaluation / supervisor / arbiter) and
+/// the rework prompt (history only). Each block is bounded by a char cap so cost
+/// stays bounded on long multi-subtask runs. Default ON — the conductor remembers
+/// out of the box; empty blocks are elided, so cost is paid only where there is
+/// real prior context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConductorMemoryConfig {
+    #[serde(default = "default_memory_enabled")]
+    pub enabled: bool,
+    /// Max chars of the rendered <plan_ledger> block per call.
+    #[serde(default = "default_ledger_char_cap")]
+    pub ledger_char_cap: usize,
+    /// Max chars of the rendered <attempt_history> block per call.
+    #[serde(default = "default_attempt_history_char_cap")]
+    pub attempt_history_char_cap: usize,
+}
+
+fn default_memory_enabled() -> bool {
+    true
+}
+fn default_ledger_char_cap() -> usize {
+    1500
+}
+fn default_attempt_history_char_cap() -> usize {
+    800
+}
+
+impl Default for ConductorMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_memory_enabled(),
+            ledger_char_cap: default_ledger_char_cap(),
+            attempt_history_char_cap: default_attempt_history_char_cap(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     pub roles: RolesConfig,
     #[serde(default)]
     pub quota: QuotaConfig,
     #[serde(default)]
     pub verify: Option<VerifyConfig>,
+    /// Conductor working memory. `None` in a user file resolves to the default
+    /// (enabled) at the call site via `unwrap_or_default`; `consilium init`
+    /// emits it explicitly so the knob is discoverable.
+    #[serde(default)]
+    pub conductor_memory: Option<ConductorMemoryConfig>,
 }
 
 impl Default for Config {
@@ -142,6 +188,7 @@ impl Default for Config {
             },
             quota: QuotaConfig::default(),
             verify: None,
+            conductor_memory: Some(ConductorMemoryConfig::default()),
         }
     }
 }
@@ -269,6 +316,46 @@ mod tests {
             "conductor ladder should have 2 rungs after round-trip"
         );
         assert_eq!(ladder[0].model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn conductor_memory_defaults_to_enabled() {
+        let m = ConductorMemoryConfig::default();
+        assert!(m.enabled);
+        assert_eq!(m.ledger_char_cap, 1500);
+        assert_eq!(m.attempt_history_char_cap, 800);
+        // Config default emits the block so `consilium init` writes it.
+        assert!(Config::default().conductor_memory.is_some());
+    }
+
+    #[test]
+    fn conductor_memory_parses_and_round_trips() {
+        let json = r#"{"roles":{"conductor":{"provider":"claude","model":"m"},
+            "chairman":{"provider":"claude","model":"m"},"workers":[],
+            "reviewer":{"provider":"codex","model":"m"},
+            "supervisor":{"provider":"gemini","model":"m"}},
+            "conductorMemory":{"enabled":false,"ledgerCharCap":42,"attemptHistoryCharCap":7}}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        let m = cfg.conductor_memory.clone().unwrap();
+        assert!(!m.enabled);
+        assert_eq!(m.ledger_char_cap, 42);
+        assert_eq!(m.attempt_history_char_cap, 7);
+        // round-trip
+        let back: Config = serde_json::from_str(&cfg.to_pretty_json().unwrap()).unwrap();
+        assert_eq!(back.conductor_memory, cfg.conductor_memory);
+    }
+
+    #[test]
+    fn conductor_memory_omitted_field_resolves_to_enabled_default() {
+        // A user file that omits the block parses as None; consumers
+        // `unwrap_or_default()` → enabled.
+        let json = r#"{"roles":{"conductor":{"provider":"claude","model":"m"},
+            "chairman":{"provider":"claude","model":"m"},"workers":[],
+            "reviewer":{"provider":"codex","model":"m"},
+            "supervisor":{"provider":"gemini","model":"m"}}}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(cfg.conductor_memory.is_none());
+        assert!(cfg.conductor_memory.unwrap_or_default().enabled);
     }
 
     #[test]
