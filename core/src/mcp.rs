@@ -232,7 +232,11 @@ impl McpServer {
             }
         };
 
-        // Capture changes (best-effort) + run the configured verifier, if any.
+        // Capture changes + run the configured verifier, if any. NOTE: unlike the
+        // library `capture_changes` (whose git error is load-bearing — a worker
+        // that did nothing must not be accepted), here a git failure degrades to
+        // `None` on purpose: the attached conductor reviews diffs itself and may
+        // legitimately point a worker at a non-git cwd. Best-effort context.
         let changes = capture_changes(&cwd).ok();
         let verify_outcome = verify::run_verify(&cwd, self.verify.as_ref()).await;
         let verify = verify_outcome.ran.then_some(VerifyReport {

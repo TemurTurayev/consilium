@@ -164,3 +164,106 @@ async fn quota_status_reports_recorded_totals() {
     assert_eq!(s.claude.input_tokens, 0);
     assert_eq!(s.window_secs, 5 * 3600);
 }
+
+#[tokio::test]
+async fn run_worker_all_rungs_fail_returns_structured_error() {
+    let repo = temp_repo();
+    let server = McpServer::from_parts(
+        vec![worker(
+            "codex-gpt",
+            Arc::new(ScriptedAdapter::failing(Provider::Codex, "model exploded")),
+        )],
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .run_worker_inner(params("codex-gpt", repo.path()))
+        .await;
+
+    assert!(!out.ok, "all rungs failed → ok:false");
+    assert!(out.error.is_some(), "should carry a structured error");
+    assert!(out.model_used.is_none());
+}
+
+#[tokio::test]
+async fn run_worker_non_git_cwd_degrades_changes_to_none() {
+    // capture_changes errors in a non-git dir; the tool degrades to changes:None
+    // (best-effort) rather than failing the worker — the conductor still gets ok.
+    let dir = tempfile::tempdir().unwrap(); // deliberately NOT a git repo
+    let server = McpServer::from_parts(
+        vec![worker(
+            "codex-gpt",
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did it")),
+        )],
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .run_worker_inner(params("codex-gpt", dir.path()))
+        .await;
+
+    assert!(out.ok, "worker succeeded; error={:?}", out.error);
+    assert!(
+        out.changes.is_none(),
+        "non-git cwd → capture_changes degrades to None, got {:?}",
+        out.changes
+    );
+}
+
+// Real stdio-transport smoke: spawn the `consilium mcp` binary, drive the MCP
+// handshake, and assert tools/list returns both tools — protects the rmcp serve
+// wiring (the inner-method tests bypass the transport). Isolated via a temp HOME
+// (the quota db) and a temp cwd (the config), so it touches nothing real.
+#[test]
+fn mcp_stdio_server_lists_both_tools() {
+    use std::io::Write;
+
+    let home = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    std::fs::write(
+        proj.path().join("consilium.config.json"),
+        consilium::config::Config::default()
+            .to_pretty_json()
+            .unwrap(),
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_consilium"))
+        .arg("mcp")
+        .current_dir(proj.path())
+        .env("HOME", home.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let reqs = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        "\n",
+    );
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(reqs.as_bytes())
+        .unwrap();
+    // stdin dropped above → EOF → the server responds, then exits cleanly.
+
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"run_worker\""),
+        "tools/list must include run_worker; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"quota_status\""),
+        "tools/list must include quota_status; got:\n{stdout}"
+    );
+}
