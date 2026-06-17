@@ -1493,9 +1493,12 @@ async fn attempt_history_threads_prior_feedback() {
     assert_eq!(outcome.completed, vec![1]);
 
     let calls = log.lock().unwrap();
-    assert!(
-        calls.len() >= 3,
-        "expected decompose + 2 judgments, got {}",
+    // Exact count: decompose + judge(attempt 0) + judge(attempt 1). Asserting the
+    // exact count (not >=) catches an over-call regression the clamping would hide.
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected exactly decompose + 2 judgments, got {}",
         calls.len()
     );
     // Attempt 0's judgment: no prior attempts -> no history block.
@@ -1503,14 +1506,16 @@ async fn attempt_history_threads_prior_feedback() {
         !calls[1].0.contains("<attempt_history>"),
         "first attempt judgment must have no attempt_history block"
     );
-    // Attempt 1's judgment: carries the prior round's feedback.
+    // Attempt 1's judgment: carries the prior round's exact history line.
     assert!(
         calls[2].0.contains("<attempt_history>"),
         "second attempt judgment must carry an attempt_history block"
     );
     assert!(
-        calls[2].0.contains("ADD_DOCS_MARKER"),
-        "second attempt judgment must echo the prior rework feedback; got:\n{}",
+        calls[2]
+            .0
+            .contains("attempt 0: rework (verify: not_run) — ADD_DOCS_MARKER"),
+        "second attempt judgment must echo the prior round's exact history line; got:\n{}",
         calls[2].0
     );
 }
@@ -1566,9 +1571,10 @@ async fn plan_ledger_threads_prior_subtasks() {
     assert_eq!(outcome.completed, vec![1, 2]);
 
     let calls = log.lock().unwrap();
-    assert!(
-        calls.len() >= 3,
-        "expected decompose + 2 judgments, got {}",
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected exactly decompose + 2 judgments, got {}",
         calls.len()
     );
     // Subtask 1's judgment: no prior subtasks -> no ledger.
@@ -1663,6 +1669,12 @@ async fn grounding_override_recorded_in_history() {
 
     // Prompt layer: attempt 1's history shows attempt 0 as rework/failed, not accept.
     let calls = log.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected exactly decompose + 2 judgments, got {}",
+        calls.len()
+    );
     let judged = &calls[2].0;
     assert!(
         judged.contains("attempt 0: rework (verify: failed)"),
@@ -1733,4 +1745,221 @@ async fn memory_disabled_is_byte_identical() {
             "memory off -> no attempt_history"
         );
     }
+}
+
+// The supervisor — whose job is to catch repeated failures and scope drift —
+// must receive the cross-subtask plan ledger.
+#[tokio::test]
+async fn supervisor_receives_plan_ledger() {
+    let repo = temp_repo();
+    let quota = store();
+    let sup_log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "alpha_subtask", "do a"), (2, "beta_subtask", "do b")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let supervisor = Arc::new(RecordingSequenced::new(
+        Provider::Gemini,
+        vec![
+            ScriptedAdapter::ok_with_text(Provider::Gemini, &supervisor_ok_json()),
+            ScriptedAdapter::ok_with_text(Provider::Gemini, &supervisor_ok_json()),
+        ],
+        sup_log.clone(),
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo x >> f.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: Some(solo_role_handle(Provider::Gemini, "m", supervisor)),
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1, 2]);
+
+    let calls = sup_log.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "supervisor runs once per subtask, got {}",
+        calls.len()
+    );
+    assert!(
+        !calls[0].0.contains("<plan_ledger>"),
+        "subtask 1 supervisor: no prior subtasks → no ledger"
+    );
+    assert!(
+        calls[1].0.contains("<plan_ledger>") && calls[1].0.contains("alpha_subtask"),
+        "subtask 2 supervisor must carry the plan ledger; got:\n{}",
+        calls[1].0
+    );
+}
+
+// The arbiter (final appeal at rework exhaustion) must receive BOTH memory
+// blocks: the cross-subtask ledger and this subtask's attempt history.
+#[tokio::test]
+async fn arbiter_receives_memory_blocks() {
+    let repo = temp_repo();
+    let quota = store();
+    let arb_log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Conductor accepts every time (clamps to the last step).
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "alpha_subtask", "do a"), (2, "beta_subtask", "do b")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    // Reviewer: clean for subtask 1, then critical for all of subtask 2's attempts.
+    let reviewer = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter::ok_with_text(Provider::Codex, &review_clean_json()),
+            ScriptedAdapter::ok_with_text(Provider::Codex, &review_critical_json("f.txt", "bug")),
+            ScriptedAdapter::ok_with_text(Provider::Codex, &review_critical_json("f.txt", "bug")),
+            ScriptedAdapter::ok_with_text(Provider::Codex, &review_critical_json("f.txt", "bug")),
+        ],
+    ));
+    let arbiter = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            &arbiter_ship_json("acceptable"),
+        )],
+        arb_log.clone(),
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo x >> f.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(Provider::Codex, "m", reviewer)),
+        arbiter: Some(solo_role_handle(Provider::Claude, "m", arbiter)),
+        verify: None,
+        memory: Default::default(),
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1, 2]);
+
+    let calls = arb_log.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "arbiter fires once at exhaustion, got {}",
+        calls.len()
+    );
+    let p = &calls[0].0;
+    assert!(
+        p.contains("<plan_ledger>") && p.contains("alpha_subtask"),
+        "arbiter must carry the cross-subtask ledger; got:\n{p}"
+    );
+    assert!(
+        p.contains("<attempt_history>"),
+        "arbiter must carry the subtask's attempt history; got:\n{p}"
+    );
+}
+
+// History accumulates across multiple rework rounds: the third judgment sees
+// both earlier feedback strings, not just the latest.
+#[tokio::test]
+async fn multi_rework_history_accumulates() {
+    let repo = temp_repo();
+    let quota = store();
+    let log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // decompose, rework MSG_ONE, rework MSG_TWO, accept (attempts 0,1,2).
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("MSG_ONE")),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("MSG_TWO")),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        log.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", writing_worker())],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1]);
+
+    let calls = log.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        4,
+        "expected decompose + 3 judgments, got {}",
+        calls.len()
+    );
+    // The third judgment (attempt 2) must see BOTH prior rounds' feedback.
+    let third = &calls[3].0;
+    assert!(
+        third.contains("MSG_ONE") && third.contains("MSG_TWO"),
+        "accumulated history must contain both prior feedbacks; got:\n{third}"
+    );
 }

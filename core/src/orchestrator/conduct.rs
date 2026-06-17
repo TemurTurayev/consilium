@@ -852,6 +852,11 @@ fn fold_lines(lines: &[String], cap: usize, marker: &str) -> String {
     if full.len() <= cap {
         return full;
     }
+    // Pathologically small cap: not even the marker fits. Return a bounded marker
+    // so the rendered block is still guaranteed `<= cap` (never panics, never leaks).
+    if cap < marker.len() + 1 {
+        return truncate_head(marker, cap).to_string();
+    }
     let budget = cap.saturating_sub(marker.len() + 1); // +1 for the marker's newline
     let mut kept: Vec<&str> = Vec::new();
     let mut used = 0usize;
@@ -1032,6 +1037,33 @@ mod tests {
         assert!(mem_ledger(false, &entries, 100).is_none());
         assert!(mem_history(false, &entries, 100).is_none());
         assert!(mem_ledger(true, &entries, 100).is_some());
+    }
+
+    #[test]
+    fn fold_lines_bounds_even_tiny_cap() {
+        let lines = vec!["aaaa".to_string(), "bbbb".to_string(), "cccc".to_string()];
+        // cap smaller than the marker → output is a bounded marker, still <= cap.
+        for cap in [1usize, 3, 5, 10] {
+            let out = fold_lines(&lines, cap, LEDGER_ELIDED);
+            assert!(out.len() <= cap, "fold output {out:?} exceeds cap {cap}");
+        }
+    }
+
+    #[test]
+    fn render_attempt_history_respects_cap() {
+        let attempts: Vec<serde_json::Value> = (0..30)
+            .map(|n| {
+                serde_json::json!({
+                    "attempt": n, "decision": "rework", "verify": "failed",
+                    "feedback": "some moderately long feedback text here",
+                })
+            })
+            .collect();
+        let cap = 200;
+        let h = render_attempt_history(&attempts, cap).unwrap();
+        assert!(h.len() <= cap, "history {} exceeds cap {cap}", h.len());
+        assert!(h.contains(HISTORY_ELIDED));
+        assert!(h.contains("attempt 29"), "most-recent attempt must be kept");
     }
 
     #[test]
