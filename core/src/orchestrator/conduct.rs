@@ -1134,6 +1134,14 @@ mod tests {
     }
 
     #[test]
+    fn render_blackboard_files_only_when_no_prior_subtasks() {
+        // No prior subtasks but files already changed this run → still Some.
+        let b = render_blackboard(&[], &["src/lib.rs".to_string()], 200).unwrap();
+        assert!(b.contains("files modified this run: src/lib.rs"));
+        assert!(!b.contains("subtask"));
+    }
+
+    #[test]
     fn render_blackboard_is_status_only_and_lists_files() {
         // An entry whose attempts carry sensitive feedback + a verify digest in
         // its summary — neither may surface in the worker blackboard.

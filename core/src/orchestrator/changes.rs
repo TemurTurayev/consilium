@@ -242,4 +242,27 @@ mod tests {
         let repo = temp_repo();
         assert!(capture_changed_files(repo.path()).unwrap().is_empty());
     }
+
+    #[test]
+    fn capture_changed_files_lists_deleted() {
+        let repo = temp_repo();
+        std::fs::write(repo.path().join("gone.txt"), "x\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "add", "-q"]);
+        std::fs::remove_file(repo.path().join("gone.txt")).unwrap();
+        let files = capture_changed_files(repo.path()).unwrap();
+        assert!(files.contains(&"gone.txt".to_string()), "got {files:?}");
+    }
+
+    #[test]
+    fn capture_changed_files_lists_renamed_target() {
+        let repo = temp_repo();
+        std::fs::write(repo.path().join("old.txt"), "x\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "add", "-q"]);
+        git(repo.path(), &["mv", "old.txt", "new.txt"]); // staged rename → "R  old -> new"
+        let files = capture_changed_files(repo.path()).unwrap();
+        // The post-arrow (new) path is what a worker should see.
+        assert!(files.contains(&"new.txt".to_string()), "got {files:?}");
+    }
 }
