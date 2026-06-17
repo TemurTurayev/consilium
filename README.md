@@ -60,6 +60,25 @@ cargo run -q -- init
 cargo run -q -- doctor --models
 ```
 
+## Grounded execution: conduct trusts your tests, not vibes
+
+`conduct` runs your real build/test/lint after each worker attempt and treats the
+result as authoritative: **a subtask whose tests fail cannot be accepted** — even
+if the conductor's own judgment says "looks good", a failed verifier forces a
+rework. "No verifier ran" is recorded as `not_run` and the conductor is told its
+judgment is unverified. Declare commands in `consilium.config.json`, or rely on
+auto-detection (Cargo / npm / pytest / make):
+
+```jsonc
+// consilium.config.json
+"verify": { "test": "cargo test", "build": "cargo build" }  // lint is advisory
+```
+
+Why: research on agent self-correction is clear that a model judging its own work
+*without* an external verifier often degrades — so the build/test signal grounds
+the whole accept/rework loop. Every attempt's verify status (`passed` / `failed`
+/ `not_run`) lands in the run transcript.
+
 ## Resilience: model failover ladders
 
 Each role takes an ordered **ladder** of models, not one model. If the primary
