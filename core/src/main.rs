@@ -78,6 +78,16 @@ enum Command {
     /// in your interactive Claude Code session to drive workers via the
     /// `run_worker` and `quota_status` tools without spending Claude credit.
     Mcp,
+    /// Run the localhost server. Open a WebSocket at /ws/session and send a
+    /// `{"kind":"conduct","task":"..."}` frame to stream a run's events live.
+    Serve {
+        /// Address to bind (host:port).
+        #[arg(long, default_value = "127.0.0.1:7878")]
+        addr: String,
+        /// Hard per-session timeout in seconds.
+        #[arg(long, default_value_t = 900)]
+        timeout: u64,
+    },
 }
 
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
@@ -586,6 +596,22 @@ async fn main() -> anyhow::Result<()> {
             )))?;
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             consilium::mcp::serve_stdio(config, store).await?;
+        }
+        Command::Serve { addr, timeout } => {
+            let config = consilium::config::Config::load(Some(std::path::Path::new(
+                "consilium.config.json",
+            )))?;
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let socket_addr: std::net::SocketAddr = addr
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid --addr '{addr}': {e}"))?;
+            consilium::server::serve(
+                socket_addr,
+                config,
+                store,
+                std::time::Duration::from_secs(timeout),
+            )
+            .await?;
         }
     }
     Ok(())

@@ -22,7 +22,8 @@ Named after the medical *consilium*: specialists from different fields gathering
 | **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — verified against a live model outage |
 | **Harness leveling (P0)** | build/test **grounding**, **ConductorMemory** (plan ledger + attempt history), **worker blackboard** | ✅ Done — research-backed |
 | **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing `run_worker` + `quota_status` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
-| **M3b–e — Server & UI** | axum + WebSocket streaming, full 5-tool MCP surface + cross-family review, memory tools, React web UI + quota dashboards | 🚧 Next |
+| **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
+| **M3c–e — Full MCP surface & UI** | remaining MCP tools + cross-family review, memory/recitation tools, React web UI + quota dashboards | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Quick start
@@ -134,6 +135,27 @@ Then ask your session to delegate: it decides *what* to hand off and whether to
 accept; the engine executes. Logs go to stderr so they never corrupt the stdio
 protocol. (M3a — the remaining MCP tools, the WebSocket server, and the web UI
 are the next M3 slices.)
+
+## Live run streaming (`consilium serve`)
+
+`consilium serve` starts a localhost server with a WebSocket at `/ws/session`.
+Open it, send one frame describing the run, and receive every `AgentEvent` live
+as it happens, then a terminal `run_complete` frame:
+
+```bash
+consilium serve --addr 127.0.0.1:7878
+# then, from a WS client:
+#   → {"kind":"conduct","task":"add a CHANGELOG","cwd":"/path/to/repo"}
+#   ← {"type":"tool_call",...}  {"type":"message",...}  {"type":"usage",...}  ...
+#   ← {"type":"run_complete","completed":[1],"halted":null,"failed":null}
+```
+
+Live delivery rides an engine-level task-local `ProgressSink`: the run executes
+inside a scoped sink that fans each event into the socket, with **zero changes
+to the orchestration signatures** — `None` (CLI/tests) is a no-op, so behavior is
+identical when no sink is installed. This is the seam the web UI (M3e) and the
+memory/recitation tools (M3d) build on. First endpoint is `conduct`; council/auto
+and the quota/supervisor channels follow.
 
 ## Resilience: model failover ladders
 

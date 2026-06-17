@@ -5,4 +5,5 @@ pub mod event;
 pub mod mcp;
 pub mod orchestrator;
 pub mod quota;
+pub mod server;
 pub mod sessions;
