@@ -153,6 +153,12 @@ pub struct Config {
     /// emits it explicitly so the knob is discoverable.
     #[serde(default)]
     pub conductor_memory: Option<ConductorMemoryConfig>,
+    /// Cross-family review (Finding 7): route a subtask's diff to a reviewer /
+    /// arbiter of a DIFFERENT model family than the worker that produced it
+    /// (kills self-preference bias). Default off — enabling it changes which
+    /// model reviews on the stock config; flip on after validating in practice.
+    #[serde(default)]
+    pub cross_family_review: bool,
 }
 
 impl Default for Config {
@@ -189,6 +195,7 @@ impl Default for Config {
             quota: QuotaConfig::default(),
             verify: None,
             conductor_memory: Some(ConductorMemoryConfig::default()),
+            cross_family_review: false,
         }
     }
 }
@@ -356,6 +363,18 @@ mod tests {
         let cfg: Config = serde_json::from_str(json).unwrap();
         assert!(cfg.conductor_memory.is_none());
         assert!(cfg.conductor_memory.unwrap_or_default().enabled);
+    }
+
+    #[test]
+    fn cross_family_review_defaults_off_and_parses() {
+        assert!(!Config::default().cross_family_review);
+        let json = r#"{"roles":{"conductor":{"provider":"claude","model":"m"},
+            "chairman":{"provider":"claude","model":"m"},"workers":[],
+            "reviewer":{"provider":"codex","model":"m"},
+            "supervisor":{"provider":"gemini","model":"m"}},
+            "crossFamilyReview":true}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(cfg.cross_family_review);
     }
 
     #[test]

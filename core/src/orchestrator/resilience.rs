@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// One ladder rung: a model candidate paired with the adapter that runs it.
+/// `Clone` is cheap — the adapter is an `Arc` (cross-family review reorders a
+/// ladder into a new Vec without touching the adapters).
+#[derive(Clone)]
 pub struct Rung {
     pub candidate: ModelCandidate,
     pub adapter: Arc<dyn Adapter>,

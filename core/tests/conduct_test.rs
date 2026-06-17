@@ -178,6 +178,7 @@ async fn happy_path_single_subtask() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome: ConductOutcome = run_conduct(
@@ -258,6 +259,7 @@ async fn rework_then_accept() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -319,6 +321,7 @@ async fn rework_exhaustion_fails() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -383,6 +386,7 @@ async fn supervisor_halt_aborts() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -477,6 +481,7 @@ async fn worker_failure_counts_as_attempt() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -541,6 +546,7 @@ async fn capture_failure_propagates_as_error() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let result = run_conduct(
@@ -611,6 +617,7 @@ async fn two_subtasks_complete_in_order() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -687,6 +694,7 @@ async fn fail_on_second_preserves_first() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -780,6 +788,7 @@ async fn critical_review_forces_rework() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -867,6 +876,7 @@ async fn arbiter_ships_on_exhaustion() {
         arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -946,6 +956,7 @@ async fn arbiter_fails_on_exhaustion() {
         arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1012,6 +1023,7 @@ async fn supervisor_ok_does_not_interfere() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1129,6 +1141,7 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1190,6 +1203,7 @@ async fn decompose_session_failure_surfaces_real_error() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let err = run_conduct(
@@ -1271,6 +1285,7 @@ async fn conduct_worker_falls_back() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1354,6 +1369,7 @@ async fn failing_tests_force_rework_even_if_conductor_would_accept() {
         arbiter: None,
         verify: Some(verify),
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1416,6 +1432,7 @@ async fn no_verifier_is_recorded_as_unverified() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1477,6 +1494,7 @@ async fn attempt_history_threads_prior_feedback() {
         arbiter: None,
         verify: None,
         memory: Default::default(), // enabled
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1555,6 +1573,7 @@ async fn plan_ledger_threads_prior_subtasks() {
         arbiter: None,
         verify: None,
         memory: Default::default(), // enabled
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1645,6 +1664,7 @@ async fn grounding_override_recorded_in_history() {
         arbiter: None,
         verify: Some(verify),
         memory: Default::default(), // enabled
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1719,6 +1739,7 @@ async fn memory_disabled_is_byte_identical() {
             ledger_char_cap: 1500,
             attempt_history_char_cap: 800,
         },
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1787,6 +1808,7 @@ async fn supervisor_receives_plan_ledger() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1870,6 +1892,7 @@ async fn arbiter_receives_memory_blocks() {
         arbiter: Some(solo_role_handle(Provider::Claude, "m", arbiter)),
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -1934,6 +1957,7 @@ async fn multi_rework_history_accumulates() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -2012,6 +2036,7 @@ async fn blackboard_threads_prior_subtasks_to_worker() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -2115,6 +2140,7 @@ async fn blackboard_accumulates_across_three_subtasks() {
         arbiter: None,
         verify: None,
         memory: Default::default(),
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -2201,6 +2227,7 @@ async fn blackboard_disabled_is_byte_identical() {
             ledger_char_cap: 1500,
             attempt_history_char_cap: 800,
         },
+        cross_family_review: false,
     };
 
     let outcome = run_conduct(
@@ -2223,4 +2250,262 @@ async fn blackboard_disabled_is_byte_identical() {
     }
     // Byte-identity: subtask 1's worker prompt is exactly the raw subtask prompt.
     assert_eq!(calls[0].0, "create m.rs");
+}
+
+// ─── M3c: cross-family review ────────────────────────────────────────────────
+
+// With cross_family_review on, a Codex-worker diff is reviewed by a DIFFERENT
+// family. The same-family (Codex) reviewer is wired to FAIL, so a clean run
+// proves the Gemini worker fronted the review (Finding 7). Marker: "applied".
+#[tokio::test]
+async fn cross_family_review_routes_to_a_different_family() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    // Codex worker (chosen for the subtask: first in order, ties at 0 quota) writes
+    // the file; the Gemini worker doubles as the cross-family reviewer (clean).
+    let codex_worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+    let gemini = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Gemini,
+        &review_clean_json(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![
+            solo_worker("codex", Provider::Codex, "gpt", codex_worker),
+            solo_worker("gemini", Provider::Gemini, "g", gemini),
+        ],
+        supervisor: None,
+        // Same-family reviewer is set to FAIL — it must NOT be the one used.
+        reviewer: Some(solo_role_handle(
+            Provider::Codex,
+            "rev",
+            Arc::new(ScriptedAdapter::failing(
+                Provider::Codex,
+                "same-family reviewer must not be reached",
+            )),
+        )),
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: true,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let att = &outcome.transcript["subtasks"][0]["attempts"][0];
+    assert_eq!(
+        att["cross_family"], "applied",
+        "review should be routed cross-family; attempt: {att}"
+    );
+    assert_eq!(att["review"], "clean", "the Gemini reviewer returned clean");
+}
+
+// Single-family deployment: cross-family degrades to the same-family reviewer
+// (fail-open) and marks it, never blocking the review.
+#[tokio::test]
+async fn cross_family_degrades_same_family_when_no_other_family() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+    // Only Codex everywhere; reviewer (Codex) returns clean.
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "gpt", worker)],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(
+            Provider::Codex,
+            "rev",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                &review_clean_json(),
+            )),
+        )),
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: true,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let att = &outcome.transcript["subtasks"][0]["attempts"][0];
+    assert_eq!(
+        att["cross_family"], "degraded_same_family",
+        "attempt: {att}"
+    );
+    assert_eq!(att["review"], "clean");
+}
+
+// The arbiter gate also routes cross-family: a Codex worker, a Gemini reviewer
+// that keeps flagging critical (→ reworks exhaust), and a Gemini arbiter that
+// ships. A completed run proves the arbiter ran under the flag and shipped.
+#[tokio::test]
+async fn cross_family_arbiter_runs_and_ships() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+    let reviewer = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Gemini,
+        &review_critical_json("out.txt", "nit"),
+    ));
+    let arbiter = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Gemini,
+        &arbiter_ship_json("acceptable"),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "gpt", worker)],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(Provider::Gemini, "rev", reviewer)),
+        arbiter: Some(solo_role_handle(Provider::Gemini, "arb", arbiter)),
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: true,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.completed,
+        vec![1],
+        "arbiter should ship the subtask"
+    );
+    let st = &outcome.transcript["subtasks"][0];
+    assert_eq!(st["arbiter"]["decision"], "ship", "subtask: {st}");
+    assert_eq!(st["attempts"][0]["cross_family"], "applied");
+}
+
+// With the flag OFF (default), no cross_family marker is emitted — pinning the
+// byte-identity claim explicitly.
+#[tokio::test]
+async fn cross_family_off_emits_no_marker() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "gpt", worker)],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(
+            Provider::Codex,
+            "rev",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                &review_clean_json(),
+            )),
+        )),
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let att = &outcome.transcript["subtasks"][0]["attempts"][0];
+    assert!(
+        att.get("cross_family").is_none(),
+        "flag off → no cross_family marker; attempt: {att}"
+    );
 }
