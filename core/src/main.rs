@@ -404,6 +404,7 @@ async fn main() -> anyhow::Result<()> {
                 }),
                 verify: config.verify.clone(),
                 memory: config.conductor_memory.clone().unwrap_or_default(),
+                cross_family_review: config.cross_family_review,
             };
 
             let ctx = context.as_deref().unwrap_or("");
@@ -504,6 +505,7 @@ async fn main() -> anyhow::Result<()> {
                     }),
                     verify: config.verify.clone(),
                     memory: config.conductor_memory.clone().unwrap_or_default(),
+                    cross_family_review: config.cross_family_review,
                 },
                 council_members,
                 chairman: RoleHandle {

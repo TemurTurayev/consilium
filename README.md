@@ -23,7 +23,8 @@ Named after the medical *consilium*: specialists from different fields gathering
 | **Harness leveling (P0)** | build/test **grounding**, **ConductorMemory** (plan ledger + attempt history), **worker blackboard** | ✅ Done — research-backed |
 | **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing `run_worker` + `quota_status` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
 | **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
-| **M3c–e — Full MCP surface & UI** | remaining MCP tools + cross-family review, memory/recitation tools, React web UI + quota dashboards | 🚧 Next |
+| **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
+| **M3 (rest) — MCP tools, memory, UI** | `review_diff`/`council_run` MCP tools, memory/recitation tools, React web UI + quota dashboards | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Quick start
@@ -156,6 +157,27 @@ to the orchestration signatures** — `None` (CLI/tests) is a no-op, so behavior
 identical when no sink is installed. This is the seam the web UI (M3e) and the
 memory/recitation tools (M3d) build on. First endpoint is `conduct`; council/auto
 and the quota/supervisor channels follow.
+
+## Cross-family review: the army checks itself
+
+Models exhibit self-preference bias — they rate their own (and same-family)
+output too highly. So when `crossFamilyReview` is on, `conduct` routes a
+subtask's diff to a reviewer (and arbiter) of a **different model family** than
+the worker that produced it: a Codex worker's diff is audited by Gemini or
+Claude, etc. The research calls this the near-zero-cost way a multi-provider
+"army" actually pays off.
+
+```jsonc
+// consilium.config.json — opt-in (default off)
+"crossFamilyReview": true
+```
+
+Mechanism: the reviewer ladder is reordered so a different-family rung fronts; if
+the reviewer role has no other family, a different-family worker's model is
+borrowed; if the deployment is genuinely single-family, it degrades to the
+same-family reviewer and marks the attempt `cross_family: "degraded_same_family"`
+(fail-open — review is never blocked over disjointness). Off by default because
+enabling it changes which model reviews on the stock config.
 
 ## Resilience: model failover ladders
 

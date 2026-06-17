@@ -146,6 +146,7 @@ async fn trivial_skips_council() {
             arbiter: None,
             verify: None,
             memory: Default::default(),
+            cross_family_review: false,
         },
         council_members: vec![solo_worker(
             "bad-member",
@@ -237,6 +238,7 @@ async fn standard_runs_council_then_conduct() {
             arbiter: None,
             verify: None,
             memory: Default::default(),
+            cross_family_review: false,
         },
         council_members: vec![solo_worker(
             "claude-council",
@@ -308,6 +310,7 @@ async fn check_command_failure_reported() {
             arbiter: None,
             verify: None,
             memory: Default::default(),
+            cross_family_review: false,
         },
         council_members: vec![],
         chairman: solo_role_handle(
@@ -378,6 +381,7 @@ async fn check_command_success() {
             arbiter: None,
             verify: None,
             memory: Default::default(),
+            cross_family_review: false,
         },
         council_members: vec![],
         chairman: solo_role_handle(
