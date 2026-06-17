@@ -1,6 +1,7 @@
 use crate::event::Provider;
 use rusqlite::Connection;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -11,10 +12,12 @@ pub fn unix_now() -> i64 {
 
 /// SQLite-backed quota store.
 ///
-/// `Connection` is `Send` but **not `Sync`**. For concurrent access in M3
-/// (axum, multi-task), wrap in `Arc<Mutex<QuotaStore>>` or use a connection pool.
+/// The `Connection` is wrapped in a `Mutex` so `QuotaStore` is `Sync` — it can be
+/// shared as `Arc<QuotaStore>` across the MCP server's concurrent tool calls (M3)
+/// and held by reference across `.await` points in `Send` futures. Reads/writes
+/// serialize on the mutex; fine for the per-run usage-log workload.
 pub struct QuotaStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl QuotaStore {
@@ -44,7 +47,9 @@ impl QuotaStore {
             "CREATE INDEX IF NOT EXISTS idx_provider_ts ON usage_log(provider, ts)",
             [],
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn record(
@@ -67,7 +72,7 @@ impl QuotaStore {
             .map_err(|_| anyhow::anyhow!("input_tokens overflows i64: {input_tokens}"))?;
         let output_i64 = i64::try_from(output_tokens)
             .map_err(|_| anyhow::anyhow!("output_tokens overflows i64: {output_tokens}"))?;
-        self.conn.execute(
+        self.conn.lock().unwrap().execute(
             "INSERT INTO usage_log (ts, provider, input_tokens, output_tokens) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![ts, provider.as_str(), input_i64, output_i64],
         )?;
@@ -82,7 +87,7 @@ impl QuotaStore {
 
     /// Sum of (input, output) tokens for a provider since the given unix timestamp.
     pub fn totals_since(&self, provider: Provider, since_unix: i64) -> anyhow::Result<(u64, u64)> {
-        let (input, output): (i64, i64) = self.conn.query_row(
+        let (input, output): (i64, i64) = self.conn.lock().unwrap().query_row(
             "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
              FROM usage_log WHERE provider = ?1 AND ts >= ?2",
             rusqlite::params![provider.as_str(), since_unix],

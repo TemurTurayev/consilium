@@ -19,8 +19,10 @@ Named after the medical *consilium*: specialists from different fields gathering
 | **M1 — Engine foundation** | CLI adapters, session manager, quota store, `doctor`/`run`/`quota` commands | ✅ Done — verified E2E |
 | **M2a — Deliberation** | `council` (anonymized peer review → chairman synthesis), `review` (diff audit with CI exit codes) | ✅ Done — verified on live providers |
 | **M2b — Execution** | `conduct` (conductor decomposes → workers edit real files → review gate → arbiter), `auto` pipeline, supervisor, quota-aware routing | ✅ Done — verified on live providers |
-| **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — 151 tests, verified against a live model outage |
-| **M3 — Server & UI** | axum + WebSocket server, MCP attached mode, React web UI, quota dashboards | 🚧 Next |
+| **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — verified against a live model outage |
+| **Harness leveling (P0)** | build/test **grounding**, **ConductorMemory** (plan ledger + attempt history), **worker blackboard** | ✅ Done — research-backed |
+| **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing `run_worker` + `quota_status` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
+| **M3b–e — Server & UI** | axum + WebSocket streaming, full 5-tool MCP surface + cross-family review, memory tools, React web UI + quota dashboards | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Quick start
@@ -108,6 +110,30 @@ Empty blocks are elided, so a first attempt / single-subtask run pays nothing.
 Recorded in the transcript per subtask as `status` + `summary`. (Subtasks run
 sequentially over disjoint files; per-subtask git-worktree isolation is deferred
 until parallel workers land.)
+
+## Attached conductor (MCP): your live session orchestrates the army
+
+In *attached mode* the conductor is **your interactive Claude Code session**, not a
+spawned `claude -p` — so decisions run on your flat subscription, never metered
+programmatic credit. `consilium mcp` is a stdio MCP server exposing the engine's
+primitives as tools your session calls:
+
+- **`run_worker`** — route a self-contained subtask to a configured worker
+  (Codex/Gemini/Claude); it edits real files (auto-approved writes, scoped) and
+  returns the captured diff + build/test result. Failover ladders apply.
+- **`quota_status`** — tokens used per provider in the last 5h, so you route to
+  the freest subscription.
+
+Register it in a Claude Code session (`.mcp.json` or `claude mcp add`):
+
+```jsonc
+{ "mcpServers": { "consilium": { "command": "consilium", "args": ["mcp"] } } }
+```
+
+Then ask your session to delegate: it decides *what* to hand off and whether to
+accept; the engine executes. Logs go to stderr so they never corrupt the stdio
+protocol. (M3a — the remaining MCP tools, the WebSocket server, and the web UI
+are the next M3 slices.)
 
 ## Resilience: model failover ladders
 

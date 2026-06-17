@@ -74,6 +74,10 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Run as an MCP server over stdio (attached-conductor mode). Register this
+    /// in your interactive Claude Code session to drive workers via the
+    /// `run_worker` and `quota_status` tools without spending Claude credit.
+    Mcp,
 }
 
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
@@ -86,8 +90,11 @@ fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Logs go to stderr so they never corrupt the MCP server's stdout JSON-RPC
+    // framing (`consilium mcp`); benign for every other subcommand.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
     match cli.command {
@@ -569,6 +576,16 @@ async fn main() -> anyhow::Result<()> {
             let n_roles = 2 + cfg.roles.workers.len() + 1 + 1;
             std::fs::write(&target, &json)?;
             println!("wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)");
+        }
+        Command::Mcp => {
+            // The MCP server owns stdout for JSON-RPC; logs already go to stderr
+            // (see the subscriber setup). Load config + the shared quota store
+            // and serve over stdio until the client disconnects.
+            let config = consilium::config::Config::load(Some(std::path::Path::new(
+                "consilium.config.json",
+            )))?;
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            consilium::mcp::serve_stdio(config, store).await?;
         }
     }
     Ok(())
