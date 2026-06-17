@@ -2386,3 +2386,126 @@ async fn cross_family_degrades_same_family_when_no_other_family() {
     );
     assert_eq!(att["review"], "clean");
 }
+
+// The arbiter gate also routes cross-family: a Codex worker, a Gemini reviewer
+// that keeps flagging critical (→ reworks exhaust), and a Gemini arbiter that
+// ships. A completed run proves the arbiter ran under the flag and shipped.
+#[tokio::test]
+async fn cross_family_arbiter_runs_and_ships() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+    let reviewer = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Gemini,
+        &review_critical_json("out.txt", "nit"),
+    ));
+    let arbiter = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Gemini,
+        &arbiter_ship_json("acceptable"),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "gpt", worker)],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(Provider::Gemini, "rev", reviewer)),
+        arbiter: Some(solo_role_handle(Provider::Gemini, "arb", arbiter)),
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: true,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.completed,
+        vec![1],
+        "arbiter should ship the subtask"
+    );
+    let st = &outcome.transcript["subtasks"][0];
+    assert_eq!(st["arbiter"]["decision"], "ship", "subtask: {st}");
+    assert_eq!(st["attempts"][0]["cross_family"], "applied");
+}
+
+// With the flag OFF (default), no cross_family marker is emitted — pinning the
+// byte-identity claim explicitly.
+#[tokio::test]
+async fn cross_family_off_emits_no_marker() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "gpt", worker)],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(
+            Provider::Codex,
+            "rev",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                &review_clean_json(),
+            )),
+        )),
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let att = &outcome.transcript["subtasks"][0]["attempts"][0];
+    assert!(
+        att.get("cross_family").is_none(),
+        "flag off → no cross_family marker; attempt: {att}"
+    );
+}

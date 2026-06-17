@@ -1341,6 +1341,31 @@ mod tests {
     }
 
     #[test]
+    fn cross_family_reorders_multi_rung_stably() {
+        use crate::event::Provider;
+        // A multi-family reviewer ladder; worker = Codex. Different-family rungs
+        // move to the front (stable), the same-family rung is appended last.
+        let ladder = vec![
+            cf_rung(Provider::Codex, "a"),
+            cf_rung(Provider::Claude, "b"),
+            cf_rung(Provider::Gemini, "c"),
+        ];
+        let (l, degraded) = cross_family_ladder(&ladder, &[], Provider::Codex);
+        assert!(!degraded);
+        assert_eq!(
+            l[0].candidate.provider,
+            Provider::Claude,
+            "stable: Claude first"
+        );
+        assert_eq!(l[1].candidate.provider, Provider::Gemini, "then Gemini");
+        assert_eq!(
+            l.last().unwrap().candidate.provider,
+            Provider::Codex,
+            "same-family appended last (fail-open)"
+        );
+    }
+
+    #[test]
     fn parses_evaluation_variants() {
         for (s, expected) in [
             (
