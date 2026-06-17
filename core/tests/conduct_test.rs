@@ -1,8 +1,8 @@
 mod common;
 
 #[allow(unused_imports)]
-use common::{RecordingAdapter, ScriptedAdapter, SequencedAdapter};
-use consilium::config::{ModelCandidate, VerifyConfig};
+use common::{RecordingAdapter, RecordingSequenced, ScriptedAdapter, SequencedAdapter};
+use consilium::config::{ConductorMemoryConfig, ModelCandidate, VerifyConfig};
 use consilium::event::Provider;
 use consilium::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
@@ -177,6 +177,7 @@ async fn happy_path_single_subtask() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome: ConductOutcome = run_conduct(
@@ -256,6 +257,7 @@ async fn rework_then_accept() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -316,6 +318,7 @@ async fn rework_exhaustion_fails() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -379,6 +382,7 @@ async fn supervisor_halt_aborts() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -472,6 +476,7 @@ async fn worker_failure_counts_as_attempt() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -535,6 +540,7 @@ async fn capture_failure_propagates_as_error() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let result = run_conduct(
@@ -604,6 +610,7 @@ async fn two_subtasks_complete_in_order() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -679,6 +686,7 @@ async fn fail_on_second_preserves_first() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -771,6 +779,7 @@ async fn critical_review_forces_rework() {
         reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -857,6 +866,7 @@ async fn arbiter_ships_on_exhaustion() {
         reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
         arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -935,6 +945,7 @@ async fn arbiter_fails_on_exhaustion() {
         reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
         arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -1000,6 +1011,7 @@ async fn supervisor_ok_does_not_interfere() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -1116,6 +1128,7 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -1176,6 +1189,7 @@ async fn decompose_session_failure_surfaces_real_error() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let err = run_conduct(
@@ -1256,6 +1270,7 @@ async fn conduct_worker_falls_back() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -1338,6 +1353,7 @@ async fn failing_tests_force_rework_even_if_conductor_would_accept() {
         reviewer: None,
         arbiter: None,
         verify: Some(verify),
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -1399,6 +1415,7 @@ async fn no_verifier_is_recorded_as_unverified() {
         reviewer: None,
         arbiter: None,
         verify: None,
+        memory: Default::default(),
     };
 
     let outcome = run_conduct(
@@ -1418,4 +1435,302 @@ async fn no_verifier_is_recorded_as_unverified() {
         .as_array()
         .unwrap();
     assert_eq!(attempts[0]["verify"], "not_run");
+}
+
+// ─── ConductorMemory (P0 #2) ────────────────────────────────────────────────
+
+/// A worker that (re)writes out.txt on every attempt, recording success.
+fn writing_worker() -> Arc<ScriptedAdapter> {
+    Arc::new(ScriptedAdapter {
+        pre_script: "echo content > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    })
+}
+
+// Test: the conductor's judgment prompt for attempt N carries the prior
+// attempts' history (its own earlier feedback), so it stops repeating itself.
+#[tokio::test]
+async fn attempt_history_threads_prior_feedback() {
+    let repo = temp_repo();
+    let quota = store();
+    let log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Conductor calls: 0 = decompose, 1 = judge attempt 0 -> rework, 2 = judge attempt 1 -> accept.
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("ADD_DOCS_MARKER")),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        log.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", writing_worker())],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(), // enabled
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1]);
+
+    let calls = log.lock().unwrap();
+    assert!(
+        calls.len() >= 3,
+        "expected decompose + 2 judgments, got {}",
+        calls.len()
+    );
+    // Attempt 0's judgment: no prior attempts -> no history block.
+    assert!(
+        !calls[1].0.contains("<attempt_history>"),
+        "first attempt judgment must have no attempt_history block"
+    );
+    // Attempt 1's judgment: carries the prior round's feedback.
+    assert!(
+        calls[2].0.contains("<attempt_history>"),
+        "second attempt judgment must carry an attempt_history block"
+    );
+    assert!(
+        calls[2].0.contains("ADD_DOCS_MARKER"),
+        "second attempt judgment must echo the prior rework feedback; got:\n{}",
+        calls[2].0
+    );
+}
+
+// Test: subtask N's conductor prompt carries a plan ledger of the prior
+// finished subtasks; subtask 1's prompt does not.
+#[tokio::test]
+async fn plan_ledger_threads_prior_subtasks() {
+    let repo = temp_repo();
+    let quota = store();
+    let log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Conductor calls: 0 = decompose, 1 = judge sub1 accept, 2 = judge sub2 accept.
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "alpha_subtask", "do a"), (2, "beta_subtask", "do b")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        log.clone(),
+    ));
+
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo x >> f.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(), // enabled
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1, 2]);
+
+    let calls = log.lock().unwrap();
+    assert!(
+        calls.len() >= 3,
+        "expected decompose + 2 judgments, got {}",
+        calls.len()
+    );
+    // Subtask 1's judgment: no prior subtasks -> no ledger.
+    assert!(
+        !calls[1].0.contains("<plan_ledger>"),
+        "first subtask judgment must have no plan_ledger block"
+    );
+    // Subtask 2's judgment: ledger lists subtask 1 as completed.
+    assert!(
+        calls[2].0.contains("<plan_ledger>"),
+        "second subtask judgment must carry a plan_ledger block"
+    );
+    assert!(
+        calls[2].0.contains("alpha_subtask") && calls[2].0.contains("completed"),
+        "ledger must show subtask 1 completed; got:\n{}",
+        calls[2].0
+    );
+}
+
+// Keystone: a grounding-overridden accept must appear in the attempt history as
+// `rework`/`failed`, never `accept`.
+#[tokio::test]
+async fn grounding_override_recorded_in_history() {
+    let repo = temp_repo();
+    let quota = store();
+    let log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Conductor always says accept; verify forces the first attempt to rework.
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        log.clone(),
+    ));
+
+    // Attempt 0 writes "bad" (verify fails); attempt 1 writes "good" (passes).
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo bad > out.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+            },
+            ScriptedAdapter {
+                pre_script: "echo good > out.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "fixed it")
+            },
+        ],
+    ));
+
+    let verify = VerifyConfig {
+        test: Some("grep -q good out.txt".into()),
+        build: None,
+        lint: None,
+    };
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: Some(verify),
+        memory: Default::default(), // enabled
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1]);
+
+    // Ledger layer: the recorded decision for attempt 0 is the post-override rework.
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts[0]["decision"], "rework");
+    assert_eq!(attempts[0]["verify"], "failed");
+
+    // Prompt layer: attempt 1's history shows attempt 0 as rework/failed, not accept.
+    let calls = log.lock().unwrap();
+    let judged = &calls[2].0;
+    assert!(
+        judged.contains("attempt 0: rework (verify: failed)"),
+        "attempt history must record the post-override rework; got:\n{judged}"
+    );
+    assert!(
+        !judged.contains("attempt 0: accept"),
+        "the grounding-overridden round must never show as accept"
+    );
+}
+
+// With memory disabled, prompts are byte-identical to the pre-memory behavior:
+// no ledger / history blocks ever appear.
+#[tokio::test]
+async fn memory_disabled_is_byte_identical() {
+    let repo = temp_repo();
+    let quota = store();
+    let log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("more please")),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        log.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", writing_worker())],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: ConductorMemoryConfig {
+            enabled: false,
+            ledger_char_cap: 1500,
+            attempt_history_char_cap: 800,
+        },
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1]);
+
+    let calls = log.lock().unwrap();
+    for (prompt, _, _) in calls.iter() {
+        assert!(
+            !prompt.contains("<plan_ledger>"),
+            "memory off -> no plan_ledger"
+        );
+        assert!(
+            !prompt.contains("<attempt_history>"),
+            "memory off -> no attempt_history"
+        );
+    }
 }

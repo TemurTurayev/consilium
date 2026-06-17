@@ -386,6 +386,7 @@ async fn main() -> anyhow::Result<()> {
                     ladder: roles::resolve_ladder(&config.roles.chairman),
                 }),
                 verify: config.verify.clone(),
+                memory: config.conductor_memory.clone().unwrap_or_default(),
             };
 
             let ctx = context.as_deref().unwrap_or("");
@@ -485,6 +486,7 @@ async fn main() -> anyhow::Result<()> {
                         ladder: roles::resolve_ladder(&config.roles.chairman),
                     }),
                     verify: config.verify.clone(),
+                    memory: config.conductor_memory.clone().unwrap_or_default(),
                 },
                 council_members,
                 chairman: RoleHandle {

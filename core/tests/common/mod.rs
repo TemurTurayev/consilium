@@ -210,3 +210,55 @@ impl Adapter for RecordingAdapter {
         ClaudeAdapter.parse_line(line)
     }
 }
+
+/// Like [`SequencedAdapter`] but ALSO records each call's (prompt, advisory,
+/// write) into a shared log — so a test can sequence a role's responses AND
+/// assert what prompt each invocation received (e.g. that subtask N's evaluation
+/// prompt carries the prior subtasks' ledger, or attempt N's prompt carries the
+/// prior attempts' history). Indices in the log line up with call order.
+#[allow(dead_code)]
+pub struct RecordingSequenced {
+    pub provider: Provider,
+    pub steps: Vec<ScriptedAdapter>,
+    pub log: Arc<Mutex<Vec<(String, bool, bool)>>>,
+    cursor: std::sync::atomic::AtomicUsize,
+}
+
+#[allow(dead_code)]
+impl RecordingSequenced {
+    pub fn new(
+        provider: Provider,
+        steps: Vec<ScriptedAdapter>,
+        log: Arc<Mutex<Vec<(String, bool, bool)>>>,
+    ) -> Self {
+        Self {
+            provider,
+            steps,
+            log,
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Adapter for RecordingSequenced {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+    fn cli_binary(&self) -> &'static str {
+        "sh"
+    }
+    fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
+        {
+            let mut guard = self.log.lock().unwrap();
+            guard.push((req.prompt.clone(), req.advisory, req.write));
+        }
+        let i = self
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .min(self.steps.len().saturating_sub(1));
+        self.steps[i].build_command(req)
+    }
+    fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
+        ClaudeAdapter.parse_line(line)
+    }
+}
