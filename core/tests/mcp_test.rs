@@ -3,7 +3,7 @@ mod common;
 use common::{RecordingAdapter, ScriptedAdapter};
 use consilium::config::{ModelCandidate, VerifyConfig};
 use consilium::event::Provider;
-use consilium::mcp::{McpServer, RunWorkerParams};
+use consilium::mcp::{McpServer, ReviewDiffParams, RunWorkerParams};
 use consilium::orchestrator::council::CouncilMember;
 use consilium::orchestrator::resilience::Rung;
 use consilium::quota::QuotaStore;
@@ -55,6 +55,24 @@ fn params(worker_label: &str, cwd: &std::path::Path) -> RunWorkerParams {
     }
 }
 
+fn reviewer_ladder(adapter: Arc<dyn consilium::adapters::Adapter>) -> Vec<Rung> {
+    vec![Rung {
+        candidate: ModelCandidate {
+            provider: Provider::Gemini,
+            model: "g".into(),
+        },
+        adapter,
+    }]
+}
+
+fn review_params(diff: &str, cwd: &std::path::Path) -> ReviewDiffParams {
+    ReviewDiffParams {
+        diff: diff.into(),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        timeout_secs: Some(30),
+    }
+}
+
 // ─── tests ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -68,6 +86,7 @@ async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
     let rec = Arc::new(RecordingAdapter::new(inner, log.clone()));
     let server = McpServer::from_parts(
         vec![worker("codex-gpt", rec)],
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -105,6 +124,7 @@ async fn run_worker_unknown_label_returns_structured_error() {
             "codex-gpt",
             Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "unused")),
         )],
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -137,6 +157,7 @@ async fn run_worker_runs_the_configured_verifier() {
     };
     let server = McpServer::from_parts(
         vec![worker("codex-gpt", Arc::new(inner))],
+        Vec::new(),
         Some(verify),
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -155,7 +176,7 @@ async fn quota_status_reports_recorded_totals() {
     quota.record(Provider::Gemini, 100, 20).unwrap();
     quota.record(Provider::Gemini, 50, 10).unwrap();
     quota.record(Provider::Codex, 7, 3).unwrap();
-    let server = McpServer::from_parts(vec![], None, quota);
+    let server = McpServer::from_parts(vec![], Vec::new(), None, quota);
 
     let s = server.quota_status_inner();
     assert_eq!(s.gemini.input_tokens, 150);
@@ -173,6 +194,7 @@ async fn run_worker_all_rungs_fail_returns_structured_error() {
             "codex-gpt",
             Arc::new(ScriptedAdapter::failing(Provider::Codex, "model exploded")),
         )],
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -196,6 +218,7 @@ async fn run_worker_non_git_cwd_degrades_changes_to_none() {
             "codex-gpt",
             Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did it")),
         )],
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -213,11 +236,11 @@ async fn run_worker_non_git_cwd_degrades_changes_to_none() {
 }
 
 // Real stdio-transport smoke: spawn the `consilium mcp` binary, drive the MCP
-// handshake, and assert tools/list returns both tools — protects the rmcp serve
+// handshake, and assert tools/list returns all tools — protects the rmcp serve
 // wiring (the inner-method tests bypass the transport). Isolated via a temp HOME
 // (the quota db) and a temp cwd (the config), so it touches nothing real.
 #[test]
-fn mcp_stdio_server_lists_both_tools() {
+fn mcp_stdio_server_lists_all_tools() {
     use std::io::Write;
 
     let home = tempfile::tempdir().unwrap();
@@ -266,4 +289,125 @@ fn mcp_stdio_server_lists_both_tools() {
         stdout.contains("\"quota_status\""),
         "tools/list must include quota_status; got:\n{stdout}"
     );
+    assert!(
+        stdout.contains("\"review_diff\""),
+        "tools/list must include review_diff; got:\n{stdout}"
+    );
+}
+
+// ─── review_diff ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn review_diff_parses_verdict_and_flags_critical() {
+    let dir = tempfile::tempdir().unwrap();
+    let verdict = r#"{"findings":[{"severity":"critical","file":"a.rs","description":"oops"}]}"#;
+    let server = McpServer::from_parts(
+        vec![],
+        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            verdict,
+        ))),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .review_diff_inner(review_params("diff --git a b", dir.path()))
+        .await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert!(out.parse_ok);
+    assert!(out.has_critical, "a critical finding must set has_critical");
+    assert_eq!(out.findings.len(), 1);
+    assert_eq!(out.findings[0].severity, "critical");
+    assert_eq!(out.findings[0].file, "a.rs");
+}
+
+#[tokio::test]
+async fn review_diff_clean_verdict_has_no_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(
+        vec![],
+        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            r#"{"findings":[]}"#,
+        ))),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .review_diff_inner(review_params("some diff", dir.path()))
+        .await;
+
+    assert!(out.ok && out.parse_ok);
+    assert!(!out.has_critical);
+    assert!(out.findings.is_empty());
+}
+
+// An unparseable review must fail CLOSED: parse_ok=false (the conductor treats it
+// as unusable), and the raw text is surfaced for inspection.
+#[tokio::test]
+async fn review_diff_unparseable_output_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(
+        vec![],
+        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            "looks fine to me, shipping it",
+        ))),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .review_diff_inner(review_params("some diff", dir.path()))
+        .await;
+
+    assert!(out.ok, "the reviewer ran");
+    assert!(
+        !out.parse_ok,
+        "non-JSON output → parse_ok:false (fail closed)"
+    );
+    assert!(!out.has_critical);
+    assert!(out.raw_review.is_some(), "raw text surfaced for inspection");
+}
+
+#[tokio::test]
+async fn review_diff_empty_diff_returns_error() {
+    let server = McpServer::from_parts(
+        vec![],
+        Vec::new(),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .review_diff_inner(review_params("   ", std::path::Path::new("/tmp")))
+        .await;
+
+    assert!(!out.ok);
+    assert!(out.error.unwrap_or_default().contains("empty diff"));
+}
+
+#[tokio::test]
+async fn review_diff_all_rungs_fail_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(
+        vec![],
+        reviewer_ladder(Arc::new(ScriptedAdapter::failing(
+            Provider::Gemini,
+            "reviewer down",
+        ))),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .review_diff_inner(review_params("some diff", dir.path()))
+        .await;
+
+    assert!(!out.ok, "all reviewer rungs failed → ok:false");
+    assert!(out.error.is_some());
+    assert!(!out.parse_ok);
 }

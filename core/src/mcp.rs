@@ -6,18 +6,21 @@
 //! WITHOUT spending programmatic Claude credit. The decision loop lives in the
 //! subscription session; the engine just executes.
 //!
-//! M3a ships exactly two tools — `run_worker` and `quota_status` — both thin
-//! wrappers over existing library functions. Security invariant: `run_worker`
-//! always builds `advisory:false, write:true` (it never exposes an `advisory`
-//! knob), so the deliberation-grade trust relaxation can never combine with
-//! auto-approved writes at the tool boundary (mirrors sessions.rs).
+//! Tools: `run_worker` and `quota_status` (M3a), plus `review_diff` (M3c Slice B)
+//! — a read-only audit of a diff through the council's configured reviewer
+//! ladder. All are thin wrappers over existing library functions. Security
+//! invariant: `run_worker` always builds `advisory:false, write:true` (it never
+//! exposes an `advisory` knob), so the deliberation-grade trust relaxation can
+//! never combine with auto-approved writes at the tool boundary (mirrors
+//! sessions.rs); the `review_diff` path is always `advisory:true, write:false`.
 
 use crate::adapters::RunRequest;
 use crate::config::{Config, VerifyConfig};
 use crate::event::Provider;
 use crate::orchestrator::changes::capture_changes;
 use crate::orchestrator::council::CouncilMember;
-use crate::orchestrator::resilience::{run_with_failover, ModelHealth};
+use crate::orchestrator::resilience::{run_with_failover, ModelHealth, Rung};
+use crate::orchestrator::review::{run_review_ladder, Severity};
 use crate::orchestrator::{roles, verify};
 use crate::quota::{unix_now, QuotaStore};
 use rmcp::handler::server::tool::ToolRouter;
@@ -33,6 +36,7 @@ use std::time::Duration;
 /// Sliding window for quota reporting (5 hours), matching the CLI `quota` view.
 const QUOTA_WINDOW_SECS: i64 = 5 * 3600;
 const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -41,6 +45,8 @@ pub struct McpServer {
     workers: Arc<Vec<CouncilMember>>,
     /// Optional build/test/lint verifier run after each worker (P0 #1 grounding).
     verify: Option<VerifyConfig>,
+    /// Reviewer failover ladder for `review_diff` (the configured reviewer role).
+    reviewer: Arc<Vec<Rung>>,
     health: ModelHealth,
     /// Shared quota store (internally `Sync`); reads/writes serialize on its
     /// own mutex, so concurrent tool calls are safe.
@@ -84,6 +90,42 @@ pub struct RunWorkerOutput {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReviewDiffParams {
+    /// The unified diff to review (e.g. `git diff` output).
+    pub diff: String,
+    /// Absolute path the reviewer process runs in (read-only). Defaults to the
+    /// server's current directory.
+    pub cwd: Option<String>,
+    /// Per-attempt timeout in seconds (default 900).
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FindingOut {
+    /// "critical" | "important" | "minor".
+    pub severity: String,
+    pub file: String,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReviewDiffOutput {
+    /// True when a reviewer rung produced a result (NOT a clean verdict).
+    pub ok: bool,
+    /// Whether the reviewer's output parsed into structured findings. Treat
+    /// `false` as an unusable review — fail closed.
+    pub parse_ok: bool,
+    /// True iff a parsed verdict contains a Critical finding (a blocking verdict).
+    pub has_critical: bool,
+    /// Structured findings (empty when clean or unparsed).
+    pub findings: Vec<FindingOut>,
+    /// The reviewer's raw text (the fallback when `parse_ok` is false).
+    pub raw_review: Option<String>,
+    /// Set when all reviewer rungs failed (the call never panics).
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ProviderQuota {
     pub input_tokens: u64,
@@ -112,18 +154,21 @@ impl McpServer {
                 ladder: roles::resolve_ladder(role),
             })
             .collect();
-        Self::from_parts(workers, config.verify, quota)
+        let reviewer = roles::resolve_ladder(&config.roles.reviewer);
+        Self::from_parts(workers, reviewer, config.verify, quota)
     }
 
-    /// Construct from already-resolved workers (used by tests to inject scripted
-    /// adapters, and by `new` after resolving from config).
+    /// Construct from already-resolved workers + reviewer ladder (used by tests to
+    /// inject scripted adapters, and by `new` after resolving from config).
     pub fn from_parts(
         workers: Vec<CouncilMember>,
+        reviewer: Vec<Rung>,
         verify: Option<VerifyConfig>,
         quota: QuotaStore,
     ) -> Self {
         Self {
             workers: Arc::new(workers),
+            reviewer: Arc::new(reviewer),
             verify,
             health: ModelHealth::new(),
             quota: Arc::new(quota),
@@ -152,6 +197,21 @@ impl McpServer {
     )]
     pub async fn quota_status(&self) -> Json<QuotaStatusOutput> {
         Json(self.quota_status_inner())
+    }
+
+    #[tool(
+        name = "review_diff",
+        description = "Send a unified diff to the council's configured reviewer for a read-only \
+                       audit, returning structured findings with severities. For a true \
+                       cross-family check, configure a reviewer of a different model family than \
+                       the worker that wrote the diff. Treat `parse_ok:false` as an unusable \
+                       review (fail closed) and `has_critical:true` as a blocking verdict."
+    )]
+    pub async fn review_diff(
+        &self,
+        Parameters(p): Parameters<ReviewDiffParams>,
+    ) -> Json<ReviewDiffOutput> {
+        Json(self.review_diff_inner(p).await)
     }
 }
 
@@ -254,6 +314,81 @@ impl McpServer {
             error: None,
         }
     }
+
+    /// Audit a diff with the reviewer ladder (read-only). Public for tests (the
+    /// `review_diff` tool is a thin wrapper over this).
+    pub async fn review_diff_inner(&self, p: ReviewDiffParams) -> ReviewDiffOutput {
+        if p.diff.trim().is_empty() {
+            return ReviewDiffOutput {
+                ok: false,
+                parse_ok: false,
+                has_critical: false,
+                findings: Vec::new(),
+                raw_review: None,
+                error: Some("empty diff: nothing to review".into()),
+            };
+        }
+        let cwd = p
+            .cwd
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_REVIEW_TIMEOUT_SECS));
+        let ladder: &[Rung] = &self.reviewer;
+
+        // advisory:true, write:false is baked into run_review_ladder — read-only.
+        match run_review_ladder(
+            &p.diff,
+            ladder,
+            &self.health,
+            self.quota.as_ref(),
+            cwd,
+            timeout,
+        )
+        .await
+        {
+            Ok((result, _fallbacks)) => {
+                let parse_ok = result.verdict.is_some();
+                let has_critical = result.verdict.as_ref().is_some_and(|v| v.has_critical());
+                let findings = result
+                    .verdict
+                    .map(|v| {
+                        v.findings
+                            .into_iter()
+                            .map(|f| FindingOut {
+                                severity: severity_str(&f.severity).into(),
+                                file: f.file,
+                                description: f.description,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ReviewDiffOutput {
+                    ok: true,
+                    parse_ok,
+                    has_critical,
+                    findings,
+                    raw_review: Some(result.raw_review),
+                    error: None,
+                }
+            }
+            Err(e) => ReviewDiffOutput {
+                ok: false,
+                parse_ok: false,
+                has_critical: false,
+                findings: Vec::new(),
+                raw_review: None,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+}
+
+fn severity_str(s: &Severity) -> &'static str {
+    match s {
+        Severity::Critical => "critical",
+        Severity::Important => "important",
+        Severity::Minor => "minor",
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -266,7 +401,8 @@ impl ServerHandler for McpServer {
             "Consilium attached-conductor MCP server. You are the conductor: decompose the \
              task yourself, delegate self-contained subtasks to workers via `run_worker`, and \
              check `quota_status` to route to the freest provider. Workers edit real files and \
-             return diffs + build/test results."
+             return diffs + build/test results. Use `review_diff` for a read-only audit of a diff \
+             by the configured reviewer."
                 .to_string(),
         );
         info

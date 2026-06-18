@@ -21,7 +21,7 @@ Named after the medical *consilium*: specialists from different fields gathering
 | **M2b — Execution** | `conduct` (conductor decomposes → workers edit real files → review gate → arbiter), `auto` pipeline, supervisor, quota-aware routing | ✅ Done — verified on live providers |
 | **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — verified against a live model outage |
 | **Harness leveling (P0)** | build/test **grounding**, **ConductorMemory** (plan ledger + attempt history), **worker blackboard** | ✅ Done — research-backed |
-| **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing `run_worker` + `quota_status` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
+| **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing `run_worker` + `quota_status` + `review_diff` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
 | **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
 | **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
@@ -127,6 +127,10 @@ primitives as tools your session calls:
   returns the captured diff + build/test result. Failover ladders apply.
 - **`quota_status`** — tokens used per provider in the last 5h, so you route to
   the freest subscription.
+- **`review_diff`** — send a unified diff to the configured reviewer for a
+  read-only audit; returns structured findings (`parse_ok:false` ⇒ unusable
+  review, fail closed; `has_critical:true` ⇒ blocking). For a true cross-family
+  check, configure a reviewer of a different family than the worker.
 
 Register it in a Claude Code session (`.mcp.json` or `claude mcp add`):
 
