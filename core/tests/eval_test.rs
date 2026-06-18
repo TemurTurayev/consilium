@@ -27,24 +27,41 @@ fn rung(provider: Provider, model: &str, adapter: Arc<dyn Adapter>) -> Rung {
     }
 }
 
-/// A task suite with one task scored by `test`, written to a temp dir. The
-/// starter `repo/` holds only a placeholder; the worker writes the scored file.
-fn make_suite(test_cmd: &str) -> tempfile::TempDir {
+/// A one-task suite scored by `test_cmd`, with `committed` (path, content) files
+/// in the starter repo and `protected` paths restored from baseline before
+/// scoring. The worker writes the scored file at runtime.
+fn make_suite_full(
+    test_cmd: &str,
+    committed: &[(&str, &str)],
+    protected: &[&str],
+) -> tempfile::TempDir {
     let suite = tempfile::tempdir().unwrap();
-    let task_dir = suite.path().join("demo");
-    std::fs::create_dir_all(task_dir.join("repo")).unwrap();
-    std::fs::write(task_dir.join("repo").join(".keep"), "").unwrap();
+    let repo = suite.path().join("demo").join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join(".keep"), "").unwrap();
+    for (path, content) in committed {
+        let full = repo.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full, content).unwrap();
+    }
     let manifest = serde_json::json!({
         "name": "demo",
         "prompt": "do the thing",
-        "verify": { "test": test_cmd }
+        "verify": { "test": test_cmd },
+        "protected_paths": protected,
     });
     std::fs::write(
-        task_dir.join("task.json"),
+        suite.path().join("demo").join("task.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
     suite
+}
+
+fn make_suite(test_cmd: &str) -> tempfile::TempDir {
+    make_suite_full(test_cmd, &[], &[])
 }
 
 /// Solo arm backed by a single scripted worker whose `pre_script` mutates the
@@ -124,8 +141,10 @@ async fn aggregates_over_multiple_trials() {
 }
 
 /// Minimal scripted conduct pipeline: conductor plans one subtask then accepts;
-/// the worker writes the scored file; no supervisor/reviewer/arbiter.
-struct ConductTestDeps;
+/// the worker runs `worker_pre`; no supervisor/reviewer/arbiter.
+struct ConductTestDeps {
+    worker_pre: String,
+}
 impl EvalDeps for ConductTestDeps {
     fn solo_ladder(&self) -> Vec<Rung> {
         unreachable!("conduct-only test deps")
@@ -144,7 +163,7 @@ impl EvalDeps for ConductTestDeps {
             ],
         ));
         let worker = Arc::new(ScriptedAdapter {
-            pre_script: "echo ok > good.txt".into(),
+            pre_script: self.worker_pre.clone(),
             ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
         });
         ConductDeps {
@@ -169,7 +188,10 @@ impl EvalDeps for ConductTestDeps {
 async fn conduct_approach_runs_and_scores_via_external_verify() {
     let suite = make_suite("test -f good.txt");
     let tasks = eval::load_suite(suite.path(), None).unwrap();
-    let report = eval::run_suite(&tasks, &[Approach::Conduct], 1, &ConductTestDeps, TIMEOUT)
+    let deps = ConductTestDeps {
+        worker_pre: "echo ok > good.txt".into(),
+    };
+    let report = eval::run_suite(&tasks, &[Approach::Conduct], 1, &deps, TIMEOUT)
         .await
         .unwrap();
 
@@ -179,6 +201,71 @@ async fn conduct_approach_runs_and_scores_via_external_verify() {
         "conduct should write good.txt and pass external verify: {r:?}"
     );
     assert!(r.pipeline_ok);
+}
+
+// A green conduct pipeline (grounding OFF) on a tree that fails the external
+// oracle must still score false — the conduct-arm twin of the solo keystone.
+#[tokio::test]
+async fn conduct_no_grounding_green_pipeline_broken_tree_scores_fail() {
+    let suite = make_suite("test -f good.txt");
+    let tasks = eval::load_suite(suite.path(), None).unwrap();
+    let deps = ConductTestDeps {
+        worker_pre: "echo nope > other.txt".into(), // never creates good.txt
+    };
+    let report = eval::run_suite(&tasks, &[Approach::ConductNoGrounding], 1, &deps, TIMEOUT)
+        .await
+        .unwrap();
+
+    let r = &report.results[0];
+    assert!(r.pipeline_ok, "pipeline completes");
+    assert!(
+        !r.success,
+        "external verify overrides a green pipeline on a broken tree"
+    );
+}
+
+// The verifier-cheat guard: a worker tampers the committed oracle, but the
+// harness restores protected paths from baseline before scoring → grep passes.
+#[tokio::test]
+async fn protected_paths_restore_the_oracle_before_scoring() {
+    let suite = make_suite_full(
+        "grep -q canonical oracle.txt",
+        &[("oracle.txt", "canonical\n")],
+        &["oracle.txt"],
+    );
+    let tasks = eval::load_suite(suite.path(), None).unwrap();
+    let deps = SoloDeps {
+        pre_script: "echo HACKED > oracle.txt".into(),
+    };
+    let report = eval::run_suite(&tasks, &[Approach::Solo], 1, &deps, TIMEOUT)
+        .await
+        .unwrap();
+    assert!(
+        report.results[0].success,
+        "the protected oracle should be restored before scoring"
+    );
+}
+
+// Control: the SAME tamper without protection stands, so the grep fails — proves
+// the restore (not luck) is what saves the protected case.
+#[tokio::test]
+async fn unprotected_tampered_oracle_is_scored_as_is() {
+    let suite = make_suite_full(
+        "grep -q canonical oracle.txt",
+        &[("oracle.txt", "canonical\n")],
+        &[],
+    );
+    let tasks = eval::load_suite(suite.path(), None).unwrap();
+    let deps = SoloDeps {
+        pre_script: "echo HACKED > oracle.txt".into(),
+    };
+    let report = eval::run_suite(&tasks, &[Approach::Solo], 1, &deps, TIMEOUT)
+        .await
+        .unwrap();
+    assert!(
+        !report.results[0].success,
+        "an unprotected tampered oracle must score fail"
+    );
 }
 
 #[tokio::test]

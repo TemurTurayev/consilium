@@ -1,6 +1,7 @@
 {
   "name": "add-greeting",
-  "prompt": "Add a public function `greeting() -> String` to src/lib.rs that returns the string \"hello\". A test in the same file already asserts this — make it pass without changing the test.",
-  "context": "A single-crate Rust library. Run `cargo test` to check your work.",
-  "verify": { "build": "cargo build", "test": "cargo test" }
+  "prompt": "Add a public function `greeting() -> String` to src/lib.rs that returns the string \"hello\". An integration test in tests/greeting.rs already asserts this — make it pass by implementing the function in src/lib.rs. Do not modify the test.",
+  "context": "A single-crate Rust library. The test lives in tests/greeting.rs and calls `add_greeting::greeting()`.",
+  "verify": { "build": "cargo build", "test": "cargo test" },
+  "protected_paths": ["tests/greeting.rs"]
 }

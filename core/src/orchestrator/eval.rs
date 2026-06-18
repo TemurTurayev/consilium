@@ -100,6 +100,11 @@ pub struct EvalTask {
     /// grounding gate AND as the harness's external scorer. Omitted ⇒ autodetect.
     #[serde(default)]
     pub verify: Option<VerifyConfig>,
+    /// Files restored from the baseline commit before scoring (the test/oracle),
+    /// so an approach cannot pass by deleting or rewriting the test it is judged
+    /// on. Paths are relative to the task repo (e.g. `tests/greeting.rs`).
+    #[serde(default)]
+    pub protected_paths: Vec<String>,
     /// Filled in by [`load_suite`]: the task's starter `repo/`, copied per trial.
     #[serde(skip)]
     pub repo_dir: PathBuf,
@@ -161,6 +166,8 @@ pub struct ApproachAggregate {
     pub approach: String,
     pub passed: u32,
     pub total: u32,
+    /// Trials where no verifier ran (kept distinct from real failures).
+    pub unscored: u32,
     pub median_tokens: u64,
     pub median_wall_ms: u64,
 }
@@ -296,7 +303,14 @@ async fn run_trial(
     let run = run_approach(approach, task, cwd.clone(), deps, &quota, timeout).await;
     let wall_ms = start.elapsed().as_millis() as u64;
 
-    // External, independent score — the honesty keystone.
+    // Undo any tampering with the scored test files before judging — an approach
+    // must not be able to pass by deleting or rewriting the test it is judged on.
+    restore_protected(&cwd, &task.protected_paths)?;
+
+    // External, independent score — the honesty keystone. Deliberately left OUT of
+    // wall_ms so the metric measures orchestration, not scoring. (NB: a grounded
+    // conduct arm runs build/test once internally too, so its tree is verified
+    // twice per trial — once as its gate, once here as the score.)
     let v = run_verify(&cwd, task.verify.as_ref()).await;
     let success = v.ran && v.passed;
 
@@ -396,21 +410,46 @@ fn total_tokens(quota: &QuotaStore) -> anyhow::Result<u64> {
     Ok(sum)
 }
 
-/// Recursively copy `src` into `dst`, skipping any stray `.git`.
+/// Recursively copy `src` into `dst`, skipping VCS/build/dependency dirs and not
+/// following symlinks (avoids escaping the fixture and symlink-loop recursion).
 fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    const SKIP: &[&str] = &[
+        ".git",
+        "target",
+        "node_modules",
+        ".venv",
+        "__pycache__",
+        "dist",
+    ];
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        if entry.file_name() == ".git" {
+        let name = entry.file_name();
+        if SKIP.iter().any(|s| name == *s) {
+            continue;
+        }
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
             continue;
         }
         let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
+        let to = dst.join(&name);
+        if ft.is_dir() {
             copy_dir(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
         }
+    }
+    Ok(())
+}
+
+/// Restore the task's protected (test/oracle) files from the baseline commit,
+/// undoing any worker edits, so an approach cannot game the score by deleting or
+/// rewriting the test it is judged against.
+fn restore_protected(cwd: &Path, paths: &[String]) -> anyhow::Result<()> {
+    for p in paths {
+        run_git(cwd, &["checkout", "HEAD", "--", p])
+            .with_context(|| format!("restoring protected path '{p}'"))?;
     }
     Ok(())
 }
@@ -494,6 +533,7 @@ pub fn aggregate(results: &[TrialResult]) -> Aggregate {
             approach,
             passed: trs.iter().filter(|r| r.success).count() as u32,
             total: trs.len() as u32,
+            unscored: trs.iter().filter(|r| !r.verify_ran).count() as u32,
             median_tokens: median(&trs.iter().map(|r| r.tokens).collect::<Vec<_>>()),
             median_wall_ms: median(&trs.iter().map(|r| r.wall_ms).collect::<Vec<_>>()),
         })
@@ -518,18 +558,27 @@ pub fn markdown_report(report: &SuiteReport) -> String {
             c.approach,
             c.passed,
             c.total,
-            if c.stable { "yes" } else { "**no**" },
+            // 'stable' is meaningless for a single sample.
+            if c.total < 2 {
+                "n/a"
+            } else if c.stable {
+                "yes"
+            } else {
+                "**no**"
+            },
             c.median_tokens,
             c.median_wall_ms,
             c.unscored,
         ));
     }
     s.push_str("\n## Per-approach overall\n\n");
-    s.push_str("| Approach | Pass (k/N) | Median tok | Median ms |\n|---|---|---|---|\n");
+    s.push_str(
+        "| Approach | Pass (k/N) | Unscored | Median tok | Median ms |\n|---|---|---|---|---|\n",
+    );
     for a in &report.aggregate.per_approach {
         s.push_str(&format!(
-            "| {} | {}/{} | {} | {} |\n",
-            a.approach, a.passed, a.total, a.median_tokens, a.median_wall_ms
+            "| {} | {}/{} | {} | {} | {} |\n",
+            a.approach, a.passed, a.total, a.unscored, a.median_tokens, a.median_wall_ms
         ));
     }
     s.push_str(
@@ -659,6 +708,7 @@ mod tests {
             prompt: "do it".into(),
             context: String::new(),
             verify: None,
+            protected_paths: Vec::new(),
             repo_dir: PathBuf::new(),
         }];
         let plan = dry_run_plan(&tasks, &[Approach::Solo, Approach::Conduct], 3);

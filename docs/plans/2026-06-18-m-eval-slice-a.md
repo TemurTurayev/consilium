@@ -58,10 +58,19 @@ N trials per cell (live models are nondeterministic; report median + stability).
 ## Task fixture format
 
 `eval/tasks/<name>/` with `task.json` (`name`, `prompt`, optional `context`,
-optional `verify: {build,test,lint}` → `VerifyConfig`; omitted ⇒ autodetect) and a
-`repo/` starter dir copied fresh per trial. The starter **must fail** its verifier
-before the change (a real pass/fail oracle). Slice A ships one example,
-`add-greeting` (a Rust lib whose committed test fails until `greeting()` exists).
+optional `verify: {build,test,lint}` → `VerifyConfig`; omitted ⇒ autodetect;
+optional `protected_paths`) and a `repo/` starter dir copied fresh per trial. The
+starter **must fail** its verifier before the change (a real pass/fail oracle).
+Slice A ships one example, `add-greeting` (a Rust lib whose committed integration
+test in `tests/greeting.rs` fails until `greeting()` exists).
+
+**Verifier integrity (`protected_paths`).** The scorer is gameable if an approach
+can delete or rewrite the test it is judged on (e.g. deleting a Rust test makes
+`cargo test` pass with "0 tests"). So before scoring, the harness restores every
+`protected_paths` entry from the baseline commit (`git checkout HEAD -- <path>`),
+undoing any worker edits. Put the test/oracle in a protected file the prompt tells
+the worker not to touch (the example protects `tests/greeting.rs`). Fixtures must
+contain only plain files (copy skips symlinks + build dirs like `target/`).
 
 ## Aggregation + report
 
@@ -105,7 +114,9 @@ adversarial review before merge.
 | Live-model nondeterminism | N trials, median + `k/N (stable)` |
 | Task-selection bias | run whole suite, report every task, prefer the method-independent claim |
 | Trusting an approach's self-report | always re-run `run_verify` externally; keystone test proves it |
+| Verifier-cheat (delete/rewrite the test) | `protected_paths` restored from baseline before scoring; tamper test proves it |
 | temp/git fragility | explicit `GIT_AUTHOR/COMMITTER` env; `git init`+commit per trial |
+| Timed-out write worker orphaned (pre-existing M1 policy) | a timeout yields an unreliable trial (a still-writing orphan can race the score); use a generous timeout. The engine-wide kill-on-timeout fix is backlogged, not in this slice |
 
 ## Deferred
 
