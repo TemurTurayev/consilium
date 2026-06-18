@@ -106,6 +106,7 @@ async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
         vec![worker("codex-gpt", rec)],
         Vec::new(),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -145,6 +146,7 @@ async fn run_worker_unknown_label_returns_structured_error() {
         )],
         Vec::new(),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -179,6 +181,7 @@ async fn run_worker_runs_the_configured_verifier() {
         vec![worker("codex-gpt", Arc::new(inner))],
         Vec::new(),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         Some(verify),
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -197,7 +200,14 @@ async fn quota_status_reports_recorded_totals() {
     quota.record(Provider::Gemini, 100, 20).unwrap();
     quota.record(Provider::Gemini, 50, 10).unwrap();
     quota.record(Provider::Codex, 7, 3).unwrap();
-    let server = McpServer::from_parts(vec![], Vec::new(), Vec::new(), None, quota);
+    let server = McpServer::from_parts(
+        vec![],
+        Vec::new(),
+        Vec::new(),
+        std::path::PathBuf::from("/tmp"),
+        None,
+        quota,
+    );
 
     let s = server.quota_status_inner();
     assert_eq!(s.gemini.input_tokens, 150);
@@ -217,6 +227,7 @@ async fn run_worker_all_rungs_fail_returns_structured_error() {
         )],
         Vec::new(),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -242,6 +253,7 @@ async fn run_worker_non_git_cwd_degrades_changes_to_none() {
         )],
         Vec::new(),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -320,6 +332,10 @@ fn mcp_stdio_server_lists_all_tools() {
         stdout.contains("\"council_run\""),
         "tools/list must include council_run; got:\n{stdout}"
     );
+    assert!(
+        stdout.contains("\"search_recall\""),
+        "tools/list must include search_recall; got:\n{stdout}"
+    );
 }
 
 // ─── review_diff ──────────────────────────────────────────────────────────────
@@ -335,6 +351,7 @@ async fn review_diff_parses_verdict_and_flags_critical() {
             verdict,
         ))),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -369,6 +386,7 @@ async fn review_diff_important_only_is_not_critical_but_findings_surface() {
             verdict,
         ))),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -397,6 +415,7 @@ async fn review_diff_clean_verdict_has_no_findings() {
             r#"{"findings":[]}"#,
         ))),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -422,6 +441,7 @@ async fn review_diff_unparseable_output_fails_closed() {
             "looks fine to me, shipping it",
         ))),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -445,6 +465,7 @@ async fn review_diff_empty_diff_returns_error() {
         vec![],
         Vec::new(),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -467,6 +488,7 @@ async fn review_diff_all_rungs_fail_returns_error() {
             "reviewer down",
         ))),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -502,6 +524,7 @@ async fn council_run_returns_synthesis_and_answers() {
             Provider::Claude,
             "combined answer",
         ))),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -521,6 +544,7 @@ async fn council_run_empty_question_returns_error() {
         vec![],
         Vec::new(),
         Vec::new(),
+        std::path::PathBuf::from("/tmp"),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -529,4 +553,52 @@ async fn council_run_empty_question_returns_error() {
         .await;
     assert!(!out.ok);
     assert!(out.error.unwrap_or_default().contains("empty question"));
+}
+
+// ─── search_recall ────────────────────────────────────────────────────────────
+
+#[test]
+fn search_recall_returns_hits() {
+    let base = tempfile::tempdir().unwrap();
+    let store =
+        consilium::orchestrator::transcript::TranscriptStore::new(base.path().to_path_buf());
+
+    // Save some fixtures
+    store
+        .save(
+            "task",
+            &serde_json::json!({
+                "id": "s1",
+                "kind": "task",
+                "task": "foo"
+            }),
+        )
+        .unwrap();
+
+    let server = McpServer::from_parts(
+        vec![],
+        Vec::new(),
+        Vec::new(),
+        base.path().to_path_buf(),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server.search_recall_inner(consilium::mcp::SearchRecallParams {
+        query: "foo".into(),
+        limit: None,
+    });
+
+    assert!(out.ok, "search should succeed");
+    assert_eq!(out.hits.len(), 1);
+    assert_eq!(out.hits[0].id, "s1");
+    assert_eq!(out.hits[0].kind, "task");
+    assert_eq!(out.hits[0].task, "foo");
+
+    let out_empty = server.search_recall_inner(consilium::mcp::SearchRecallParams {
+        query: "".into(),
+        limit: None,
+    });
+
+    assert!(!out_empty.ok, "empty query should fail");
 }

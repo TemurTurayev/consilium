@@ -50,6 +50,7 @@ pub struct McpServer {
     reviewer: Arc<Vec<Rung>>,
     /// Chairman failover ladder for `council_run` (the configured chairman role).
     chairman: Arc<Vec<Rung>>,
+    transcript_base: PathBuf,
     health: ModelHealth,
     /// Shared quota store (internally `Sync`); reads/writes serialize on its
     /// own mutex, so concurrent tool calls are safe.
@@ -163,6 +164,24 @@ pub struct CouncilRunOutput {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchRecallParams {
+    /// The query string to search for across past transcript runs.
+    pub query: String,
+    /// Maximum number of recent transcripts to return (default 10).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SearchRecallOutput {
+    /// True when the search completed successfully.
+    pub ok: bool,
+    /// The matching transcripts, if any.
+    pub hits: Vec<crate::orchestrator::transcript::SearchHit>,
+    /// Set when the search fails (e.g., empty query).
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ProviderQuota {
     pub input_tokens: u64,
@@ -193,7 +212,16 @@ impl McpServer {
             .collect();
         let reviewer = roles::resolve_ladder(&config.roles.reviewer);
         let chairman = roles::resolve_ladder(&config.roles.chairman);
-        Self::from_parts(workers, reviewer, chairman, config.verify, quota)
+        let transcript_base = crate::orchestrator::transcript::TranscriptStore::default_base()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+        Self::from_parts(
+            workers,
+            reviewer,
+            chairman,
+            transcript_base,
+            config.verify,
+            quota,
+        )
     }
 
     /// Construct from already-resolved workers + reviewer ladder (used by tests to
@@ -202,6 +230,7 @@ impl McpServer {
         workers: Vec<CouncilMember>,
         reviewer: Vec<Rung>,
         chairman: Vec<Rung>,
+        transcript_base: PathBuf,
         verify: Option<VerifyConfig>,
         quota: QuotaStore,
     ) -> Self {
@@ -209,6 +238,7 @@ impl McpServer {
             workers: Arc::new(workers),
             reviewer: Arc::new(reviewer),
             chairman: Arc::new(chairman),
+            transcript_base,
             verify,
             health: ModelHealth::new(),
             quota: Arc::new(quota),
@@ -269,9 +299,44 @@ impl McpServer {
     ) -> Json<CouncilRunOutput> {
         Json(self.council_run_inner(p).await)
     }
+
+    #[tool(
+        name = "search_recall",
+        description = "Search across past run transcripts for a given query to recall \
+                       previous tasks, summaries, and actions. This is read-only."
+    )]
+    pub async fn search_recall(
+        &self,
+        Parameters(p): Parameters<SearchRecallParams>,
+    ) -> Json<SearchRecallOutput> {
+        Json(self.search_recall_inner(p))
+    }
 }
 
 impl McpServer {
+    /// Search past transcripts for a query. Public for tests (the `search_recall`
+    /// tool is a thin wrapper over this).
+    pub fn search_recall_inner(&self, p: SearchRecallParams) -> SearchRecallOutput {
+        if p.query.trim().is_empty() {
+            return SearchRecallOutput {
+                ok: false,
+                hits: Vec::new(),
+                error: Some("empty query: nothing to search for".into()),
+            };
+        }
+
+        let store =
+            crate::orchestrator::transcript::TranscriptStore::new(self.transcript_base.clone());
+        let limit = p.limit.unwrap_or(10);
+        let hits = store.search(&p.query, limit);
+
+        SearchRecallOutput {
+            ok: true,
+            hits,
+            error: None,
+        }
+    }
+
     /// Quota totals per provider over the reporting window. Public for tests.
     pub fn quota_status_inner(&self) -> QuotaStatusOutput {
         let since = unix_now() - QUOTA_WINDOW_SECS;
@@ -521,8 +586,8 @@ impl ServerHandler for McpServer {
              task yourself, delegate self-contained subtasks to workers via `run_worker`, and \
              check `quota_status` to route to the freest provider. Workers edit real files and \
              return diffs + build/test results. Use `review_diff` for a read-only audit of a diff \
-             by the configured reviewer, and `council_run` for a read-only worker-council \
-             synthesis by the configured chairman."
+             by the configured reviewer, `council_run` for a read-only worker-council \
+             synthesis by the configured chairman, and `search_recall` to query past runs."
                 .to_string(),
         );
         info
