@@ -676,13 +676,11 @@ async fn main() -> anyhow::Result<()> {
             }
             impl EvalDeps for ConfigEvalDeps {
                 fn solo_ladder(&self) -> Vec<Rung> {
-                    let role = self
-                        .config
-                        .roles
-                        .workers
-                        .first()
-                        .unwrap_or(&self.config.roles.conductor);
-                    roles::resolve_ladder(role)
+                    // Baseline = the strongest single model alone (the conductor's
+                    // ladder, e.g. Claude) — so conduct's win is measured against
+                    // "just use the smart model by itself", matching the real-world
+                    // claude-solo comparison.
+                    roles::resolve_ladder(&self.config.roles.conductor)
                 }
                 fn conduct_deps(
                     &self,

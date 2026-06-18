@@ -98,9 +98,9 @@ async fn solo_passing_scores_success_and_records_tokens() {
     assert!(r.verify_ran);
     assert!(r.pipeline_ok);
     assert!(
-        r.tokens >= 15,
+        r.tokens.total() >= 15,
         "scripted usage (10 in + 5 out) should be recorded, got {}",
-        r.tokens
+        r.tokens.total()
     );
 }
 

@@ -127,6 +127,22 @@ struct ApproachRun {
     error: Option<String>,
 }
 
+/// Tokens spent in a trial, split by provider. Claude is the expensive seat we
+/// most want to minimize: the thesis is that conduct matches solo quality while
+/// spending far fewer Claude tokens by offloading the volume to Codex/Gemini.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ProviderTokens {
+    pub claude: u64,
+    pub codex: u64,
+    pub gemini: u64,
+}
+
+impl ProviderTokens {
+    pub fn total(&self) -> u64 {
+        self.claude + self.codex + self.gemini
+    }
+}
+
 /// One scored trial.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrialResult {
@@ -139,7 +155,8 @@ pub struct TrialResult {
     pub verify_ran: bool,
     /// The approach's own reported completion (informational, not the score).
     pub pipeline_ok: bool,
-    pub tokens: u64,
+    /// Tokens spent this trial, split by provider.
+    pub tokens: ProviderTokens,
     pub wall_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -156,7 +173,7 @@ pub struct CellAggregate {
     pub unscored: u32,
     /// All trials agreed (all pass or all fail).
     pub stable: bool,
-    pub median_tokens: u64,
+    pub median_tokens: ProviderTokens,
     pub median_wall_ms: u64,
 }
 
@@ -168,7 +185,7 @@ pub struct ApproachAggregate {
     pub total: u32,
     /// Trials where no verifier ran (kept distinct from real failures).
     pub unscored: u32,
-    pub median_tokens: u64,
+    pub median_tokens: ProviderTokens,
     pub median_wall_ms: u64,
 }
 
@@ -262,12 +279,13 @@ pub async fn run_suite(
             for trial in 0..trials {
                 let r = run_trial(task, approach, trial, deps, timeout).await?;
                 eprintln!(
-                    "  {} / {} / trial {} → {} ({} tok, {} ms)",
+                    "  {} / {} / trial {} → {} ({} tok, {}C, {} ms)",
                     r.task,
                     r.approach,
                     r.trial,
                     if r.success { "PASS" } else { "fail" },
-                    r.tokens,
+                    r.tokens.total(),
+                    r.tokens.claude,
                     r.wall_ms,
                 );
                 results.push(r);
@@ -321,7 +339,7 @@ async fn run_trial(
         success,
         verify_ran: v.ran,
         pipeline_ok: run.pipeline_ok,
-        tokens: total_tokens(&quota)?,
+        tokens: provider_tokens(&quota)?,
         wall_ms,
         error: run.error,
     })
@@ -400,14 +418,17 @@ async fn run_approach(
     }
 }
 
-/// Sum input+output tokens across all providers from a per-trial store.
-fn total_tokens(quota: &QuotaStore) -> anyhow::Result<u64> {
-    let mut sum = 0u64;
-    for p in [Provider::Claude, Provider::Codex, Provider::Gemini] {
+/// Tokens spent in a trial (input+output), split by provider, from its store.
+fn provider_tokens(quota: &QuotaStore) -> anyhow::Result<ProviderTokens> {
+    let sum = |p| -> anyhow::Result<u64> {
         let (i, o) = quota.totals_since(p, 0)?;
-        sum += i + o;
-    }
-    Ok(sum)
+        Ok(i + o)
+    };
+    Ok(ProviderTokens {
+        claude: sum(Provider::Claude)?,
+        codex: sum(Provider::Codex)?,
+        gemini: sum(Provider::Gemini)?,
+    })
 }
 
 /// Recursively copy `src` into `dst`, skipping VCS/build/dependency dirs and not
@@ -494,6 +515,15 @@ fn median(values: &[u64]) -> u64 {
     }
 }
 
+/// Per-provider median tokens across a group of trials.
+fn median_provider_tokens(trs: &[&TrialResult]) -> ProviderTokens {
+    ProviderTokens {
+        claude: median(&trs.iter().map(|r| r.tokens.claude).collect::<Vec<_>>()),
+        codex: median(&trs.iter().map(|r| r.tokens.codex).collect::<Vec<_>>()),
+        gemini: median(&trs.iter().map(|r| r.tokens.gemini).collect::<Vec<_>>()),
+    }
+}
+
 /// Aggregate trial results into per-cell and per-approach summaries. Pure.
 pub fn aggregate(results: &[TrialResult]) -> Aggregate {
     use std::collections::BTreeMap;
@@ -521,7 +551,7 @@ pub fn aggregate(results: &[TrialResult]) -> Aggregate {
                 total: trs.len() as u32,
                 unscored,
                 stable,
-                median_tokens: median(&trs.iter().map(|r| r.tokens).collect::<Vec<_>>()),
+                median_tokens: median_provider_tokens(&trs),
                 median_wall_ms: median(&trs.iter().map(|r| r.wall_ms).collect::<Vec<_>>()),
             }
         })
@@ -534,7 +564,7 @@ pub fn aggregate(results: &[TrialResult]) -> Aggregate {
             passed: trs.iter().filter(|r| r.success).count() as u32,
             total: trs.len() as u32,
             unscored: trs.iter().filter(|r| !r.verify_ran).count() as u32,
-            median_tokens: median(&trs.iter().map(|r| r.tokens).collect::<Vec<_>>()),
+            median_tokens: median_provider_tokens(&trs),
             median_wall_ms: median(&trs.iter().map(|r| r.wall_ms).collect::<Vec<_>>()),
         })
         .collect();
@@ -549,11 +579,11 @@ pub fn aggregate(results: &[TrialResult]) -> Aggregate {
 pub fn markdown_report(report: &SuiteReport) -> String {
     let mut s = String::new();
     s.push_str(&format!("# M-eval results (N={})\n\n", report.trials));
-    s.push_str("| Task | Approach | Pass (k/N) | Stable | Median tok | Median ms | Unscored |\n");
-    s.push_str("|---|---|---|---|---|---|---|\n");
+    s.push_str("| Task | Approach | Pass (k/N) | Stable | Claude tok | Total tok | Median ms | Unscored |\n");
+    s.push_str("|---|---|---|---|---|---|---|---|\n");
     for c in &report.aggregate.per_task_approach {
         s.push_str(&format!(
-            "| {} | {} | {}/{} | {} | {} | {} | {} |\n",
+            "| {} | {} | {}/{} | {} | {} | {} | {} | {} |\n",
             c.task,
             c.approach,
             c.passed,
@@ -566,26 +596,37 @@ pub fn markdown_report(report: &SuiteReport) -> String {
             } else {
                 "**no**"
             },
-            c.median_tokens,
+            c.median_tokens.claude,
+            c.median_tokens.total(),
             c.median_wall_ms,
             c.unscored,
         ));
     }
     s.push_str("\n## Per-approach overall\n\n");
     s.push_str(
-        "| Approach | Pass (k/N) | Unscored | Median tok | Median ms |\n|---|---|---|---|---|\n",
+        "| Approach | Pass (k/N) | Unscored | Claude tok | Codex tok | Gemini tok | Total tok | Median ms |\n|---|---|---|---|---|---|---|---|\n",
     );
     for a in &report.aggregate.per_approach {
         s.push_str(&format!(
-            "| {} | {}/{} | {} | {} | {} |\n",
-            a.approach, a.passed, a.total, a.unscored, a.median_tokens, a.median_wall_ms
+            "| {} | {}/{} | {} | {} | {} | {} | {} | {} |\n",
+            a.approach,
+            a.passed,
+            a.total,
+            a.unscored,
+            a.median_tokens.claude,
+            a.median_tokens.codex,
+            a.median_tokens.gemini,
+            a.median_tokens.total(),
+            a.median_wall_ms
         ));
     }
     s.push_str(
         "\n_Score = an independent `run_verify` (build/test) that ran AND passed after the \
          approach. Same oracle for every approach, so cross-approach deltas are method-independent. \
          Conservative lower bound: a trial where no verifier ran counts as not-passed (\"Unscored\"). \
-         Prefer stable cells; small N over-states a bare %. Claims hold only for this suite._\n",
+         Prefer stable cells; small N over-states a bare %. Claims hold only for this suite. \
+         The win condition is conduct matching `solo`'s pass-rate while spending fewer **Claude** \
+         (expensive) tokens — watch the Claude-tok column, not just Total._\n",
     );
     s
 }
@@ -602,7 +643,12 @@ mod tests {
             success,
             verify_ran,
             pipeline_ok: true,
-            tokens,
+            // value goes in the Claude seat so total()==claude==tokens for asserts
+            tokens: ProviderTokens {
+                claude: tokens,
+                codex: 0,
+                gemini: 0,
+            },
             wall_ms: tokens, // reuse for a deterministic median check
             error: None,
         }
@@ -655,7 +701,8 @@ mod tests {
         assert_eq!((conduct.passed, conduct.total), (2, 3));
         assert!(!conduct.stable); // 2 pass + 1 fail
         assert_eq!(conduct.unscored, 0);
-        assert_eq!(conduct.median_tokens, 20);
+        assert_eq!(conduct.median_tokens.total(), 20);
+        assert_eq!(conduct.median_tokens.claude, 20);
 
         let solo = agg
             .per_task_approach
