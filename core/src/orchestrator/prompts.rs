@@ -81,16 +81,24 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
     )
 }
 
-/// Wraps a worker's INITIAL subtask prompt with the read-only `prior_work`
-/// blackboard (mechanical roster of prior finished subtasks + files modified this
-/// run). `None` → the bare subtask prompt, byte-identical to the pre-blackboard
-/// behavior. Workers see only this mechanical roster, never cross-subtask
-/// feedback or attempt history.
+/// Scope-discipline preamble prepended to every worker's initial prompt: bias the
+/// worker toward the smallest correct change (the Ponytail-benchmark lesson)
+/// without licensing corner-cutting.
+const SCOPE_DISCIPLINE: &str = "Scope discipline — make the SMALLEST change that \
+    fully satisfies the subtask: prefer the standard library or existing code over a \
+    new dependency; add no abstraction, config, or files the subtask doesn't \
+    require; do not refactor or reformat unrelated code. This is NOT license to cut \
+    corners — keep error handling, edge cases, and the existing tests intact.";
+
+/// Wraps a worker's INITIAL subtask prompt with the scope-discipline preamble and,
+/// when present, the read-only `prior_work` blackboard (mechanical roster of prior
+/// finished subtasks + files modified this run). Workers see only this mechanical
+/// roster, never cross-subtask feedback or attempt history.
 pub fn conduct_initial(subtask_prompt: &str, prior_work: Option<&str>) -> String {
     match prior_work {
-        None => subtask_prompt.to_string(),
+        None => format!("{SCOPE_DISCIPLINE}\n\n{subtask_prompt}"),
         Some(pw) => format!(
-            "{subtask_prompt}\n\n\
+            "{SCOPE_DISCIPLINE}\n\n{subtask_prompt}\n\n\
              Earlier subtasks in THIS run are already done — read-only context. Your \
              work must NOT overlap their files:\n<prior_work>\n{pw}\n</prior_work>"
         ),
@@ -274,15 +282,19 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_is_byte_identical_without_blackboard() {
+    fn initial_prompt_prepends_scope_discipline_without_blackboard() {
         let p = "Create src/foo.rs with a pub fn bar().";
-        assert_eq!(conduct_initial(p, None), p);
+        let out = conduct_initial(p, None);
+        assert!(out.contains("Scope discipline"));
+        assert!(out.contains(p));
+        assert!(!out.contains("<prior_work>"), "no blackboard when None");
     }
 
     #[test]
     fn initial_prompt_wraps_blackboard_when_some() {
         let p = conduct_initial("do the thing", Some("- subtask 1 \"mathops\": completed"));
-        assert!(p.starts_with("do the thing"));
+        assert!(p.contains("Scope discipline"));
+        assert!(p.contains("do the thing"));
         assert!(p.contains("<prior_work>\n- subtask 1 \"mathops\": completed\n</prior_work>"));
         assert!(p.contains("read-only context"));
     }

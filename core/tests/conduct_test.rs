@@ -2248,8 +2248,10 @@ async fn blackboard_disabled_is_byte_identical() {
     for (p, _, _) in calls.iter() {
         assert!(!p.contains("<prior_work>"), "memory off → no blackboard");
     }
-    // Byte-identity: subtask 1's worker prompt is exactly the raw subtask prompt.
-    assert_eq!(calls[0].0, "create m.rs");
+    // The worker prompt carries the raw subtask + scope-discipline preamble (and,
+    // with memory off, no blackboard).
+    assert!(calls[0].0.contains("create m.rs"));
+    assert!(calls[0].0.contains("Scope discipline"));
 }
 
 // ─── M3c: cross-family review ────────────────────────────────────────────────
