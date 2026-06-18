@@ -1,0 +1,7 @@
+{
+  "name": "parse-kv",
+  "prompt": "Implement `pub fn parse_kv(s: &str) -> Option<(String, String)>` in src/lib.rs. It splits `s` on the FIRST '=' into (key, value) and returns Some((key, value)); if there is no '=', return None. A value may itself contain '='. The test in tests/parse.rs asserts this — make it pass without modifying the test.",
+  "context": "A single-crate Rust library. Run `cargo test` to check your work.",
+  "verify": { "build": "cargo build", "test": "cargo test" },
+  "protected_paths": ["tests/parse.rs"]
+}
