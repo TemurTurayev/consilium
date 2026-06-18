@@ -24,7 +24,8 @@ Named after the medical *consilium*: specialists from different fields gathering
 | **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing `run_worker` + `quota_status` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
 | **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
-| **M3 (rest) — MCP tools, memory, UI** | `review_diff`/`council_run` MCP tools, memory/recitation tools, React web UI + quota dashboards | 🚧 Next |
+| **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
+| **M3 (rest) — MCP tools, memory, dashboards** | `review_diff`/`council_run` MCP tools, memory/recitation tools, quota dashboard + Council view | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Quick start
@@ -154,9 +155,29 @@ consilium serve --addr 127.0.0.1:7878
 Live delivery rides an engine-level task-local `ProgressSink`: the run executes
 inside a scoped sink that fans each event into the socket, with **zero changes
 to the orchestration signatures** — `None` (CLI/tests) is a no-op, so behavior is
-identical when no sink is installed. This is the seam the web UI (M3e) and the
+identical when no sink is installed. This is the seam the web UI (M3e, below) and the
 memory/recitation tools (M3d) build on. First endpoint is `conduct`; council/auto
 and the quota/supervisor channels follow.
+
+## Web UI (`ui/`)
+
+A live browser view of a `conduct` run — the council deliberating in real time.
+
+```bash
+cargo run -- serve                     # backend on 127.0.0.1:7878
+cd ui && npm install && npm run dev     # UI on http://localhost:5173
+```
+
+Type a task, hit **Conduct**, and watch each event stream into a timeline keyed
+by provider (Claude / Codex / Gemini accent rails). No backend handy? Hit **Demo
+run** to replay a canned council session through the exact same renderer — zero
+quota, zero setup.
+
+The protocol is a single source of truth: `ts-rs` generates the TypeScript
+bindings in `ui/src/protocol/` from the Rust types (`core/src/event.rs`,
+`core/src/protocol.rs`), so `cargo test` regenerates them and the UI's `tsc`
+build fails if they drift. The view's logic is a pure reducer (unit-tested with
+Vitest); only `useSession` touches the socket. See `ui/README.md`.
 
 ## Cross-family review: the army checks itself
 

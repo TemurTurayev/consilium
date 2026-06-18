@@ -16,6 +16,7 @@ use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::progress::{ProgressSink, PROGRESS_SINK};
 use crate::orchestrator::resilience::ModelHealth;
 use crate::orchestrator::roles;
+use crate::protocol::{ServerFrame, SessionRequest};
 use crate::quota::QuotaStore;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -23,7 +24,6 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,19 +60,6 @@ impl ServerState {
             timeout,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum SessionRequest {
-    Conduct {
-        task: String,
-        #[serde(default)]
-        context: String,
-        /// Working directory the run edits; defaults to the server's cwd.
-        #[serde(default)]
-        cwd: Option<String>,
-    },
 }
 
 /// Build the axum router. `ServerState` is cheap to clone (Arcs).
@@ -125,11 +112,12 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
         Some(Ok(Message::Text(t))) => match serde_json::from_str(t.as_str()) {
             Ok(r) => r,
             Err(e) => {
+                let frame = ServerFrame::Error {
+                    error: format!("bad request: {e}"),
+                };
                 let _ = sender
                     .send(Message::Text(
-                        serde_json::json!({"type": "error", "error": format!("bad request: {e}")})
-                            .to_string()
-                            .into(),
+                        serde_json::to_string(&frame).unwrap_or_default().into(),
                     ))
                     .await;
                 return;
@@ -173,16 +161,13 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
                     .await
                 })
                 .await;
-            let term = match &result {
-                Ok(o) => serde_json::json!({
-                    "type": "run_complete",
-                    "completed": o.completed,
-                    "halted": o.halted,
-                    "failed": o.failed,
-                }),
-                Err(e) => serde_json::json!({"type": "run_error", "error": e.to_string()}),
+            let frame = match &result {
+                Ok(o) => ServerFrame::from(o),
+                Err(e) => ServerFrame::RunError {
+                    error: e.to_string(),
+                },
             };
-            let _ = term_tx.send(term.to_string());
+            let _ = term_tx.send(serde_json::to_string(&frame).unwrap_or_default());
         }
     }
 
@@ -236,20 +221,5 @@ mod tests {
         let json = rx.try_recv().expect("sink should forward the event");
         assert!(json.contains("\"type\":\"message\""), "got {json}");
         assert!(json.contains("hello"), "got {json}");
-    }
-
-    #[test]
-    fn session_request_parses_conduct_frame() {
-        let r: SessionRequest =
-            serde_json::from_str(r#"{"kind":"conduct","task":"do it","context":"ctx"}"#).unwrap();
-        let SessionRequest::Conduct { task, context, cwd } = r;
-        assert_eq!(task, "do it");
-        assert_eq!(context, "ctx");
-        assert!(cwd.is_none());
-    }
-
-    #[test]
-    fn session_request_rejects_unknown_kind() {
-        assert!(serde_json::from_str::<SessionRequest>(r#"{"kind":"nope","task":"x"}"#).is_err());
     }
 }

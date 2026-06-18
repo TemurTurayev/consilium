@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum Provider {
     Claude,
     Codex,
@@ -31,8 +32,9 @@ impl std::str::FromStr for Provider {
 }
 
 /// Normalized event stream — the contract every adapter maps its CLI output into.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum AgentEvent {
     SessionStarted {
         session_id: String,
@@ -53,7 +55,9 @@ pub enum AgentEvent {
         path: String,
     },
     Usage {
+        #[ts(type = "number")]
         input_tokens: u64,
+        #[ts(type = "number")]
         output_tokens: u64,
     },
     Completed {
@@ -99,5 +103,19 @@ mod tests {
         let json = serde_json::to_string(&ev).unwrap();
         let back: AgentEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(ev, back);
+    }
+
+    // serde serializes u64 as a bare JSON number; ts-rs's default is `bigint`,
+    // which `JSON.parse` never yields. `#[ts(type = "number")]` keeps the TS
+    // binding honest. This guard fails the build if that override is dropped.
+    #[test]
+    fn ts_usage_tokens_are_number_not_bigint() {
+        use ts_rs::TS;
+        let decl = AgentEvent::decl(&Default::default());
+        assert!(
+            decl.contains("input_tokens: number"),
+            "u64 must map to TS number: {decl}"
+        );
+        assert!(!decl.contains("bigint"), "no bigint on the wire: {decl}");
     }
 }
