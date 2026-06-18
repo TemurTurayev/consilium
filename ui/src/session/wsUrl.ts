@@ -3,5 +3,7 @@ const DEFAULT_WS_URL = 'ws://localhost:7878/ws/session'
 
 /** The backend WebSocket endpoint, overridable via `VITE_WS_URL`. */
 export function resolveWsUrl(): string {
-  return import.meta.env.VITE_WS_URL ?? DEFAULT_WS_URL
+  // Treat an empty/whitespace VITE_WS_URL (a common `.env` mistake) as unset.
+  const override = import.meta.env.VITE_WS_URL?.trim()
+  return override ? override : DEFAULT_WS_URL
 }

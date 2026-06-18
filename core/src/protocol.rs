@@ -139,8 +139,7 @@ mod tests {
     #[test]
     fn ts_control_frame_keeps_nullable_fields() {
         let decl = ServerFrame::decl(&Default::default());
-        assert!(decl.contains("halted"), "decl: {decl}");
-        assert!(decl.contains("failed"), "decl: {decl}");
-        assert!(decl.contains("null"), "decl: {decl}");
+        assert!(decl.contains("halted: string | null"), "decl: {decl}");
+        assert!(decl.contains("failed: string | null"), "decl: {decl}");
     }
 }

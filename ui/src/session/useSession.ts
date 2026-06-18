@@ -22,7 +22,14 @@ export function useSession(): UseSession {
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
 
   const teardown = useCallback(() => {
-    wsRef.current?.close()
+    const ws = wsRef.current
+    if (ws) {
+      // Detach handlers BEFORE close(): close() is async, so otherwise the old
+      // socket's late close/error/message events would dispatch into fresh state
+      // (corrupting a reset screen, or flipping a back-to-back run to closed).
+      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null
+      ws.close()
+    }
     wsRef.current = null
     timersRef.current.forEach((t) => clearTimeout(t))
     timersRef.current = []
@@ -44,8 +51,11 @@ export function useSession(): UseSession {
         ws.send(JSON.stringify(req))
       }
       ws.onmessage = (e: MessageEvent) => {
-        const data = typeof e.data === 'string' ? e.data : String(e.data)
-        const result = parseFrame(data)
+        if (typeof e.data !== 'string') {
+          dispatch({ type: 'parse_error', raw: '<non-text frame>' })
+          return
+        }
+        const result = parseFrame(e.data)
         if (result.ok) dispatch({ type: 'frame', frame: result.frame })
         else dispatch({ type: 'parse_error', raw: result.raw })
       }

@@ -90,6 +90,12 @@ describe('sessionReducer', () => {
     expect(se.connection).toBe('error')
   })
 
+  it('a parse error after completion does not clobber done', () => {
+    const done = replay([{ type: 'run_complete', completed: [1], halted: null, failed: null }])
+    const s = sessionReducer(done, { type: 'parse_error', raw: 'junk' })
+    expect(s.phase).toBe('done')
+  })
+
   it('a clean close after run_complete stays done', () => {
     const done = replay([{ type: 'run_complete', completed: [1], halted: null, failed: null }])
     const closed = sessionReducer(done, { type: 'socket_closed' })

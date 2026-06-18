@@ -54,7 +54,13 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
     case 'frame':
       return foldFrame(state, action.frame)
     case 'parse_error':
-      return { ...state, phase: 'errored', error: `unparseable frame: ${action.raw}` }
+      // A stray frame after a clean completion shouldn't clobber 'done'
+      // (mirrors socket_error).
+      return {
+        ...state,
+        phase: state.phase === 'done' ? 'done' : 'errored',
+        error: state.error ?? `unparseable frame: ${action.raw}`,
+      }
     case 'socket_error':
       // A socket error after a clean completion is benign — keep `done`.
       return {

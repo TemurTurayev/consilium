@@ -17,6 +17,7 @@ export function EventStream({ events }: Props) {
   }
   return (
     <div className="stream">
+      {/* index keys are safe: `events` is strictly append-only (see sessionReducer). */}
       {events.map((event, i) => (
         <EventRow key={i} event={event} />
       ))}
