@@ -59,6 +59,9 @@ pub struct ReviewResult {
     pub verdict: Option<Verdict>,
     pub raw_review: String,
     pub transcript: serde_json::Value,
+    /// The model that produced the review ("provider/model" for the ladder path,
+    /// the requested model for the single-adapter path).
+    pub model_used: Option<String>,
 }
 
 pub async fn run_review(
@@ -70,6 +73,7 @@ pub async fn run_review(
     timeout: Duration,
 ) -> anyhow::Result<ReviewResult> {
     let prompt = prompts::diff_review(diff);
+    let model_used = reviewer_model.clone();
     let outcome = run_to_completion(
         reviewer,
         RunRequest {
@@ -101,6 +105,7 @@ pub async fn run_review(
         verdict,
         raw_review: outcome.final_text,
         transcript,
+        model_used,
     })
 }
 
@@ -133,6 +138,7 @@ pub async fn run_review_ladder(
     .await?;
     let outcome = fo.outcome;
     let fallbacks = fo.fallbacks;
+    let model_used = Some(fo.model_used);
     if !matches!(outcome.status, super::runner::RunStatus::Completed) {
         anyhow::bail!("reviewer failed: {:?}", outcome.status);
     }
@@ -150,6 +156,7 @@ pub async fn run_review_ladder(
             verdict,
             raw_review: outcome.final_text,
             transcript,
+            model_used,
         },
         fallbacks,
     ))

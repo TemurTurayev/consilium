@@ -321,6 +321,41 @@ async fn review_diff_parses_verdict_and_flags_critical() {
     assert_eq!(out.findings.len(), 1);
     assert_eq!(out.findings[0].severity, "critical");
     assert_eq!(out.findings[0].file, "a.rs");
+    assert_eq!(
+        out.model_used.as_deref(),
+        Some("gemini/g"),
+        "the reviewing model should be reported (cross-family signal)"
+    );
+}
+
+// The blocking/non-blocking boundary: an `important`-only verdict is NOT critical
+// but its findings must still surface to the conductor.
+#[tokio::test]
+async fn review_diff_important_only_is_not_critical_but_findings_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    let verdict = r#"{"findings":[{"severity":"important","file":"a.rs","description":"x"}]}"#;
+    let server = McpServer::from_parts(
+        vec![],
+        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            verdict,
+        ))),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .review_diff_inner(review_params("some diff", dir.path()))
+        .await;
+
+    assert!(out.ok && out.parse_ok);
+    assert!(!out.has_critical, "important is not blocking");
+    assert_eq!(
+        out.findings.len(),
+        1,
+        "non-critical findings must still surface"
+    );
+    assert_eq!(out.findings[0].severity, "important");
 }
 
 #[tokio::test]

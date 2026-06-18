@@ -26,7 +26,7 @@ Named after the medical *consilium*: specialists from different fields gathering
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
 | **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
 | **M-eval — Benchmark harness (Slice A)** | `consilium eval` scores orchestration **approaches** (solo / conduct / ±grounding / ±cross-family) by an *independent* build/test verifier; dry-run by default | ✅ Harness done — live numbers are an opt-in run |
-| **M3 (rest) — MCP tools, memory, dashboards** | `review_diff`/`council_run` MCP tools, memory/recitation tools, quota dashboard + Council view | 🚧 Next |
+| **M3 (rest) — MCP tools, memory, dashboards** | `council_run` MCP tool, memory/recitation tools, quota dashboard + Council view | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Quick start

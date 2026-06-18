@@ -111,8 +111,11 @@ pub struct FindingOut {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewDiffOutput {
-    /// True when a reviewer rung produced a result (NOT a clean verdict).
+    /// True when a reviewer rung produced a result (NOT a clean verdict — see the
+    /// tool description: a clean pass is `ok && parse_ok && !has_critical`).
     pub ok: bool,
+    /// "provider/model" that produced the review, if any (the cross-family signal).
+    pub model_used: Option<String>,
     /// Whether the reviewer's output parsed into structured findings. Treat
     /// `false` as an unusable review — fail closed.
     pub parse_ok: bool,
@@ -202,10 +205,12 @@ impl McpServer {
     #[tool(
         name = "review_diff",
         description = "Send a unified diff to the council's configured reviewer for a read-only \
-                       audit, returning structured findings with severities. For a true \
-                       cross-family check, configure a reviewer of a different model family than \
-                       the worker that wrote the diff. Treat `parse_ok:false` as an unusable \
-                       review (fail closed) and `has_critical:true` as a blocking verdict."
+                       audit, returning structured findings with severities. `ok` only means a \
+                       reviewer ran — it is NOT a pass; a clean pass is `ok && parse_ok && \
+                       !has_critical`. Treat `parse_ok:false` as an unusable review (fail closed) \
+                       even when `ok:true`, and `has_critical:true` as a blocking verdict. For a \
+                       true cross-family check, configure a reviewer of a different model family \
+                       than the worker that wrote the diff; `model_used` reports who reviewed."
     )]
     pub async fn review_diff(
         &self,
@@ -321,6 +326,7 @@ impl McpServer {
         if p.diff.trim().is_empty() {
             return ReviewDiffOutput {
                 ok: false,
+                model_used: None,
                 parse_ok: false,
                 has_critical: false,
                 findings: Vec::new(),
@@ -364,6 +370,7 @@ impl McpServer {
                     .unwrap_or_default();
                 ReviewDiffOutput {
                     ok: true,
+                    model_used: result.model_used,
                     parse_ok,
                     has_critical,
                     findings,
@@ -373,6 +380,7 @@ impl McpServer {
             }
             Err(e) => ReviewDiffOutput {
                 ok: false,
+                model_used: None,
                 parse_ok: false,
                 has_critical: false,
                 findings: Vec::new(),
