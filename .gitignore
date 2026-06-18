@@ -16,5 +16,8 @@ dist/
 # Consilium local runtime state (usage.db)
 .consilium/
 
+# M-eval live results (operator-produced, not committed)
+eval/results/
+
 # User-written config from `consilium init` (don't commit it into this repo)
 consilium.config.json
