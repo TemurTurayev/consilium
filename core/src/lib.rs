@@ -4,6 +4,7 @@ pub mod doctor;
 pub mod event;
 pub mod mcp;
 pub mod orchestrator;
+pub mod protocol;
 pub mod quota;
 pub mod server;
 pub mod sessions;

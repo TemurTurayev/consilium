@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+# build output
+dist/
+# vite / vitest cache + coverage
+.vite/
+coverage/
+*.tsbuildinfo
+# local env (commit .env.example only)
+.env
+.env.*.local
+*.local
+# logs / OS
+*.log
+.DS_Store
