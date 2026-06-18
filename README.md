@@ -25,6 +25,7 @@ Named after the medical *consilium*: specialists from different fields gathering
 | **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
 | **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
+| **M-eval — Benchmark harness (Slice A)** | `consilium eval` scores orchestration **approaches** (solo / conduct / ±grounding / ±cross-family) by an *independent* build/test verifier; dry-run by default | ✅ Harness done — live numbers are an opt-in run |
 | **M3 (rest) — MCP tools, memory, dashboards** | `review_diff`/`council_run` MCP tools, memory/recitation tools, quota dashboard + Council view | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
@@ -178,6 +179,31 @@ bindings in `ui/src/protocol/` from the Rust types (`core/src/event.rs`,
 `core/src/protocol.rs`), so `cargo test` regenerates them and the UI's `tsc`
 build fails if they drift. The view's logic is a pure reducer (unit-tested with
 Vitest); only `useSession` touches the socket. See `ui/README.md`.
+
+## Benchmarking approaches (`consilium eval`)
+
+Does the council + build/test grounding actually beat a solo agent? `consilium
+eval` measures it honestly: it runs each task through one or more **approaches**
+and scores the result with an **independent** `run_verify` (build/test) on the
+produced tree — an approach's own "I'm done" is never trusted, and a trial where
+no verifier ran counts as not-passed (a conservative lower bound).
+
+```bash
+consilium eval                       # DRY RUN: prints the task × approach × trial
+                                     # matrix and cost estimate, calls no models
+consilium eval --approaches solo,conduct,conduct-no-grounding \
+               --trials 5 --spend-quota
+```
+
+It is **dry-run by default**; `--spend-quota` is required to actually call
+models. Each trial runs in an isolated temp copy of the task's starter repo with
+its own in-memory quota ledger (it never touches your real `~/.consilium`), so a
+benchmark can't pollute your usage. Tasks live in `eval/tasks/<name>/` (a
+`task.json` + a `repo/` whose committed test fails until the change is made).
+Results print as a markdown table (`k/N` + stability + median tokens) and save to
+JSON. The cleanest single-variable claim is `conduct` vs `conduct-no-grounding` —
+same external scorer, only the grounding gate differs. See
+`docs/plans/2026-06-18-m-eval-slice-a.md`.
 
 ## Cross-family review: the army checks itself
 

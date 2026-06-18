@@ -88,6 +88,31 @@ enum Command {
         #[arg(long, default_value_t = 900)]
         timeout: u64,
     },
+    /// Benchmark orchestration approaches by build/test pass-rate over a task
+    /// suite. Dry-runs by default (spends nothing); pass --spend-quota to run.
+    Eval {
+        /// Directory of tasks (each subdir has a task.json + repo/).
+        #[arg(long, default_value = "eval/tasks")]
+        suite: std::path::PathBuf,
+        /// Comma-separated approaches: solo,conduct,conduct-no-grounding,conduct-cross-family
+        #[arg(long, default_value = "solo,conduct")]
+        approaches: String,
+        /// Trials per (task, approach). Live models are nondeterministic.
+        #[arg(long, default_value_t = 1)]
+        trials: u32,
+        /// Results JSON output path (default: eval/results/<ts>-results.json).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Only run tasks whose name contains this substring.
+        #[arg(long)]
+        task: Option<String>,
+        /// Hard per-session timeout in seconds.
+        #[arg(long, default_value_t = 900)]
+        timeout: u64,
+        /// REQUIRED to actually spend provider quota. Without it, eval dry-runs.
+        #[arg(long)]
+        spend_quota: bool,
+    },
 }
 
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
@@ -614,6 +639,108 @@ async fn main() -> anyhow::Result<()> {
                 std::time::Duration::from_secs(timeout),
             )
             .await?;
+        }
+        Command::Eval {
+            suite,
+            approaches,
+            trials,
+            out,
+            task,
+            timeout,
+            spend_quota,
+        } => {
+            use consilium::config::VerifyConfig;
+            use consilium::orchestrator::conduct::{ConductDeps, RoleHandle};
+            use consilium::orchestrator::council::CouncilMember;
+            use consilium::orchestrator::eval::{self, EvalDeps};
+            use consilium::orchestrator::resilience::Rung;
+            use consilium::orchestrator::roles;
+
+            let approaches = eval::parse_approaches(&approaches)?;
+            let tasks = eval::load_suite(&suite, task.as_deref())?;
+            if tasks.is_empty() {
+                anyhow::bail!("no tasks found under {}", suite.display());
+            }
+
+            // Default: dry-run. Never call a model (or require config) without --spend-quota.
+            if !spend_quota {
+                print!("{}", eval::dry_run_plan(&tasks, &approaches, trials));
+                return Ok(());
+            }
+
+            let config = consilium::config::Config::load(Some(std::path::Path::new(
+                "consilium.config.json",
+            )))?;
+            struct ConfigEvalDeps {
+                config: consilium::config::Config,
+            }
+            impl EvalDeps for ConfigEvalDeps {
+                fn solo_ladder(&self) -> Vec<Rung> {
+                    let role = self
+                        .config
+                        .roles
+                        .workers
+                        .first()
+                        .unwrap_or(&self.config.roles.conductor);
+                    roles::resolve_ladder(role)
+                }
+                fn conduct_deps(
+                    &self,
+                    verify: Option<VerifyConfig>,
+                    cross_family: bool,
+                ) -> ConductDeps {
+                    let workers = self
+                        .config
+                        .roles
+                        .workers
+                        .iter()
+                        .map(|role| CouncilMember {
+                            label: format!("{}-{}", role.provider.as_str(), role.model),
+                            ladder: roles::resolve_ladder(role),
+                        })
+                        .collect();
+                    ConductDeps {
+                        conductor: RoleHandle {
+                            ladder: roles::resolve_ladder(&self.config.roles.conductor),
+                        },
+                        workers,
+                        supervisor: Some(RoleHandle {
+                            ladder: roles::resolve_ladder(&self.config.roles.supervisor),
+                        }),
+                        reviewer: Some(RoleHandle {
+                            ladder: roles::resolve_ladder(&self.config.roles.reviewer),
+                        }),
+                        arbiter: Some(RoleHandle {
+                            ladder: roles::resolve_ladder(&self.config.roles.chairman),
+                        }),
+                        verify,
+                        memory: self.config.conductor_memory.clone().unwrap_or_default(),
+                        cross_family_review: cross_family,
+                    }
+                }
+            }
+
+            let deps = ConfigEvalDeps { config };
+            let report = eval::run_suite(
+                &tasks,
+                &approaches,
+                trials,
+                &deps,
+                std::time::Duration::from_secs(timeout),
+            )
+            .await?;
+
+            println!("{}", eval::markdown_report(&report));
+
+            let out_path = out.unwrap_or_else(|| {
+                std::path::PathBuf::from("eval/results")
+                    .join(format!("{}-results.json", consilium::quota::unix_now()))
+            });
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out_path, serde_json::to_string_pretty(&report)?)?;
+            println!("results: {}", out_path.display());
         }
     }
     Ok(())
