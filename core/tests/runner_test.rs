@@ -94,3 +94,65 @@ async fn timeout_yields_timedout_status() {
     assert!(outcome.events.is_empty());
     assert!(outcome.final_text.is_empty());
 }
+
+// A timed-out run must KILL the child, not orphan it: a worker that would write a
+// marker only AFTER a sleep longer than the timeout must never produce it,
+// because kill_on_drop SIGKILLs the child when the reader task is aborted.
+#[tokio::test]
+async fn timeout_kills_child_so_it_cannot_keep_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("late.txt");
+    let adapter = Arc::new(ScriptedAdapter {
+        provider: Provider::Gemini,
+        script: String::new(),
+        delay_secs: 0,
+        // Runs in the child's cwd; writes the marker only after a 1s sleep.
+        pre_script: "sleep 1; echo late > late.txt".into(),
+    });
+    let store = QuotaStore::open_in_memory().unwrap();
+    let req = RunRequest {
+        prompt: "q".into(),
+        model: None,
+        cwd: dir.path().to_path_buf(),
+        advisory: false,
+        write: false,
+    };
+
+    let outcome = run_to_completion(adapter, req, &store, Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(matches!(outcome.status, RunStatus::TimedOut));
+
+    // Well past the child's 1s sleep: an orphaned child would have written the
+    // marker by now; a killed one never will.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !marker.exists(),
+        "timed-out child must be SIGKILLed before it can write the marker"
+    );
+
+    // Positive control: the SAME script, given time to finish, DOES write the
+    // marker — proving the suppression above is the kill, not a missing write.
+    let dir2 = tempfile::tempdir().unwrap();
+    let marker2 = dir2.path().join("late.txt");
+    let adapter2 = Arc::new(ScriptedAdapter {
+        provider: Provider::Gemini,
+        script: String::new(),
+        delay_secs: 0,
+        pre_script: "sleep 1; echo late > late.txt".into(),
+    });
+    let req2 = RunRequest {
+        prompt: "q".into(),
+        model: None,
+        cwd: dir2.path().to_path_buf(),
+        advisory: false,
+        write: false,
+    };
+    let _ = run_to_completion(adapter2, req2, &store, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(
+        marker2.exists(),
+        "an un-killed run completes its write (positive control)"
+    );
+}

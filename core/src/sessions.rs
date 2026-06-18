@@ -9,6 +9,10 @@ use tokio::sync::mpsc;
 pub struct SessionHandle {
     pub id: String,
     pub events: mpsc::Receiver<AgentEvent>,
+    /// The stream-reader task. Aborting it drops the child process — spawned with
+    /// `kill_on_drop(true)` — so a timed-out or cancelled run is SIGKILLed, not
+    /// left orphaned. On the normal path the JoinHandle is simply detached.
+    pub task: tokio::task::JoinHandle<()>,
 }
 
 fn next_session_id(provider: &str) -> String {
@@ -70,7 +74,10 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
     let mut cmd = adapter.build_command(&req);
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        // So that aborting the reader task (on timeout/cancel) SIGKILLs the child
+        // instead of orphaning it — see SessionHandle::task and run_to_completion.
+        .kill_on_drop(true);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", adapter.cli_binary()))?;
@@ -79,7 +86,7 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
     tracing::info!(session = %id, provider = adapter.provider().as_str(), "session spawned");
 
     let task_id = id.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let stderr_task = tokio::spawn(drain_stderr(stderr));
         let mut full_output = String::new();
         let mut lines = BufReader::new(stdout).lines();
@@ -88,20 +95,18 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
             full_output.push('\n');
             for ev in adapter.parse_line(&line) {
                 if tx.send(ev).await.is_err() {
-                    // Receiver dropped: child is orphaned (not killed) — tokio reaps it
-                    // on SIGCHLD. M2 cancellation must start_kill() + wait() here.
-                    // The detached stderr-drain task also keeps running until the
-                    // orphaned child exits.
+                    // Receiver dropped → returning drops the child, which is
+                    // SIGKILLed (kill_on_drop). The stderr-drain task then ends
+                    // when the killed child's stderr closes.
                     return;
                 }
             }
         }
         for ev in adapter.parse_final(&full_output) {
             if tx.send(ev).await.is_err() {
-                // Receiver dropped: child is orphaned (not killed) — tokio reaps it
-                // on SIGCHLD. M2 cancellation must start_kill() + wait() here.
-                // The detached stderr-drain task also keeps running until the
-                // orphaned child exits.
+                // Receiver dropped → returning drops the child, which is
+                // SIGKILLed (kill_on_drop). The stderr-drain task then ends
+                // when the killed child's stderr closes.
                 return;
             }
         }
@@ -126,5 +131,9 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
         }
     });
 
-    Ok(SessionHandle { id, events: rx })
+    Ok(SessionHandle {
+        id,
+        events: rx,
+        task,
+    })
 }

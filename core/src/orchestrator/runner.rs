@@ -29,7 +29,8 @@ pub struct RunOutcome {
 /// Drives one agent session to completion: collects all events, records Usage
 /// into the quota store, derives the final text, and applies a hard timeout.
 /// First terminal event (Completed/Failed) is authoritative (see sessions.rs
-/// design note); a timeout abandons the stream (child is orphaned — M1 policy).
+/// design note); a timeout aborts the reader task, which SIGKILLs the child
+/// (kill_on_drop) so it can't keep mutating the cwd after we move on.
 pub async fn run_to_completion(
     adapter: Arc<dyn Adapter>,
     req: RunRequest,
@@ -37,8 +38,11 @@ pub async fn run_to_completion(
     timeout: Duration,
 ) -> anyhow::Result<RunOutcome> {
     let provider = adapter.provider();
-    let mut handle = sessions::spawn(adapter, req)?;
-    let session_id = handle.id.clone();
+    let sessions::SessionHandle {
+        id: session_id,
+        events: mut event_rx,
+        task,
+    } = sessions::spawn(adapter, req)?;
 
     // Collect returns (events, terminal_status, final_text) to avoid
     // borrow-checker issues with capturing &mut locals across the async boundary.
@@ -49,7 +53,7 @@ pub async fn run_to_completion(
         let mut final_text_candidate: Option<Option<String>> = None;
         let mut last_message: Option<String> = None;
 
-        while let Some(ev) = handle.events.recv().await {
+        while let Some(ev) = event_rx.recv().await {
             match &ev {
                 AgentEvent::Usage {
                     input_tokens,
@@ -88,11 +92,13 @@ pub async fn run_to_completion(
 
     let (events, status, final_text) = match tokio::time::timeout(timeout, collect).await {
         Err(_elapsed) => {
-            // Timeout: child is orphaned per M1 policy (not killed). M2b WRITE
-            // HAZARD: an orphaned worker run keeps its scoped write flag active
-            // and can keep mutating the shared cwd while conduct starts the next
-            // attempt — a concurrent-write race. TODO(M3): start_kill()+wait()
-            // the child on timeout for write runs before proceeding.
+            // Timeout: abort the reader task and AWAIT its cancellation. Dropping
+            // the task drops the child (spawned kill_on_drop), so SIGKILL is issued
+            // BEFORE we return — synchronously here, not merely scheduled — so a
+            // hung/slow write worker is terminated, not left mutating the shared
+            // cwd while conduct starts the next attempt in the same directory.
+            task.abort();
+            let _ = task.await;
             return Ok(RunOutcome {
                 session_id,
                 final_text: String::new(),
