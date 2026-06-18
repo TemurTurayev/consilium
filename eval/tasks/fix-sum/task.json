@@ -1,0 +1,7 @@
+{
+  "name": "fix-sum",
+  "prompt": "There's a bug in `sum_to` in src/lib.rs — it should return the sum of all integers from 1 to n inclusive, but the test in tests/sum.rs fails. Fix src/lib.rs so the test passes. Do not modify the test.",
+  "context": "A single-crate Rust library. Run `cargo test` to check your work.",
+  "verify": { "build": "cargo build", "test": "cargo test" },
+  "protected_paths": ["tests/sum.rs"]
+}
