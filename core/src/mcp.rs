@@ -7,18 +7,18 @@
 //! subscription session; the engine just executes.
 //!
 //! Tools: `run_worker` and `quota_status` (M3a), plus `review_diff` (M3c Slice B)
-//! — a read-only audit of a diff through the council's configured reviewer
-//! ladder. All are thin wrappers over existing library functions. Security
+//! and `council_run` — thin wrappers over existing library functions. Security
 //! invariant: `run_worker` always builds `advisory:false, write:true` (it never
 //! exposes an `advisory` knob), so the deliberation-grade trust relaxation can
 //! never combine with auto-approved writes at the tool boundary (mirrors
-//! sessions.rs); the `review_diff` path is always `advisory:true, write:false`.
+//! sessions.rs); the `review_diff` and `council_run` paths are always
+//! `advisory:true, write:false`.
 
 use crate::adapters::RunRequest;
 use crate::config::{Config, VerifyConfig};
 use crate::event::Provider;
 use crate::orchestrator::changes::capture_changes;
-use crate::orchestrator::council::CouncilMember;
+use crate::orchestrator::council::{run_council, CouncilMember};
 use crate::orchestrator::resilience::{run_with_failover, ModelHealth, Rung};
 use crate::orchestrator::review::{run_review_ladder, Severity};
 use crate::orchestrator::{roles, verify};
@@ -37,6 +37,7 @@ use std::time::Duration;
 const QUOTA_WINDOW_SECS: i64 = 5 * 3600;
 const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
+const DEFAULT_COUNCIL_TIMEOUT_SECS: u64 = 900;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -47,6 +48,8 @@ pub struct McpServer {
     verify: Option<VerifyConfig>,
     /// Reviewer failover ladder for `review_diff` (the configured reviewer role).
     reviewer: Arc<Vec<Rung>>,
+    /// Chairman failover ladder for `council_run` (the configured chairman role).
+    chairman: Arc<Vec<Rung>>,
     health: ModelHealth,
     /// Shared quota store (internally `Sync`); reads/writes serialize on its
     /// own mutex, so concurrent tool calls are safe.
@@ -129,6 +132,37 @@ pub struct ReviewDiffOutput {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CouncilRunParams {
+    /// The question to send through the configured worker council.
+    pub question: String,
+    /// Absolute path the council runs in (read-only). Defaults to the server's
+    /// current directory.
+    pub cwd: Option<String>,
+    /// Per-attempt timeout in seconds (default 900).
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AnswerOut {
+    pub member: String,
+    pub answer: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CouncilRunOutput {
+    /// True when the council produced a synthesis.
+    pub ok: bool,
+    /// The chairman's synthesis when the council succeeded.
+    pub synthesis: Option<String>,
+    /// Member answers surfaced with de-anonymized member labels.
+    pub answers: Vec<AnswerOut>,
+    /// Members that failed to produce an answer.
+    pub failed_members: Vec<String>,
+    /// Set when validation failed or the council run failed (the call never panics).
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ProviderQuota {
     pub input_tokens: u64,
@@ -158,7 +192,8 @@ impl McpServer {
             })
             .collect();
         let reviewer = roles::resolve_ladder(&config.roles.reviewer);
-        Self::from_parts(workers, reviewer, config.verify, quota)
+        let chairman = roles::resolve_ladder(&config.roles.chairman);
+        Self::from_parts(workers, reviewer, chairman, config.verify, quota)
     }
 
     /// Construct from already-resolved workers + reviewer ladder (used by tests to
@@ -166,12 +201,14 @@ impl McpServer {
     pub fn from_parts(
         workers: Vec<CouncilMember>,
         reviewer: Vec<Rung>,
+        chairman: Vec<Rung>,
         verify: Option<VerifyConfig>,
         quota: QuotaStore,
     ) -> Self {
         Self {
             workers: Arc::new(workers),
             reviewer: Arc::new(reviewer),
+            chairman: Arc::new(chairman),
             verify,
             health: ModelHealth::new(),
             quota: Arc::new(quota),
@@ -217,6 +254,20 @@ impl McpServer {
         Parameters(p): Parameters<ReviewDiffParams>,
     ) -> Json<ReviewDiffOutput> {
         Json(self.review_diff_inner(p).await)
+    }
+
+    #[tool(
+        name = "council_run",
+        description = "Run the configured worker council on a question, then return the \
+                       chairman's synthesis plus the member answers that informed it. This is \
+                       read-only deliberation: the council runs with advisory:true and \
+                       write:false."
+    )]
+    pub async fn council_run(
+        &self,
+        Parameters(p): Parameters<CouncilRunParams>,
+    ) -> Json<CouncilRunOutput> {
+        Json(self.council_run_inner(p).await)
     }
 }
 
@@ -389,6 +440,66 @@ impl McpServer {
             },
         }
     }
+
+    /// Run the configured worker council with the configured chairman. Public for
+    /// tests (the `council_run` tool is a thin wrapper over this).
+    pub async fn council_run_inner(&self, p: CouncilRunParams) -> CouncilRunOutput {
+        if p.question.trim().is_empty() {
+            return CouncilRunOutput {
+                ok: false,
+                synthesis: None,
+                answers: Vec::new(),
+                failed_members: Vec::new(),
+                error: Some("empty question: nothing to ask the council".into()),
+            };
+        }
+        let cwd = p
+            .cwd
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_COUNCIL_TIMEOUT_SECS));
+        let members: Vec<CouncilMember> = self
+            .workers
+            .iter()
+            .map(|worker| CouncilMember {
+                label: worker.label.clone(),
+                ladder: worker.ladder.clone(),
+            })
+            .collect();
+        let chairman = self.chairman.as_ref().clone();
+        let health = ModelHealth::new();
+
+        match run_council(
+            &p.question,
+            members,
+            chairman,
+            self.quota.as_ref(),
+            cwd,
+            timeout,
+            &health,
+        )
+        .await
+        {
+            Ok(outcome) => CouncilRunOutput {
+                ok: true,
+                synthesis: Some(outcome.synthesis),
+                answers: outcome
+                    .answers
+                    .into_iter()
+                    .map(|(_, member, answer)| AnswerOut { member, answer })
+                    .collect(),
+                failed_members: outcome.failed_members,
+                error: None,
+            },
+            Err(e) => CouncilRunOutput {
+                ok: false,
+                synthesis: None,
+                answers: Vec::new(),
+                failed_members: Vec::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    }
 }
 
 fn severity_str(s: &Severity) -> &'static str {
@@ -410,7 +521,8 @@ impl ServerHandler for McpServer {
              task yourself, delegate self-contained subtasks to workers via `run_worker`, and \
              check `quota_status` to route to the freest provider. Workers edit real files and \
              return diffs + build/test results. Use `review_diff` for a read-only audit of a diff \
-             by the configured reviewer."
+             by the configured reviewer, and `council_run` for a read-only worker-council \
+             synthesis by the configured chairman."
                 .to_string(),
         );
         info

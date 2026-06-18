@@ -3,7 +3,7 @@ mod common;
 use common::{RecordingAdapter, ScriptedAdapter};
 use consilium::config::{ModelCandidate, VerifyConfig};
 use consilium::event::Provider;
-use consilium::mcp::{McpServer, ReviewDiffParams, RunWorkerParams};
+use consilium::mcp::{CouncilRunParams, McpServer, ReviewDiffParams, RunWorkerParams};
 use consilium::orchestrator::council::CouncilMember;
 use consilium::orchestrator::resilience::Rung;
 use consilium::quota::QuotaStore;
@@ -65,9 +65,27 @@ fn reviewer_ladder(adapter: Arc<dyn consilium::adapters::Adapter>) -> Vec<Rung> 
     }]
 }
 
+fn chairman_ladder(adapter: Arc<dyn consilium::adapters::Adapter>) -> Vec<Rung> {
+    vec![Rung {
+        candidate: ModelCandidate {
+            provider: Provider::Claude,
+            model: "chair".into(),
+        },
+        adapter,
+    }]
+}
+
 fn review_params(diff: &str, cwd: &std::path::Path) -> ReviewDiffParams {
     ReviewDiffParams {
         diff: diff.into(),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        timeout_secs: Some(30),
+    }
+}
+
+fn council_params(question: &str, cwd: &std::path::Path) -> CouncilRunParams {
+    CouncilRunParams {
+        question: question.into(),
         cwd: Some(cwd.to_string_lossy().into_owned()),
         timeout_secs: Some(30),
     }
@@ -86,6 +104,7 @@ async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
     let rec = Arc::new(RecordingAdapter::new(inner, log.clone()));
     let server = McpServer::from_parts(
         vec![worker("codex-gpt", rec)],
+        Vec::new(),
         Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
@@ -125,6 +144,7 @@ async fn run_worker_unknown_label_returns_structured_error() {
             Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "unused")),
         )],
         Vec::new(),
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -158,6 +178,7 @@ async fn run_worker_runs_the_configured_verifier() {
     let server = McpServer::from_parts(
         vec![worker("codex-gpt", Arc::new(inner))],
         Vec::new(),
+        Vec::new(),
         Some(verify),
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -176,7 +197,7 @@ async fn quota_status_reports_recorded_totals() {
     quota.record(Provider::Gemini, 100, 20).unwrap();
     quota.record(Provider::Gemini, 50, 10).unwrap();
     quota.record(Provider::Codex, 7, 3).unwrap();
-    let server = McpServer::from_parts(vec![], Vec::new(), None, quota);
+    let server = McpServer::from_parts(vec![], Vec::new(), Vec::new(), None, quota);
 
     let s = server.quota_status_inner();
     assert_eq!(s.gemini.input_tokens, 150);
@@ -194,6 +215,7 @@ async fn run_worker_all_rungs_fail_returns_structured_error() {
             "codex-gpt",
             Arc::new(ScriptedAdapter::failing(Provider::Codex, "model exploded")),
         )],
+        Vec::new(),
         Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
@@ -218,6 +240,7 @@ async fn run_worker_non_git_cwd_degrades_changes_to_none() {
             "codex-gpt",
             Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did it")),
         )],
+        Vec::new(),
         Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
@@ -293,6 +316,10 @@ fn mcp_stdio_server_lists_all_tools() {
         stdout.contains("\"review_diff\""),
         "tools/list must include review_diff; got:\n{stdout}"
     );
+    assert!(
+        stdout.contains("\"council_run\""),
+        "tools/list must include council_run; got:\n{stdout}"
+    );
 }
 
 // ─── review_diff ──────────────────────────────────────────────────────────────
@@ -307,6 +334,7 @@ async fn review_diff_parses_verdict_and_flags_critical() {
             Provider::Gemini,
             verdict,
         ))),
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -340,6 +368,7 @@ async fn review_diff_important_only_is_not_critical_but_findings_surface() {
             Provider::Gemini,
             verdict,
         ))),
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -367,6 +396,7 @@ async fn review_diff_clean_verdict_has_no_findings() {
             Provider::Gemini,
             r#"{"findings":[]}"#,
         ))),
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -391,6 +421,7 @@ async fn review_diff_unparseable_output_fails_closed() {
             Provider::Gemini,
             "looks fine to me, shipping it",
         ))),
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -413,6 +444,7 @@ async fn review_diff_empty_diff_returns_error() {
     let server = McpServer::from_parts(
         vec![],
         Vec::new(),
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -434,6 +466,7 @@ async fn review_diff_all_rungs_fail_returns_error() {
             Provider::Gemini,
             "reviewer down",
         ))),
+        Vec::new(),
         None,
         QuotaStore::open_in_memory().unwrap(),
     );
@@ -445,4 +478,55 @@ async fn review_diff_all_rungs_fail_returns_error() {
     assert!(!out.ok, "all reviewer rungs failed → ok:false");
     assert!(out.error.is_some());
     assert!(!out.parse_ok);
+}
+
+#[tokio::test]
+async fn council_run_returns_synthesis_and_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(
+        vec![
+            worker(
+                "codex-gpt",
+                Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "answer one")),
+            ),
+            worker(
+                "codex-gpt-2",
+                Arc::new(ScriptedAdapter::ok_with_text(
+                    Provider::Codex,
+                    "```json\n{\"scores\":[{\"agent\":\"A\",\"score\":8,\"justification\":\"solid\"}]}\n```",
+                )),
+            ),
+        ],
+        Vec::new(),
+        chairman_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            "combined answer",
+        ))),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server
+        .council_run_inner(council_params("which option?", dir.path()))
+        .await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert!(out.synthesis.is_some(), "expected chairman synthesis");
+    assert!(!out.answers.is_empty(), "expected member answers");
+}
+
+#[tokio::test]
+async fn council_run_empty_question_returns_error() {
+    let server = McpServer::from_parts(
+        vec![],
+        Vec::new(),
+        Vec::new(),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+    let out = server
+        .council_run_inner(council_params("   ", std::path::Path::new("/tmp")))
+        .await;
+    assert!(!out.ok);
+    assert!(out.error.unwrap_or_default().contains("empty question"));
 }
