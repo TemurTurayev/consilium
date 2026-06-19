@@ -159,6 +159,15 @@ pub struct Config {
     /// model reviews on the stock config; flip on after validating in practice.
     #[serde(default)]
     pub cross_family_review: bool,
+    /// Max times the conductor regenerates the plan after a subtask failure
+    /// (M4 P1.4 replan). `0` = never replan (default).
+    #[serde(default)]
+    pub max_replans: u32,
+    /// Optional total wall-clock budget for a conduct run, in seconds (M4 P1.6).
+    /// `None` = unlimited (default); on overrun the run ships the subtasks done
+    /// so far and reports the rest unfinished.
+    #[serde(default)]
+    pub budget_secs: Option<u64>,
 }
 
 impl Default for Config {
@@ -196,6 +205,8 @@ impl Default for Config {
             verify: None,
             conductor_memory: Some(ConductorMemoryConfig::default()),
             cross_family_review: false,
+            max_replans: 0,
+            budget_secs: None,
         }
     }
 }
@@ -231,6 +242,28 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.roles.conductor.provider, crate::event::Provider::Claude);
         assert!(!cfg.roles.workers.is_empty());
+    }
+
+    #[test]
+    fn replan_and_budget_default_off_and_parse_camelcase() {
+        let def = Config::default();
+        assert_eq!(def.max_replans, 0, "replan off by default");
+        assert_eq!(def.budget_secs, None, "no budget by default");
+
+        let json = r#"{
+          "roles": {
+            "conductor":  { "provider": "claude", "model": "m" },
+            "chairman":   { "provider": "claude", "model": "m" },
+            "workers":    [{ "provider": "codex", "model": "g" }],
+            "reviewer":   { "provider": "codex", "model": "g" },
+            "supervisor": { "provider": "gemini", "model": "g" }
+          },
+          "maxReplans": 2,
+          "budgetSecs": 600
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_replans, 2);
+        assert_eq!(cfg.budget_secs, Some(600));
     }
 
     #[test]
