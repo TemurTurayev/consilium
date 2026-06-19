@@ -179,6 +179,7 @@ async fn happy_path_single_subtask() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -261,6 +262,7 @@ async fn rework_then_accept() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -343,6 +345,7 @@ async fn rework_exhaustion_fails() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -408,6 +411,7 @@ async fn rework_stall_breaks_early() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -436,6 +440,198 @@ async fn rework_stall_breaks_early() {
         entries[0]["attempts"].as_array().unwrap().len(),
         2,
         "stall stops after the first repeated fingerprint"
+    );
+}
+
+#[tokio::test]
+async fn replan_rescues_a_failed_run() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "first try", "write failed.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("needs a new plan")),
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(2, "replanned", "write recovered.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo failed > failed.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote failed.txt")
+            },
+            ScriptedAdapter {
+                pre_script: "echo recovered > recovered.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote recovered.txt")
+            },
+        ],
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 1,
+        budget: None,
+    };
+
+    let outcome = run_conduct(
+        "write a file",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.failed.is_none(), "replan should rescue the run");
+    assert_eq!(outcome.completed, vec![2]);
+    assert!(repo.path().join("recovered.txt").exists());
+    assert_eq!(
+        outcome.transcript["replans"].as_array().unwrap().len(),
+        1,
+        "transcript should record exactly one replan"
+    );
+}
+
+#[tokio::test]
+async fn replan_disabled_by_default_still_fails() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "first try", "write failed.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("needs a new plan")),
+        ],
+    ));
+
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo failed > failed.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote failed.txt")
+    });
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 0,
+        budget: None,
+    };
+
+    let outcome = run_conduct(
+        "write a file",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        outcome.failed.is_some(),
+        "run should still fail without replans"
+    );
+    assert!(
+        outcome.transcript["replans"].as_array().unwrap().is_empty(),
+        "replan should not be attempted when disabled"
+    );
+}
+
+#[tokio::test]
+async fn budget_trip_is_terminal_even_with_replans() {
+    // A blown wall-clock budget must end the run even when replans are allowed —
+    // never spend more conductor calls past the budget (reviewer-found interaction).
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            &plan_json(&[(1, "a", "create a.txt"), (2, "b", "create b.txt")]),
+        )],
+    ));
+    let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "noop"));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        budget: Some(Duration::from_millis(0)),
+        max_replans: 1,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let failed = outcome.failed.expect("budget trip fails the run");
+    assert!(
+        failed.contains("budget"),
+        "the budget reason must survive (no replan overwrote it): {failed}"
+    );
+    assert!(
+        outcome.transcript["replans"].as_array().unwrap().is_empty(),
+        "a blown budget must not trigger a replan"
     );
 }
 
@@ -480,6 +676,7 @@ async fn supervisor_halt_aborts() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -576,6 +773,7 @@ async fn worker_failure_counts_as_attempt() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -642,6 +840,7 @@ async fn capture_failure_propagates_as_error() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -714,6 +913,7 @@ async fn two_subtasks_complete_in_order() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -785,6 +985,7 @@ async fn budget_exceeded_stops_at_subtask_boundary() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: Some(Duration::from_millis(0)),
     };
 
@@ -859,6 +1060,7 @@ async fn budget_preserves_completed_subtasks_on_trip() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: Some(Duration::from_millis(200)),
     };
 
@@ -940,6 +1142,7 @@ async fn generous_budget_runs_all_subtasks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: Some(Duration::from_secs(3600)),
     };
 
@@ -1002,6 +1205,7 @@ async fn supervisor_failure_degrades_instead_of_killing_the_run() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1082,6 +1286,7 @@ async fn fail_on_second_preserves_first() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1177,6 +1382,7 @@ async fn critical_review_forces_rework() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1250,6 +1456,7 @@ async fn reviewer_failure_degrades_to_accept() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1327,6 +1534,7 @@ async fn arbiter_ships_on_exhaustion() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1408,6 +1616,7 @@ async fn arbiter_fails_on_exhaustion() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1477,6 +1686,7 @@ async fn arbiter_failure_at_exhaustion_fails_closed() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1543,6 +1753,7 @@ async fn supervisor_ok_does_not_interfere() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1662,6 +1873,7 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1725,6 +1937,7 @@ async fn decompose_session_failure_surfaces_real_error() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1808,6 +2021,7 @@ async fn conduct_worker_falls_back() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1893,6 +2107,7 @@ async fn failing_tests_force_rework_even_if_conductor_would_accept() {
         verify: Some(verify),
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -1957,6 +2172,7 @@ async fn no_verifier_is_recorded_as_unverified() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2020,6 +2236,7 @@ async fn attempt_history_threads_prior_feedback() {
         verify: None,
         memory: Default::default(), // enabled
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2100,6 +2317,7 @@ async fn plan_ledger_threads_prior_subtasks() {
         verify: None,
         memory: Default::default(), // enabled
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2192,6 +2410,7 @@ async fn grounding_override_recorded_in_history() {
         verify: Some(verify),
         memory: Default::default(), // enabled
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2268,6 +2487,7 @@ async fn memory_disabled_is_byte_identical() {
             attempt_history_char_cap: 800,
         },
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2338,6 +2558,7 @@ async fn supervisor_receives_plan_ledger() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2423,6 +2644,7 @@ async fn arbiter_receives_memory_blocks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2509,6 +2731,7 @@ async fn multi_rework_history_accumulates() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2589,6 +2812,7 @@ async fn blackboard_threads_prior_subtasks_to_worker() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2694,6 +2918,7 @@ async fn blackboard_accumulates_across_three_subtasks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2782,6 +3007,7 @@ async fn blackboard_disabled_is_byte_identical() {
             attempt_history_char_cap: 800,
         },
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2860,6 +3086,7 @@ async fn cross_family_review_routes_to_a_different_family() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2922,6 +3149,7 @@ async fn cross_family_degrades_same_family_when_no_other_family() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        max_replans: 0,
         budget: None,
     };
 
@@ -2986,6 +3214,7 @@ async fn cross_family_arbiter_runs_and_ships() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        max_replans: 0,
         budget: None,
     };
 
@@ -3048,6 +3277,7 @@ async fn cross_family_off_emits_no_marker() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        max_replans: 0,
         budget: None,
     };
 

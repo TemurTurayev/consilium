@@ -81,6 +81,31 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
     )
 }
 
+pub fn conduct_replan(
+    task: &str,
+    context: &str,
+    completed_summary: &str,
+    failure_reason: &str,
+) -> String {
+    format!(
+        "You are the conductor of a team of AI coding agents working in this \
+         repository. Produce a REVISED plan for the task below covering ONLY \
+         the work still needed after some subtasks already completed and the \
+         run then hit a failure. Decompose the remaining work into the \
+         SMALLEST number of self-contained subtasks (1-5). Each subtask prompt \
+         must carry ALL context the worker needs (file paths, conventions, \
+         acceptance criteria) — workers cannot see this conversation, each \
+         other, or earlier subtasks. Do NOT redo already-completed work. \
+         Number the new subtasks with fresh ids that continue AFTER the highest id \
+         in the completed work above (never reuse a completed id). Design subtasks so \
+         they touch DISJOINT files; they run sequentially.\n\n\
+         Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
+         Already completed work:\n<completed_summary>\n{completed_summary}\n</completed_summary>\n\n\
+         Failure that requires replanning:\n<failure_reason>\n{failure_reason}\n</failure_reason>\n\n\
+         Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
+    )
+}
+
 /// Scope-discipline preamble prepended to every worker's initial prompt: bias the
 /// worker toward the smallest correct change (the Ponytail-benchmark lesson)
 /// without licensing corner-cutting.
