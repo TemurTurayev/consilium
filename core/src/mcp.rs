@@ -38,6 +38,9 @@ const QUOTA_WINDOW_SECS: i64 = 5 * 3600;
 const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
 const DEFAULT_COUNCIL_TIMEOUT_SECS: u64 = 900;
+/// Max chars of a `page_in` digest — keeps a huge transcript from flooding the
+/// conductor's context.
+const PAGE_IN_DIGEST_CAP: usize = 4000;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -182,6 +185,27 @@ pub struct SearchRecallOutput {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PageInParams {
+    /// The run id to load (e.g. a `search_recall` hit's `id`).
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PageInOutput {
+    /// True when a transcript was found and loaded.
+    pub ok: bool,
+    /// The resolved run id (echoed back).
+    pub id: Option<String>,
+    /// The run kind (conduct/council/review/…), if present.
+    pub kind: Option<String>,
+    /// A compact, size-capped digest of the run (task, outcome, per-subtask
+    /// titles + summaries) — enough to recall context without the full raw JSON.
+    pub digest: Option<String>,
+    /// Set on an empty id or when no transcript matches.
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ProviderQuota {
     pub input_tokens: u64,
@@ -311,6 +335,16 @@ impl McpServer {
     ) -> Json<SearchRecallOutput> {
         Json(self.search_recall_inner(p))
     }
+
+    #[tool(
+        name = "page_in",
+        description = "Load a single past run transcript by id (e.g. an id from search_recall) and \
+                       return a compact digest — task, outcome, and per-subtask titles/summaries — \
+                       so you can recall that run's context. Read-only."
+    )]
+    pub async fn page_in(&self, Parameters(p): Parameters<PageInParams>) -> Json<PageInOutput> {
+        Json(self.page_in_inner(p))
+    }
 }
 
 impl McpServer {
@@ -333,6 +367,40 @@ impl McpServer {
         SearchRecallOutput {
             ok: true,
             hits,
+            error: None,
+        }
+    }
+
+    /// Load a past transcript by id and digest it. Public for tests (the
+    /// `page_in` tool is a thin wrapper over this).
+    pub fn page_in_inner(&self, p: PageInParams) -> PageInOutput {
+        let id = p.id.trim();
+        if id.is_empty() {
+            return PageInOutput {
+                ok: false,
+                id: None,
+                kind: None,
+                digest: None,
+                error: Some("empty id: nothing to load".into()),
+            };
+        }
+        let store =
+            crate::orchestrator::transcript::TranscriptStore::new(self.transcript_base.clone());
+        let Some(val) = store.load_by_id(id) else {
+            return PageInOutput {
+                ok: false,
+                id: Some(id.to_string()),
+                kind: None,
+                digest: None,
+                error: Some(format!("no transcript found for id '{id}'")),
+            };
+        };
+        let kind = val.get("kind").and_then(|v| v.as_str()).map(str::to_string);
+        PageInOutput {
+            ok: true,
+            id: Some(id.to_string()),
+            kind,
+            digest: Some(digest_transcript(&val)),
             error: None,
         }
     }
@@ -567,6 +635,47 @@ impl McpServer {
     }
 }
 
+/// A compact, size-capped digest of a transcript JSON: task, outcome, summary,
+/// and per-subtask titles + summaries. Robust to missing fields / varied kinds.
+fn digest_transcript(val: &serde_json::Value) -> String {
+    let str_field = |k: &str| val.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let mut s = String::new();
+    let task = str_field("task");
+    if !task.is_empty() {
+        s.push_str(&format!("task: {task}\n"));
+    }
+    if let Some(c) = val.get("completed").and_then(|v| v.as_array()) {
+        s.push_str(&format!("completed: {} subtask(s)\n", c.len()));
+    }
+    let halted = str_field("halted");
+    if !halted.is_empty() {
+        s.push_str(&format!("halted: {halted}\n"));
+    }
+    let failed = str_field("failed");
+    if !failed.is_empty() {
+        s.push_str(&format!("failed: {failed}\n"));
+    }
+    let summary = str_field("summary");
+    if !summary.is_empty() {
+        s.push_str(&format!("summary: {summary}\n"));
+    }
+    if let Some(subs) = val.get("subtasks").and_then(|v| v.as_array()) {
+        for st in subs {
+            let title = st.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let sm = st.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+            if !title.is_empty() || !sm.is_empty() {
+                s.push_str(&format!("- {title}: {sm}\n"));
+            }
+        }
+    }
+    if s.chars().count() > PAGE_IN_DIGEST_CAP {
+        let capped: String = s.chars().take(PAGE_IN_DIGEST_CAP).collect();
+        format!("{capped}…[truncated]")
+    } else {
+        s
+    }
+}
+
 fn severity_str(s: &Severity) -> &'static str {
     match s {
         Severity::Critical => "critical",
@@ -587,7 +696,8 @@ impl ServerHandler for McpServer {
              check `quota_status` to route to the freest provider. Workers edit real files and \
              return diffs + build/test results. Use `review_diff` for a read-only audit of a diff \
              by the configured reviewer, `council_run` for a read-only worker-council \
-             synthesis by the configured chairman, and `search_recall` to query past runs."
+             synthesis by the configured chairman, `search_recall` to query past runs, and \
+             `page_in` to load a past run by id."
                 .to_string(),
         );
         info
