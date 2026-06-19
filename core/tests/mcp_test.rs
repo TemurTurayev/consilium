@@ -3,7 +3,9 @@ mod common;
 use common::{RecordingAdapter, ScriptedAdapter};
 use consilium::config::{ModelCandidate, VerifyConfig};
 use consilium::event::Provider;
-use consilium::mcp::{CouncilRunParams, McpServer, ReviewDiffParams, RunWorkerParams};
+use consilium::mcp::{
+    CouncilRunParams, McpServer, McpServerDeps, ReviewDiffParams, RunWorkerParams,
+};
 use consilium::orchestrator::council::CouncilMember;
 use consilium::orchestrator::resilience::Rung;
 use consilium::quota::QuotaStore;
@@ -102,14 +104,14 @@ async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
         ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
     };
     let rec = Arc::new(RecordingAdapter::new(inner, log.clone()));
-    let server = McpServer::from_parts(
-        vec![worker("codex-gpt", rec)],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker("codex-gpt", rec)],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .run_worker_inner(params("codex-gpt", repo.path()))
@@ -139,17 +141,17 @@ async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
 #[tokio::test]
 async fn run_worker_unknown_label_returns_structured_error() {
     let repo = temp_repo();
-    let server = McpServer::from_parts(
-        vec![worker(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker(
             "codex-gpt",
             Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "unused")),
         )],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .run_worker_inner(params("nope-missing", repo.path()))
@@ -177,14 +179,14 @@ async fn run_worker_runs_the_configured_verifier() {
         build: None,
         lint: None,
     };
-    let server = McpServer::from_parts(
-        vec![worker("codex-gpt", Arc::new(inner))],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        Some(verify),
-        QuotaStore::open_in_memory().unwrap(),
-    );
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker("codex-gpt", Arc::new(inner))],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: Some(verify),
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .run_worker_inner(params("codex-gpt", repo.path()))
@@ -200,14 +202,14 @@ async fn quota_status_reports_recorded_totals() {
     quota.record(Provider::Gemini, 100, 20).unwrap();
     quota.record(Provider::Gemini, 50, 10).unwrap();
     quota.record(Provider::Codex, 7, 3).unwrap();
-    let server = McpServer::from_parts(
-        vec![],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
         quota,
-    );
+    });
 
     let s = server.quota_status_inner();
     assert_eq!(s.gemini.input_tokens, 150);
@@ -220,17 +222,17 @@ async fn quota_status_reports_recorded_totals() {
 #[tokio::test]
 async fn run_worker_all_rungs_fail_returns_structured_error() {
     let repo = temp_repo();
-    let server = McpServer::from_parts(
-        vec![worker(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker(
             "codex-gpt",
             Arc::new(ScriptedAdapter::failing(Provider::Codex, "model exploded")),
         )],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .run_worker_inner(params("codex-gpt", repo.path()))
@@ -246,17 +248,17 @@ async fn run_worker_non_git_cwd_degrades_changes_to_none() {
     // capture_changes errors in a non-git dir; the tool degrades to changes:None
     // (best-effort) rather than failing the worker — the conductor still gets ok.
     let dir = tempfile::tempdir().unwrap(); // deliberately NOT a git repo
-    let server = McpServer::from_parts(
-        vec![worker(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker(
             "codex-gpt",
             Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did it")),
         )],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .run_worker_inner(params("codex-gpt", dir.path()))
@@ -348,17 +350,17 @@ fn mcp_stdio_server_lists_all_tools() {
 async fn review_diff_parses_verdict_and_flags_critical() {
     let dir = tempfile::tempdir().unwrap();
     let verdict = r#"{"findings":[{"severity":"critical","file":"a.rs","description":"oops"}]}"#;
-    let server = McpServer::from_parts(
-        vec![],
-        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
             Provider::Gemini,
             verdict,
         ))),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .review_diff_inner(review_params("diff --git a b", dir.path()))
@@ -383,17 +385,17 @@ async fn review_diff_parses_verdict_and_flags_critical() {
 async fn review_diff_important_only_is_not_critical_but_findings_surface() {
     let dir = tempfile::tempdir().unwrap();
     let verdict = r#"{"findings":[{"severity":"important","file":"a.rs","description":"x"}]}"#;
-    let server = McpServer::from_parts(
-        vec![],
-        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
             Provider::Gemini,
             verdict,
         ))),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -412,17 +414,17 @@ async fn review_diff_important_only_is_not_critical_but_findings_surface() {
 #[tokio::test]
 async fn review_diff_clean_verdict_has_no_findings() {
     let dir = tempfile::tempdir().unwrap();
-    let server = McpServer::from_parts(
-        vec![],
-        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
             Provider::Gemini,
             r#"{"findings":[]}"#,
         ))),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -438,17 +440,17 @@ async fn review_diff_clean_verdict_has_no_findings() {
 #[tokio::test]
 async fn review_diff_unparseable_output_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
-    let server = McpServer::from_parts(
-        vec![],
-        reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
             Provider::Gemini,
             "looks fine to me, shipping it",
         ))),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -465,14 +467,14 @@ async fn review_diff_unparseable_output_fails_closed() {
 
 #[tokio::test]
 async fn review_diff_empty_diff_returns_error() {
-    let server = McpServer::from_parts(
-        vec![],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .review_diff_inner(review_params("   ", std::path::Path::new("/tmp")))
@@ -485,17 +487,17 @@ async fn review_diff_empty_diff_returns_error() {
 #[tokio::test]
 async fn review_diff_all_rungs_fail_returns_error() {
     let dir = tempfile::tempdir().unwrap();
-    let server = McpServer::from_parts(
-        vec![],
-        reviewer_ladder(Arc::new(ScriptedAdapter::failing(
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::failing(
             Provider::Gemini,
             "reviewer down",
         ))),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -509,8 +511,8 @@ async fn review_diff_all_rungs_fail_returns_error() {
 #[tokio::test]
 async fn council_run_returns_synthesis_and_answers() {
     let dir = tempfile::tempdir().unwrap();
-    let server = McpServer::from_parts(
-        vec![
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![
             worker(
                 "codex-gpt",
                 Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "answer one")),
@@ -523,15 +525,15 @@ async fn council_run_returns_synthesis_and_answers() {
                 )),
             ),
         ],
-        Vec::new(),
-        chairman_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+        reviewer: Vec::new(),
+        chairman: chairman_ladder(Arc::new(ScriptedAdapter::ok_with_text(
             Provider::Claude,
             "combined answer",
         ))),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server
         .council_run_inner(council_params("which option?", dir.path()))
@@ -544,14 +546,14 @@ async fn council_run_returns_synthesis_and_answers() {
 
 #[tokio::test]
 async fn council_run_empty_question_returns_error() {
-    let server = McpServer::from_parts(
-        vec![],
-        Vec::new(),
-        Vec::new(),
-        std::path::PathBuf::from("/tmp"),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
     let out = server
         .council_run_inner(council_params("   ", std::path::Path::new("/tmp")))
         .await;
@@ -579,14 +581,14 @@ fn search_recall_returns_hits() {
         )
         .unwrap();
 
-    let server = McpServer::from_parts(
-        vec![],
-        Vec::new(),
-        Vec::new(),
-        base.path().to_path_buf(),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: base.path().to_path_buf(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server.search_recall_inner(consilium::mcp::SearchRecallParams {
         query: "foo".into(),
@@ -627,14 +629,14 @@ fn page_in_loads_run_by_id_and_digests_it() {
         )
         .unwrap();
 
-    let server = McpServer::from_parts(
-        vec![],
-        Vec::new(),
-        Vec::new(),
-        base.path().to_path_buf(),
-        None,
-        QuotaStore::open_in_memory().unwrap(),
-    );
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: base.path().to_path_buf(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    });
 
     let out = server.page_in_inner(consilium::mcp::PageInParams { id: "run-x".into() });
     assert!(out.ok, "should load; error={:?}", out.error);
