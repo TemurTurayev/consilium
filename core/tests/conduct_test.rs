@@ -306,7 +306,26 @@ async fn rework_exhaustion_fails() {
         ],
     ));
 
-    let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did thing"));
+    // Distinct diffs each round (different file content) so this exercises
+    // genuine rework EXHAUSTION, not the P1.5 stall breaker (which trips only on
+    // a repeated diff+verify fingerprint).
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo attempt-a > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "tried a")
+            },
+            ScriptedAdapter {
+                pre_script: "echo attempt-b > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "tried b")
+            },
+            ScriptedAdapter {
+                pre_script: "echo attempt-c > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "tried c")
+            },
+        ],
+    ));
 
     let deps = ConductDeps {
         conductor: solo_role_handle(Provider::Claude, "model", conductor),
@@ -344,6 +363,76 @@ async fn rework_exhaustion_fails() {
     // Exactly MAX_REWORKS + 1 attempts: initial + 2 reworks, then exhaustion.
     let entries = outcome.transcript["subtasks"].as_array().unwrap();
     assert_eq!(entries[0]["attempts"].as_array().unwrap().len(), 3);
+}
+
+// ─── Test 3b: rework_stall_breaks_early (P1.5 stagnation) ───────────────────
+// A worker that reproduces the SAME diff + verify every attempt makes no
+// progress; the stagnation circuit breaker stops early instead of burning the
+// full rework budget.
+#[tokio::test]
+async fn rework_stall_breaks_early() {
+    let repo = temp_repo();
+    let quota = store();
+
+    // plan → rework → rework. Attempt 1 repeats attempt 0's exact fingerprint, so
+    // the breaker fires after the first repeat — only 2 evals are ever needed.
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("nope")),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("still nope")),
+        ],
+    ));
+
+    // Same output + no file mutation every attempt → identical diff + verify.
+    let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did thing"));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let failed = outcome.failed.expect("a stalled subtask fails the run");
+    assert!(
+        failed.contains("stalled"),
+        "should report a stall: {failed}"
+    );
+    assert!(outcome.completed.is_empty());
+    // Initial + 1 rework, then the repeat trips the breaker — fewer than the 3
+    // attempts a full MAX_REWORKS exhaustion records.
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(
+        entries[0]["attempts"].as_array().unwrap().len(),
+        2,
+        "stall stops after the first repeated fingerprint"
+    );
 }
 
 // ─── Test 4: supervisor_halt_aborts ────────────────────────────────────────
@@ -1949,9 +2038,29 @@ async fn multi_rework_history_accumulates() {
         log.clone(),
     ));
 
+    // Distinct write per attempt so the worker doesn't trip the P1.5 stall
+    // breaker — this test is about the conductor's feedback history accumulating.
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo one > out.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+            },
+            ScriptedAdapter {
+                pre_script: "echo two > out.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+            },
+            ScriptedAdapter {
+                pre_script: "echo three > out.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+            },
+        ],
+    ));
+
     let deps = ConductDeps {
         conductor: solo_role_handle(Provider::Claude, "m", conductor),
-        workers: vec![solo_worker("codex", Provider::Codex, "m", writing_worker())],
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
         supervisor: None,
         reviewer: None,
         arbiter: None,

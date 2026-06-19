@@ -6,6 +6,7 @@ use crate::orchestrator::changes::{capture_changed_files, capture_changes};
 use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
 use crate::orchestrator::routing::pick_worker_by_provider;
+use crate::orchestrator::stagnation;
 use crate::orchestrator::verify;
 use crate::quota::QuotaStore;
 use serde::Deserialize;
@@ -314,6 +315,9 @@ pub async fn run_conduct(
             .collect();
         let blackboard = mem_blackboard(mem_on, &subtask_entries, &changed_this_run, ledger_cap);
         let mut current_prompt = prompts::conduct_initial(&original_prompt, blackboard.as_deref());
+        // P1.5 stagnation: fingerprints of prior attempts this subtask, to detect
+        // a worker that's spinning (reproducing an earlier diff + verify result).
+        let mut fingerprints: Vec<u64> = Vec::new();
         for attempt_num in 0..=(MAX_REWORKS as usize) {
             // ── 2a: route ────────────────────────────────────────────────────
             let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
@@ -397,6 +401,17 @@ pub async fn run_conduct(
             // Runs after every worker attempt. A failed build/test overrides
             // Accept→Rework (grounding rule); lint failure is advisory only.
             let verify_outcome = verify::run_verify(&cwd, verify_cfg.as_ref()).await;
+
+            // P1.5 stagnation: a stall = this attempt reproduced a prior attempt's
+            // exact diff + verify result (the worker is spinning). Computed here
+            // (post-verify) but acted on only in the Rework arm, where it turns a
+            // would-be rework into an early "stalled" stop.
+            let stalled = {
+                let fp = stagnation::fingerprint(&changes, &verify_outcome.summary);
+                let s = stagnation::is_stalled(&fingerprints, fp);
+                fingerprints.push(fp);
+                s
+            };
 
             // History of PRIOR attempts (the current round isn't recorded until
             // after evaluation), for the supervisor + conductor evaluation.
@@ -774,12 +789,24 @@ pub async fn run_conduct(
                     break 'subtask;
                 }
                 EvalDecision::Rework => {
-                    if attempt_num >= MAX_REWORKS as usize {
-                        // Exhausted — fail the whole run.
-                        failed = Some(format!(
-                            "subtask {} exhausted {} rework attempts: {}",
-                            subtask.id, MAX_REWORKS, evaluation.feedback
-                        ));
+                    if attempt_num >= MAX_REWORKS as usize || stalled {
+                        // Exhausted, OR stalled: this attempt reproduced a prior
+                        // attempt's exact diff + verify result (P1.5 circuit
+                        // breaker) — more rework would only spin. Either way the
+                        // subtask was not going to converge, so fail it.
+                        let why = if stalled {
+                            format!(
+                                "stalled after {} attempt(s) — no progress (identical diff + verify): {}",
+                                attempt_num + 1,
+                                evaluation.feedback
+                            )
+                        } else {
+                            format!(
+                                "exhausted {} rework attempts: {}",
+                                MAX_REWORKS, evaluation.feedback
+                            )
+                        };
+                        failed = Some(format!("subtask {} {}", subtask.id, why));
                         subtask_entries.push(build_subtask_entry(
                             subtask.id,
                             &subtask.title,
