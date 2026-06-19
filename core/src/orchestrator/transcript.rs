@@ -181,6 +181,59 @@ impl TranscriptStore {
         }
         hits
     }
+
+    /// Load a single transcript by id. Matches a file whose JSON `id` field equals
+    /// `id`, or whose filename stem equals `id`, or whose filename begins with
+    /// `"<id>-"`. Returns the parsed JSON. None for an empty id, when no file
+    /// matches, or when the matching dir is unreadable. Unreadable/unparseable
+    /// individual files are skipped gracefully; never panics.
+    pub fn load_by_id(&self, id: &str) -> Option<serde_json::Value> {
+        let id = id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let id_prefix = format!("{id}-");
+        let dir = self.base.join("runs");
+
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => return None,
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            let stem_matches = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s == id || s.starts_with(&id_prefix));
+
+            if stem_matches {
+                let Ok(file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                let Ok(val): Result<serde_json::Value, _> = serde_json::from_reader(file) else {
+                    continue;
+                };
+                return Some(val);
+            }
+
+            let Ok(file) = std::fs::File::open(&path) else {
+                continue;
+            };
+            let Ok(val): Result<serde_json::Value, _> = serde_json::from_reader(file) else {
+                continue;
+            };
+
+            if val.get("id").and_then(|v| v.as_str()) == Some(id) {
+                return Some(val);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +325,51 @@ mod tests {
 
         let hits_empty_query = store.search("   ", 10);
         assert!(hits_empty_query.is_empty());
+    }
+
+    #[test]
+    fn loads_transcript_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::new(dir.path().to_path_buf());
+
+        std::fs::create_dir_all(dir.path().join("runs")).unwrap();
+        std::fs::write(
+            dir.path().join("runs").join("999-0000-bad.json"),
+            "not json",
+        )
+        .unwrap();
+
+        store
+            .save(
+                "worker",
+                &serde_json::json!({"id":"run-a","kind":"worker","task":"Alpha"}),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        store
+            .save(
+                "worker",
+                &serde_json::json!({"id":"run-b","kind":"worker","task":"Beta"}),
+            )
+            .unwrap();
+
+        let a = store.load_by_id("run-a").unwrap();
+        assert_eq!(a["task"], "Alpha");
+
+        let b = store.load_by_id("run-b").unwrap();
+        assert_eq!(b["task"], "Beta");
+
+        assert!(store.load_by_id("does-not-exist").is_none());
+        assert!(store.load_by_id("").is_none());
+
+        let path = store
+            .save(
+                "worker",
+                &serde_json::json!({"kind":"worker","task":"Gamma"}),
+            )
+            .unwrap();
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let c = store.load_by_id(stem).unwrap();
+        assert_eq!(c["task"], "Gamma");
     }
 }

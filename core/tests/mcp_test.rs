@@ -336,6 +336,10 @@ fn mcp_stdio_server_lists_all_tools() {
         stdout.contains("\"search_recall\""),
         "tools/list must include search_recall; got:\n{stdout}"
     );
+    assert!(
+        stdout.contains("\"page_in\""),
+        "tools/list must include page_in; got:\n{stdout}"
+    );
 }
 
 // ─── review_diff ──────────────────────────────────────────────────────────────
@@ -601,4 +605,53 @@ fn search_recall_returns_hits() {
     });
 
     assert!(!out_empty.ok, "empty query should fail");
+}
+
+// ─── page_in ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn page_in_loads_run_by_id_and_digests_it() {
+    let base = tempfile::tempdir().unwrap();
+    let store =
+        consilium::orchestrator::transcript::TranscriptStore::new(base.path().to_path_buf());
+    store
+        .save(
+            "conduct",
+            &serde_json::json!({
+                "id": "run-x",
+                "kind": "conduct",
+                "task": "Do the thing",
+                "summary": "all done",
+                "subtasks": [{"title": "step one", "summary": "did step one"}]
+            }),
+        )
+        .unwrap();
+
+    let server = McpServer::from_parts(
+        vec![],
+        Vec::new(),
+        Vec::new(),
+        base.path().to_path_buf(),
+        None,
+        QuotaStore::open_in_memory().unwrap(),
+    );
+
+    let out = server.page_in_inner(consilium::mcp::PageInParams { id: "run-x".into() });
+    assert!(out.ok, "should load; error={:?}", out.error);
+    assert_eq!(out.kind.as_deref(), Some("conduct"));
+    let digest = out.digest.unwrap_or_default();
+    assert!(
+        digest.contains("Do the thing"),
+        "digest has the task: {digest}"
+    );
+    assert!(
+        digest.contains("step one"),
+        "digest has subtask title: {digest}"
+    );
+
+    let missing = server.page_in_inner(consilium::mcp::PageInParams { id: "nope".into() });
+    assert!(!missing.ok && missing.error.is_some());
+
+    let empty = server.page_in_inner(consilium::mcp::PageInParams { id: "  ".into() });
+    assert!(!empty.ok);
 }
