@@ -179,6 +179,7 @@ async fn happy_path_single_subtask() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome: ConductOutcome = run_conduct(
@@ -260,6 +261,7 @@ async fn rework_then_accept() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -341,6 +343,7 @@ async fn rework_exhaustion_fails() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -405,6 +408,7 @@ async fn rework_stall_breaks_early() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -476,6 +480,7 @@ async fn supervisor_halt_aborts() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -571,6 +576,7 @@ async fn worker_failure_counts_as_attempt() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -636,6 +642,7 @@ async fn capture_failure_propagates_as_error() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let result = run_conduct(
@@ -707,6 +714,7 @@ async fn two_subtasks_complete_in_order() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -731,6 +739,226 @@ async fn two_subtasks_complete_in_order() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["id"], 1);
     assert_eq!(entries[1]["id"], 2);
+}
+
+#[tokio::test]
+async fn budget_exceeded_stops_at_subtask_boundary() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            &plan_json(&[
+                (1, "first file", "create one.txt"),
+                (2, "second file", "create two.txt"),
+            ]),
+        )],
+    ));
+
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'one' > one.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "created one.txt")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'two' > two.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "created two.txt")
+            },
+        ],
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        budget: Some(Duration::from_millis(0)),
+    };
+
+    let outcome = run_conduct(
+        "create two files",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let failed = outcome.failed.expect("budget overrun should fail the run");
+    assert!(
+        failed.contains("budget"),
+        "failure should mention budget: {failed}"
+    );
+    assert!(outcome.completed.is_empty());
+    assert!(outcome.transcript["subtasks"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn budget_preserves_completed_subtasks_on_trip() {
+    // The load-bearing guarantee: a budget that expires AFTER subtask 1 finishes
+    // ships subtask 1 and skips subtask 2 (rather than discarding work). Made
+    // deterministic by sleeping subtask 1's worker well past the budget.
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[
+                    (1, "first", "create one.txt"),
+                    (2, "second", "create two.txt"),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    // Subtask 1 sleeps 0.6s; budget is 200ms, so the boundary check before
+    // subtask 2 trips (elapsed ~0.6s >= 0.2s) while subtask 1's own boundary
+    // (a few ms in) does not. One worker step: subtask 2 must never run.
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![ScriptedAdapter {
+            pre_script: "sleep 0.6; echo one > one.txt".into(),
+            ..ScriptedAdapter::ok_with_text(Provider::Codex, "created one.txt")
+        }],
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        budget: Some(Duration::from_millis(200)),
+    };
+
+    let outcome = run_conduct(
+        "create two files",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1], "subtask 1 must be preserved");
+    let failed = outcome.failed.expect("budget trip fails the run");
+    assert!(
+        failed.contains("budget") && failed.contains("shipped 1 of 2"),
+        "got: {failed}"
+    );
+    assert!(
+        repo.path().join("one.txt").exists(),
+        "subtask 1's file persists"
+    );
+    assert!(!repo.path().join("two.txt").exists(), "subtask 2 never ran");
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], 1);
+}
+
+#[tokio::test]
+async fn generous_budget_runs_all_subtasks() {
+    // The Some-but-ample companion to the exceeded case: a budget that is never
+    // hit must be behaviorally inert (all subtasks run, no failure).
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[
+                    (1, "first", "create one.txt"),
+                    (2, "second", "create two.txt"),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo one > one.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "created one.txt")
+            },
+            ScriptedAdapter {
+                pre_script: "echo two > two.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "created two.txt")
+            },
+        ],
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        budget: Some(Duration::from_secs(3600)),
+    };
+
+    let outcome = run_conduct(
+        "create two files",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1, 2], "an ample budget is inert");
+    assert!(outcome.failed.is_none());
+    assert!(repo.path().join("one.txt").exists() && repo.path().join("two.txt").exists());
+    assert_eq!(outcome.transcript["subtasks"].as_array().unwrap().len(), 2);
 }
 
 // ─── Test 8: fail_on_second_preserves_first ────────────────────────────────
@@ -784,6 +1012,7 @@ async fn fail_on_second_preserves_first() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -878,6 +1107,7 @@ async fn critical_review_forces_rework() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -966,6 +1196,7 @@ async fn arbiter_ships_on_exhaustion() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1046,6 +1277,7 @@ async fn arbiter_fails_on_exhaustion() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1113,6 +1345,7 @@ async fn supervisor_ok_does_not_interfere() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1231,6 +1464,7 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1293,6 +1527,7 @@ async fn decompose_session_failure_surfaces_real_error() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let err = run_conduct(
@@ -1375,6 +1610,7 @@ async fn conduct_worker_falls_back() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1459,6 +1695,7 @@ async fn failing_tests_force_rework_even_if_conductor_would_accept() {
         verify: Some(verify),
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1522,6 +1759,7 @@ async fn no_verifier_is_recorded_as_unverified() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1584,6 +1822,7 @@ async fn attempt_history_threads_prior_feedback() {
         verify: None,
         memory: Default::default(), // enabled
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1663,6 +1902,7 @@ async fn plan_ledger_threads_prior_subtasks() {
         verify: None,
         memory: Default::default(), // enabled
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1754,6 +1994,7 @@ async fn grounding_override_recorded_in_history() {
         verify: Some(verify),
         memory: Default::default(), // enabled
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1829,6 +2070,7 @@ async fn memory_disabled_is_byte_identical() {
             attempt_history_char_cap: 800,
         },
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1898,6 +2140,7 @@ async fn supervisor_receives_plan_ledger() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -1982,6 +2225,7 @@ async fn arbiter_receives_memory_blocks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2067,6 +2311,7 @@ async fn multi_rework_history_accumulates() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2146,6 +2391,7 @@ async fn blackboard_threads_prior_subtasks_to_worker() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2250,6 +2496,7 @@ async fn blackboard_accumulates_across_three_subtasks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2337,6 +2584,7 @@ async fn blackboard_disabled_is_byte_identical() {
             attempt_history_char_cap: 800,
         },
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2414,6 +2662,7 @@ async fn cross_family_review_routes_to_a_different_family() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2475,6 +2724,7 @@ async fn cross_family_degrades_same_family_when_no_other_family() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2538,6 +2788,7 @@ async fn cross_family_arbiter_runs_and_ships() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        budget: None,
     };
 
     let outcome = run_conduct(
@@ -2599,6 +2850,7 @@ async fn cross_family_off_emits_no_marker() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     };
 
     let outcome = run_conduct(

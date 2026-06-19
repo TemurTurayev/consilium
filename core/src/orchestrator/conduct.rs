@@ -180,6 +180,9 @@ pub struct ConductDeps {
     /// route a subtask's diff to a reviewer of a DIFFERENT family than the
     /// worker that produced it. `Default`/false reproduces today's behavior.
     pub cross_family_review: bool,
+    /// The optional total wall-clock budget for the whole run; `None` means
+    /// unlimited (current behavior).
+    pub budget: Option<std::time::Duration>,
 }
 
 #[derive(Debug)]
@@ -230,6 +233,10 @@ pub async fn run_conduct(
     let ledger_cap = deps.memory.ledger_char_cap;
     let hist_cap = deps.memory.attempt_history_char_cap;
     let cross_family = deps.cross_family_review;
+    let budget = deps.budget;
+    // Whole-run wall-clock start for the budget governor — captured before
+    // decompose so a slow plan also counts against the budget.
+    let run_start = std::time::Instant::now();
 
     // Accumulate all run-wide fallbacks for the transcript.
     let mut all_fallbacks: Vec<Fallback> = Vec::new();
@@ -297,6 +304,19 @@ pub async fn run_conduct(
     // until real parallel workers land (it would also break the cross-subtask
     // inheritance the blackboard provides by starting each worker from HEAD).
     'subtask: for subtask in &plan.subtasks {
+        if let Some(b) = budget {
+            let elapsed = run_start.elapsed();
+            if elapsed >= b {
+                failed = Some(format!(
+                    "budget exceeded: {:.1}s wall-clock elapsed; shipped {} of {} subtasks",
+                    elapsed.as_secs_f64(),
+                    completed.len(),
+                    plan.subtasks.len()
+                ));
+                break;
+            }
+        }
+
         let mut attempts: Vec<serde_json::Value> = Vec::new();
         let mut supervisor_entries: Vec<serde_json::Value> = Vec::new();
 
