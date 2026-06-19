@@ -1,0 +1,7 @@
+{
+  "name": "parse-duration",
+  "prompt": "Implement `pub fn parse_duration(s: &str) -> Option<u64>` in src/lib.rs of the `duration_parser` crate. It parses a human duration string into TOTAL SECONDS. Rules: trim surrounding whitespace; the (trimmed) input is a sequence of `<non-negative-integer><unit>` segments where unit is one of d (=86400s), h (=3600s), m (=60s), s (=1s); units MUST appear in strictly DESCENDING order (d before h before m before s) and each unit AT MOST ONCE; return Some(total seconds). Return None for ANYTHING else: empty or whitespace-only input, an unknown unit, a number with no unit, a sign, a decimal point, units out of order, a duplicated unit, or any leading/trailing junk. An integration test in tests/parse_duration.rs asserts the full contract — make it pass without modifying the test.",
+  "context": "A single-crate Rust library; the crate is `duration_parser`. The protected test lives in tests/parse_duration.rs and calls `duration_parser::parse_duration(...)`. Implement the function in src/lib.rs.",
+  "verify": { "build": "cargo build", "test": "cargo test" },
+  "protected_paths": ["tests/parse_duration.rs"]
+}
