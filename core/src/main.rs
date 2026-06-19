@@ -430,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
                 verify: config.verify.clone(),
                 memory: config.conductor_memory.clone().unwrap_or_default(),
                 cross_family_review: config.cross_family_review,
+                max_replans: 0,
                 budget: None,
             };
 
@@ -532,6 +533,7 @@ async fn main() -> anyhow::Result<()> {
                     verify: config.verify.clone(),
                     memory: config.conductor_memory.clone().unwrap_or_default(),
                     cross_family_review: config.cross_family_review,
+                    max_replans: 0,
                     budget: None,
                 },
                 council_members,
@@ -716,6 +718,7 @@ async fn main() -> anyhow::Result<()> {
                         verify,
                         memory: self.config.conductor_memory.clone().unwrap_or_default(),
                         cross_family_review: cross_family,
+                        max_replans: 0,
                         budget: None,
                     }
                 }

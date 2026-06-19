@@ -147,6 +147,7 @@ async fn trivial_skips_council() {
             verify: None,
             memory: Default::default(),
             cross_family_review: false,
+            max_replans: 0,
             budget: None,
         },
         council_members: vec![solo_worker(
@@ -240,6 +241,7 @@ async fn standard_runs_council_then_conduct() {
             verify: None,
             memory: Default::default(),
             cross_family_review: false,
+            max_replans: 0,
             budget: None,
         },
         council_members: vec![solo_worker(
@@ -313,6 +315,7 @@ async fn check_command_failure_reported() {
             verify: None,
             memory: Default::default(),
             cross_family_review: false,
+            max_replans: 0,
             budget: None,
         },
         council_members: vec![],
@@ -385,6 +388,7 @@ async fn check_command_success() {
             verify: None,
             memory: Default::default(),
             cross_family_review: false,
+            max_replans: 0,
             budget: None,
         },
         council_members: vec![],

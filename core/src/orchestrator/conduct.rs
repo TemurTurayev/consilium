@@ -180,6 +180,9 @@ pub struct ConductDeps {
     /// route a subtask's diff to a reviewer of a DIFFERENT family than the
     /// worker that produced it. `Default`/false reproduces today's behavior.
     pub cross_family_review: bool,
+    /// Max times the conductor may regenerate the plan after a subtask failure;
+    /// `0` = never replan (current behavior).
+    pub max_replans: u32,
     /// The optional total wall-clock budget for the whole run; `None` means
     /// unlimited (current behavior).
     pub budget: Option<std::time::Duration>,
@@ -233,6 +236,7 @@ pub async fn run_conduct(
     let ledger_cap = deps.memory.ledger_char_cap;
     let hist_cap = deps.memory.attempt_history_char_cap;
     let cross_family = deps.cross_family_review;
+    let max_replans = deps.max_replans;
     let budget = deps.budget;
     // Whole-run wall-clock start for the budget governor — captured before
     // decompose so a slow plan also counts against the budget.
@@ -266,7 +270,7 @@ pub async fn run_conduct(
         .await?
     };
     all_fallbacks.extend(decompose_fo.fallbacks);
-    let plan = parse_plan(&decompose_fo.outcome.final_text)
+    let mut plan = parse_plan(&decompose_fo.outcome.final_text)
         .filter(|p| !p.subtasks.is_empty())
         .ok_or_else(|| anyhow::anyhow!("conductor produced no plan"))?;
 
@@ -281,6 +285,8 @@ pub async fn run_conduct(
     let mut halted: Option<String> = None;
     let mut failed: Option<String> = None;
     let mut subtask_entries: Vec<serde_json::Value> = Vec::new();
+    let mut replans_used: u32 = 0;
+    let mut replans: Vec<serde_json::Value> = Vec::new();
 
     // Worker providers for routing: use the primary (first) rung's provider.
     let worker_providers: Vec<crate::event::Provider> = workers
@@ -303,155 +309,245 @@ pub async fn run_conduct(
     // cannot clobber an earlier one. Worktree-per-subtask isolation is deferred
     // until real parallel workers land (it would also break the cross-subtask
     // inheritance the blackboard provides by starting each worker from HEAD).
-    'subtask: for subtask in &plan.subtasks {
-        if let Some(b) = budget {
-            let elapsed = run_start.elapsed();
-            if elapsed >= b {
-                failed = Some(format!(
-                    "budget exceeded: {:.1}s wall-clock elapsed; shipped {} of {} subtasks",
-                    elapsed.as_secs_f64(),
-                    completed.len(),
-                    plan.subtasks.len()
-                ));
-                break;
-            }
-        }
-
-        let mut attempts: Vec<serde_json::Value> = Vec::new();
-        let mut supervisor_entries: Vec<serde_json::Value> = Vec::new();
-
-        let original_prompt = subtask.prompt.clone();
-        let mut previous_changes = String::new();
-        // Cross-subtask ledger: folded status of the prior finished subtasks.
-        // Stable for this whole subtask — `subtask_entries` only grows at the
-        // terminal sites, which end this iteration.
-        let ledger_str = mem_ledger(mem_on, &subtask_entries, ledger_cap);
-        // Worker blackboard (read-only inheritance, INITIAL prompt only): the
-        // mechanical roster of prior finished subtasks + files this run touched.
-        let changed_this_run: Vec<String> = capture_changed_files(&cwd)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|f| !run_start_files.contains(f))
-            .collect();
-        let blackboard = mem_blackboard(mem_on, &subtask_entries, &changed_this_run, ledger_cap);
-        let mut current_prompt = prompts::conduct_initial(&original_prompt, blackboard.as_deref());
-        // P1.5 stagnation: fingerprints of prior attempts this subtask, to detect
-        // a worker that's spinning (reproducing an earlier diff + verify result).
-        let mut fingerprints: Vec<u64> = Vec::new();
-        for attempt_num in 0..=(MAX_REWORKS as usize) {
-            // ── 2a: route ────────────────────────────────────────────────────
-            let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
-            let worker = &workers[worker_idx];
-
-            // ── 2b: worker session via failover ─────────────────────────────
-            // run_with_failover returns Err only when ALL rungs fail — treat
-            // that as a worker-failed-attempt (feedback = the error message).
-            let worker_label = worker.label.clone();
-            let worker_result = {
-                let prompt = current_prompt.clone();
-                let cwd2 = cwd.clone();
-                run_with_failover(
-                    &worker.ladder,
-                    &worker_label,
-                    move |model| RunRequest {
-                        prompt: prompt.clone(),
-                        model,
-                        cwd: cwd2.clone(),
-                        advisory: false,
-                        write: true,
-                    },
-                    quota,
-                    health,
-                    timeout,
-                )
-                .await
-            };
-
-            let (worker_text, worker_failed_msg) = match worker_result {
-                Ok(fo) => {
-                    all_fallbacks.extend(fo.fallbacks);
-                    (fo.outcome.final_text, None)
-                }
-                Err(e) => (String::new(), Some(e.to_string())),
-            };
-
-            if let Some(err_msg) = worker_failed_msg {
-                // All worker rungs failed — counts as a rework attempt.
-                // No verify ran because the worker itself failed.
-                attempts.push(serde_json::json!({
-                    "attempt": attempt_num,
-                    "worker": worker.label,
-                    "decision": "rework",
-                    "feedback": err_msg,
-                    "changes_chars": 0,
-                    "verify": "not_run",
-                }));
-                if attempt_num >= MAX_REWORKS as usize {
+    loop {
+        'subtask: for subtask in &plan.subtasks {
+            if let Some(b) = budget {
+                let elapsed = run_start.elapsed();
+                if elapsed >= b {
                     failed = Some(format!(
-                        "subtask {} exhausted reworks (last: {})",
-                        subtask.id, err_msg
+                        "budget exceeded: {:.1}s wall-clock elapsed; shipped {} of {} subtasks",
+                        elapsed.as_secs_f64(),
+                        completed.len(),
+                        plan.subtasks.len()
                     ));
-                    subtask_entries.push(build_subtask_entry(
-                        subtask.id,
-                        &subtask.title,
-                        "failed",
-                        &attempts,
-                        &supervisor_entries,
-                    ));
-                    break 'subtask;
+                    break;
                 }
-                // Prepare rework prompt for next attempt. History includes the
-                // just-recorded failed round.
-                let history = mem_history(mem_on, &attempts, hist_cap);
-                current_prompt = prompts::conduct_rework(
-                    &original_prompt,
-                    &previous_changes,
-                    &err_msg,
-                    history.as_deref(),
-                );
-                continue;
             }
 
-            // ── 2c: capture changes ─────────────────────────────────────────
-            // Capture failure is an infrastructure fault — propagate loudly.
-            let changes = capture_changes(&cwd)?;
-            previous_changes = changes.clone();
+            let mut attempts: Vec<serde_json::Value> = Vec::new();
+            let mut supervisor_entries: Vec<serde_json::Value> = Vec::new();
 
-            // ── 2c2: verify (build/test/lint) ───────────────────────────────
-            // Runs after every worker attempt. A failed build/test overrides
-            // Accept→Rework (grounding rule); lint failure is advisory only.
-            let verify_outcome = verify::run_verify(&cwd, verify_cfg.as_ref()).await;
+            let original_prompt = subtask.prompt.clone();
+            let mut previous_changes = String::new();
+            // Cross-subtask ledger: folded status of the prior finished subtasks.
+            // Stable for this whole subtask — `subtask_entries` only grows at the
+            // terminal sites, which end this iteration.
+            let ledger_str = mem_ledger(mem_on, &subtask_entries, ledger_cap);
+            // Worker blackboard (read-only inheritance, INITIAL prompt only): the
+            // mechanical roster of prior finished subtasks + files this run touched.
+            let changed_this_run: Vec<String> = capture_changed_files(&cwd)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|f| !run_start_files.contains(f))
+                .collect();
+            let blackboard =
+                mem_blackboard(mem_on, &subtask_entries, &changed_this_run, ledger_cap);
+            let mut current_prompt =
+                prompts::conduct_initial(&original_prompt, blackboard.as_deref());
+            // P1.5 stagnation: fingerprints of prior attempts this subtask, to detect
+            // a worker that's spinning (reproducing an earlier diff + verify result).
+            let mut fingerprints: Vec<u64> = Vec::new();
+            for attempt_num in 0..=(MAX_REWORKS as usize) {
+                // ── 2a: route ────────────────────────────────────────────────────
+                let worker_idx = pick_worker_by_provider(&worker_providers, quota)?;
+                let worker = &workers[worker_idx];
 
-            // P1.5 stagnation: a stall = this attempt reproduced a prior attempt's
-            // exact diff + verify result (the worker is spinning). Computed here
-            // (post-verify) but acted on only in the Rework arm, where it turns a
-            // would-be rework into an early "stalled" stop.
-            let stalled = {
-                let fp = stagnation::fingerprint(&changes, &verify_outcome.summary);
-                let s = stagnation::is_stalled(&fingerprints, fp);
-                fingerprints.push(fp);
-                s
-            };
+                // ── 2b: worker session via failover ─────────────────────────────
+                // run_with_failover returns Err only when ALL rungs fail — treat
+                // that as a worker-failed-attempt (feedback = the error message).
+                let worker_label = worker.label.clone();
+                let worker_result = {
+                    let prompt = current_prompt.clone();
+                    let cwd2 = cwd.clone();
+                    run_with_failover(
+                        &worker.ladder,
+                        &worker_label,
+                        move |model| RunRequest {
+                            prompt: prompt.clone(),
+                            model,
+                            cwd: cwd2.clone(),
+                            advisory: false,
+                            write: true,
+                        },
+                        quota,
+                        health,
+                        timeout,
+                    )
+                    .await
+                };
 
-            // History of PRIOR attempts (the current round isn't recorded until
-            // after evaluation), for the supervisor + conductor evaluation.
-            let prior_history = mem_history(mem_on, &attempts, hist_cap);
+                let (worker_text, worker_failed_msg) = match worker_result {
+                    Ok(fo) => {
+                        all_fallbacks.extend(fo.fallbacks);
+                        (fo.outcome.final_text, None)
+                    }
+                    Err(e) => (String::new(), Some(e.to_string())),
+                };
 
-            // ── 2d: supervisor gate ─────────────────────────────────────────
-            let supervisor_note: Option<String>;
-            if let Some(ref sup) = supervisor {
-                let progress = build_progress(task, &plan.subtasks, &completed, subtask, &changes);
-                let sup_result = {
-                    let prompt = prompts::supervisor_gate(
-                        task,
-                        &progress,
+                if let Some(err_msg) = worker_failed_msg {
+                    // All worker rungs failed — counts as a rework attempt.
+                    // No verify ran because the worker itself failed.
+                    attempts.push(serde_json::json!({
+                        "attempt": attempt_num,
+                        "worker": worker.label,
+                        "decision": "rework",
+                        "feedback": err_msg,
+                        "changes_chars": 0,
+                        "verify": "not_run",
+                    }));
+                    if attempt_num >= MAX_REWORKS as usize {
+                        failed = Some(format!(
+                            "subtask {} exhausted reworks (last: {})",
+                            subtask.id, err_msg
+                        ));
+                        subtask_entries.push(build_subtask_entry(
+                            subtask.id,
+                            &subtask.title,
+                            "failed",
+                            &attempts,
+                            &supervisor_entries,
+                        ));
+                        break 'subtask;
+                    }
+                    // Prepare rework prompt for next attempt. History includes the
+                    // just-recorded failed round.
+                    let history = mem_history(mem_on, &attempts, hist_cap);
+                    current_prompt = prompts::conduct_rework(
+                        &original_prompt,
+                        &previous_changes,
+                        &err_msg,
+                        history.as_deref(),
+                    );
+                    continue;
+                }
+
+                // ── 2c: capture changes ─────────────────────────────────────────
+                // Capture failure is an infrastructure fault — propagate loudly.
+                let changes = capture_changes(&cwd)?;
+                previous_changes = changes.clone();
+
+                // ── 2c2: verify (build/test/lint) ───────────────────────────────
+                // Runs after every worker attempt. A failed build/test overrides
+                // Accept→Rework (grounding rule); lint failure is advisory only.
+                let verify_outcome = verify::run_verify(&cwd, verify_cfg.as_ref()).await;
+
+                // P1.5 stagnation: a stall = this attempt reproduced a prior attempt's
+                // exact diff + verify result (the worker is spinning). Computed here
+                // (post-verify) but acted on only in the Rework arm, where it turns a
+                // would-be rework into an early "stalled" stop.
+                let stalled = {
+                    let fp = stagnation::fingerprint(&changes, &verify_outcome.summary);
+                    let s = stagnation::is_stalled(&fingerprints, fp);
+                    fingerprints.push(fp);
+                    s
+                };
+
+                // History of PRIOR attempts (the current round isn't recorded until
+                // after evaluation), for the supervisor + conductor evaluation.
+                let prior_history = mem_history(mem_on, &attempts, hist_cap);
+
+                // ── 2d: supervisor gate ─────────────────────────────────────────
+                let supervisor_note: Option<String>;
+                if let Some(ref sup) = supervisor {
+                    let progress =
+                        build_progress(task, &plan.subtasks, &completed, subtask, &changes);
+                    let sup_result = {
+                        let prompt = prompts::supervisor_gate(
+                            task,
+                            &progress,
+                            ledger_str.as_deref(),
+                            prior_history.as_deref(),
+                        );
+                        let cwd2 = cwd.clone();
+                        run_with_failover(
+                            &sup.ladder,
+                            "supervisor",
+                            move |model| RunRequest {
+                                prompt: prompt.clone(),
+                                model,
+                                cwd: cwd2.clone(),
+                                advisory: true,
+                                write: false,
+                            },
+                            quota,
+                            health,
+                            timeout,
+                        )
+                        .await
+                    };
+                    match sup_result {
+                        Ok(fo) => {
+                            all_fallbacks.extend(fo.fallbacks);
+                            let verdict = parse_supervisor(&fo.outcome.final_text).unwrap_or(
+                                SupervisorVerdict {
+                                    status: SupervisorStatus::Concern,
+                                    note: "supervisor output unparseable".to_string(),
+                                },
+                            );
+
+                            supervisor_entries.push(serde_json::json!({
+                                "status": status_str(&verdict.status),
+                                "note": verdict.note.clone(),
+                            }));
+
+                            match verdict.status {
+                                SupervisorStatus::Halt => {
+                                    halted = Some(verdict.note.clone());
+                                    subtask_entries.push(build_subtask_entry(
+                                        subtask.id,
+                                        &subtask.title,
+                                        "halted",
+                                        &attempts,
+                                        &supervisor_entries,
+                                    ));
+                                    break 'subtask;
+                                }
+                                SupervisorStatus::Concern => {
+                                    supervisor_note = Some(verdict.note.clone());
+                                }
+                                SupervisorStatus::Ok => {
+                                    supervisor_note = None;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Advisory gate: a transient supervisor failure (all rungs
+                            // down) must NOT kill the run — the supervisor only raises
+                            // Concern/Halt. Degrade to "no verdict this attempt" and
+                            // proceed; record it in the transcript so it stays visible.
+                            tracing::warn!(error = %e, "supervisor unavailable; proceeding without its verdict");
+                            supervisor_entries.push(serde_json::json!({
+                                "status": "unavailable",
+                                "note": format!("supervisor failed: {e}"),
+                            }));
+                            supervisor_note = None;
+                        }
+                    }
+                } else {
+                    supervisor_note = None;
+                }
+
+                // ── 2e: conductor evaluation ────────────────────────────────────
+                // run_with_failover Err means all conductor rungs are dead.
+                let verify_summary_for_prompt = if verify_outcome.ran {
+                    verify_outcome.summary.as_str()
+                } else {
+                    "(no verifier ran)"
+                };
+                let eval_fo = {
+                    let prompt = prompts::conduct_evaluation(
+                        &subtask.prompt,
+                        &changes,
+                        &worker_text,
+                        verify_summary_for_prompt,
+                        supervisor_note.as_deref(),
                         ledger_str.as_deref(),
                         prior_history.as_deref(),
                     );
                     let cwd2 = cwd.clone();
                     run_with_failover(
-                        &sup.ladder,
-                        "supervisor",
+                        &conductor_ladder,
+                        "conductor",
                         move |model| RunRequest {
                             prompt: prompt.clone(),
                             model,
@@ -464,266 +560,153 @@ pub async fn run_conduct(
                         timeout,
                     )
                     .await
+                    .map_err(|e| anyhow::anyhow!("conductor evaluation failed: {e}"))?
                 };
-                match sup_result {
-                    Ok(fo) => {
-                        all_fallbacks.extend(fo.fallbacks);
-                        let verdict =
-                            parse_supervisor(&fo.outcome.final_text).unwrap_or(SupervisorVerdict {
-                                status: SupervisorStatus::Concern,
-                                note: "supervisor output unparseable".to_string(),
-                            });
+                all_fallbacks.extend(eval_fo.fallbacks);
 
-                        supervisor_entries.push(serde_json::json!({
-                            "status": status_str(&verdict.status),
-                            "note": verdict.note.clone(),
-                        }));
+                // Fail-safe: unparseable evaluation → Rework (never silent accept).
+                let mut evaluation =
+                    parse_evaluation(&eval_fo.outcome.final_text).unwrap_or(Evaluation {
+                        decision: EvalDecision::Rework,
+                        feedback: "evaluation output unparseable".to_string(),
+                    });
 
-                        match verdict.status {
-                            SupervisorStatus::Halt => {
-                                halted = Some(verdict.note.clone());
+                // ── GROUNDING RULE (keystone) ───────────────────────────────────
+                // If verify ran and failed, the subtask CANNOT be accepted this
+                // attempt — regardless of the conductor's text opinion. Override
+                // Accept→Rework with the failure summary as feedback. Passed or
+                // not-run → conductor's decision stands.
+                if verify_outcome.ran
+                    && !verify_outcome.passed
+                    && evaluation.decision == EvalDecision::Accept
+                {
+                    evaluation = Evaluation {
+                        decision: EvalDecision::Rework,
+                        feedback: format!(
+                            "Build/test failed; fix before acceptance:\n{}",
+                            verify_outcome.summary
+                        ),
+                    };
+                }
+
+                let verify_status = match (verify_outcome.ran, verify_outcome.passed) {
+                    (false, _) => "not_run",
+                    (true, true) => "passed",
+                    (true, false) => "failed",
+                };
+
+                let decision_str = match evaluation.decision {
+                    EvalDecision::Accept => "accept",
+                    EvalDecision::Rework => "rework",
+                    EvalDecision::Fail => "fail",
+                };
+
+                // `worker` recorded per-attempt (see the worker-failure push above).
+                attempts.push(serde_json::json!({
+                    "attempt": attempt_num,
+                    "worker": worker.label,
+                    "decision": decision_str,
+                    "feedback": evaluation.feedback,
+                    "changes_chars": changes.len(),
+                    "verify": verify_status,
+                }));
+
+                match evaluation.decision {
+                    EvalDecision::Accept => {
+                        // ── 2f: review gate (if configured, advisory) ───────────
+                        // The gate's logic lives in run_review_gate; here we just act
+                        // on its decision, keeping this arm flat.
+                        let decision = match reviewer {
+                            Some(ref rev) => {
+                                run_review_gate(
+                                    &changes,
+                                    subtask,
+                                    rev,
+                                    arbiter.as_ref(),
+                                    cross_family,
+                                    &workers,
+                                    worker_providers[worker_idx],
+                                    attempt_num,
+                                    &mut attempts,
+                                    &mut all_fallbacks,
+                                    ledger_str.as_deref(),
+                                    mem_on,
+                                    hist_cap,
+                                    quota,
+                                    health,
+                                    &cwd,
+                                    timeout,
+                                )
+                                .await
+                            }
+                            None => GateDecision::Accept,
+                        };
+
+                        match decision {
+                            GateDecision::Accept => {
+                                completed.push(subtask.id);
                                 subtask_entries.push(build_subtask_entry(
                                     subtask.id,
                                     &subtask.title,
-                                    "halted",
+                                    "completed",
                                     &attempts,
                                     &supervisor_entries,
                                 ));
+                                continue 'subtask;
+                            }
+                            GateDecision::Ship { arbiter_entry } => {
+                                completed.push(subtask.id);
+                                let mut entry = build_subtask_entry(
+                                    subtask.id,
+                                    &subtask.title,
+                                    "completed",
+                                    &attempts,
+                                    &supervisor_entries,
+                                );
+                                if let Some(obj) = entry.as_object_mut() {
+                                    obj.insert("arbiter".to_string(), arbiter_entry);
+                                }
+                                subtask_entries.push(entry);
+                                continue 'subtask;
+                            }
+                            GateDecision::Rework { findings } => {
+                                // Not yet exhausted — rework with review findings.
+                                let history = mem_history(mem_on, &attempts, hist_cap);
+                                current_prompt = prompts::conduct_rework(
+                                    &original_prompt,
+                                    &changes,
+                                    &findings,
+                                    history.as_deref(),
+                                );
+                                continue;
+                            }
+                            GateDecision::Fail {
+                                reason,
+                                arbiter_entry,
+                            } => {
+                                failed = Some(reason);
+                                let mut entry = build_subtask_entry(
+                                    subtask.id,
+                                    &subtask.title,
+                                    "failed",
+                                    &attempts,
+                                    &supervisor_entries,
+                                );
+                                if let Some(arb) = arbiter_entry {
+                                    if let Some(obj) = entry.as_object_mut() {
+                                        obj.insert("arbiter".to_string(), arb);
+                                    }
+                                }
+                                subtask_entries.push(entry);
                                 break 'subtask;
                             }
-                            SupervisorStatus::Concern => {
-                                supervisor_note = Some(verdict.note.clone());
-                            }
-                            SupervisorStatus::Ok => {
-                                supervisor_note = None;
-                            }
                         }
                     }
-                    Err(e) => {
-                        // Advisory gate: a transient supervisor failure (all rungs
-                        // down) must NOT kill the run — the supervisor only raises
-                        // Concern/Halt. Degrade to "no verdict this attempt" and
-                        // proceed; record it in the transcript so it stays visible.
-                        tracing::warn!(error = %e, "supervisor unavailable; proceeding without its verdict");
-                        supervisor_entries.push(serde_json::json!({
-                            "status": "unavailable",
-                            "note": format!("supervisor failed: {e}"),
-                        }));
-                        supervisor_note = None;
-                    }
-                }
-            } else {
-                supervisor_note = None;
-            }
-
-            // ── 2e: conductor evaluation ────────────────────────────────────
-            // run_with_failover Err means all conductor rungs are dead.
-            let verify_summary_for_prompt = if verify_outcome.ran {
-                verify_outcome.summary.as_str()
-            } else {
-                "(no verifier ran)"
-            };
-            let eval_fo = {
-                let prompt = prompts::conduct_evaluation(
-                    &subtask.prompt,
-                    &changes,
-                    &worker_text,
-                    verify_summary_for_prompt,
-                    supervisor_note.as_deref(),
-                    ledger_str.as_deref(),
-                    prior_history.as_deref(),
-                );
-                let cwd2 = cwd.clone();
-                run_with_failover(
-                    &conductor_ladder,
-                    "conductor",
-                    move |model| RunRequest {
-                        prompt: prompt.clone(),
-                        model,
-                        cwd: cwd2.clone(),
-                        advisory: true,
-                        write: false,
-                    },
-                    quota,
-                    health,
-                    timeout,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("conductor evaluation failed: {e}"))?
-            };
-            all_fallbacks.extend(eval_fo.fallbacks);
-
-            // Fail-safe: unparseable evaluation → Rework (never silent accept).
-            let mut evaluation =
-                parse_evaluation(&eval_fo.outcome.final_text).unwrap_or(Evaluation {
-                    decision: EvalDecision::Rework,
-                    feedback: "evaluation output unparseable".to_string(),
-                });
-
-            // ── GROUNDING RULE (keystone) ───────────────────────────────────
-            // If verify ran and failed, the subtask CANNOT be accepted this
-            // attempt — regardless of the conductor's text opinion. Override
-            // Accept→Rework with the failure summary as feedback. Passed or
-            // not-run → conductor's decision stands.
-            if verify_outcome.ran
-                && !verify_outcome.passed
-                && evaluation.decision == EvalDecision::Accept
-            {
-                evaluation = Evaluation {
-                    decision: EvalDecision::Rework,
-                    feedback: format!(
-                        "Build/test failed; fix before acceptance:\n{}",
-                        verify_outcome.summary
-                    ),
-                };
-            }
-
-            let verify_status = match (verify_outcome.ran, verify_outcome.passed) {
-                (false, _) => "not_run",
-                (true, true) => "passed",
-                (true, false) => "failed",
-            };
-
-            let decision_str = match evaluation.decision {
-                EvalDecision::Accept => "accept",
-                EvalDecision::Rework => "rework",
-                EvalDecision::Fail => "fail",
-            };
-
-            // `worker` recorded per-attempt (see the worker-failure push above).
-            attempts.push(serde_json::json!({
-                "attempt": attempt_num,
-                "worker": worker.label,
-                "decision": decision_str,
-                "feedback": evaluation.feedback,
-                "changes_chars": changes.len(),
-                "verify": verify_status,
-            }));
-
-            match evaluation.decision {
-                EvalDecision::Accept => {
-                    // ── 2f: review gate (if configured, advisory) ───────────
-                    // The gate's logic lives in run_review_gate; here we just act
-                    // on its decision, keeping this arm flat.
-                    let decision = match reviewer {
-                        Some(ref rev) => {
-                            run_review_gate(
-                                &changes,
-                                subtask,
-                                rev,
-                                arbiter.as_ref(),
-                                cross_family,
-                                &workers,
-                                worker_providers[worker_idx],
-                                attempt_num,
-                                &mut attempts,
-                                &mut all_fallbacks,
-                                ledger_str.as_deref(),
-                                mem_on,
-                                hist_cap,
-                                quota,
-                                health,
-                                &cwd,
-                                timeout,
-                            )
-                            .await
-                        }
-                        None => GateDecision::Accept,
-                    };
-
-                    match decision {
-                        GateDecision::Accept => {
-                            completed.push(subtask.id);
-                            subtask_entries.push(build_subtask_entry(
-                                subtask.id,
-                                &subtask.title,
-                                "completed",
-                                &attempts,
-                                &supervisor_entries,
-                            ));
-                            continue 'subtask;
-                        }
-                        GateDecision::Ship { arbiter_entry } => {
-                            completed.push(subtask.id);
-                            let mut entry = build_subtask_entry(
-                                subtask.id,
-                                &subtask.title,
-                                "completed",
-                                &attempts,
-                                &supervisor_entries,
-                            );
-                            if let Some(obj) = entry.as_object_mut() {
-                                obj.insert("arbiter".to_string(), arbiter_entry);
-                            }
-                            subtask_entries.push(entry);
-                            continue 'subtask;
-                        }
-                        GateDecision::Rework { findings } => {
-                            // Not yet exhausted — rework with review findings.
-                            let history = mem_history(mem_on, &attempts, hist_cap);
-                            current_prompt = prompts::conduct_rework(
-                                &original_prompt,
-                                &changes,
-                                &findings,
-                                history.as_deref(),
-                            );
-                            continue;
-                        }
-                        GateDecision::Fail {
-                            reason,
-                            arbiter_entry,
-                        } => {
-                            failed = Some(reason);
-                            let mut entry = build_subtask_entry(
-                                subtask.id,
-                                &subtask.title,
-                                "failed",
-                                &attempts,
-                                &supervisor_entries,
-                            );
-                            if let Some(arb) = arbiter_entry {
-                                if let Some(obj) = entry.as_object_mut() {
-                                    obj.insert("arbiter".to_string(), arb);
-                                }
-                            }
-                            subtask_entries.push(entry);
-                            break 'subtask;
-                        }
-                    }
-                }
-                EvalDecision::Fail => {
-                    failed = Some(format!(
-                        "subtask {} failed: {}",
-                        subtask.id, evaluation.feedback
-                    ));
-                    subtask_entries.push(build_subtask_entry(
-                        subtask.id,
-                        &subtask.title,
-                        "failed",
-                        &attempts,
-                        &supervisor_entries,
-                    ));
-                    break 'subtask;
-                }
-                EvalDecision::Rework => {
-                    if attempt_num >= MAX_REWORKS as usize || stalled {
-                        // Exhausted, OR stalled: this attempt reproduced a prior
-                        // attempt's exact diff + verify result (P1.5 circuit
-                        // breaker) — more rework would only spin. Either way the
-                        // subtask was not going to converge, so fail it.
-                        let why = if stalled {
-                            format!(
-                                "stalled after {} attempt(s) — no progress (identical diff + verify): {}",
-                                attempt_num + 1,
-                                evaluation.feedback
-                            )
-                        } else {
-                            format!(
-                                "exhausted {} rework attempts: {}",
-                                MAX_REWORKS, evaluation.feedback
-                            )
-                        };
-                        failed = Some(format!("subtask {} {}", subtask.id, why));
+                    EvalDecision::Fail => {
+                        failed = Some(format!(
+                            "subtask {} failed: {}",
+                            subtask.id, evaluation.feedback
+                        ));
                         subtask_entries.push(build_subtask_entry(
                             subtask.id,
                             &subtask.title,
@@ -733,15 +716,103 @@ pub async fn run_conduct(
                         ));
                         break 'subtask;
                     }
-                    // Prepare rework for the next iteration.
-                    let history = mem_history(mem_on, &attempts, hist_cap);
-                    current_prompt = prompts::conduct_rework(
-                        &original_prompt,
-                        &changes,
-                        &evaluation.feedback,
-                        history.as_deref(),
-                    );
+                    EvalDecision::Rework => {
+                        if attempt_num >= MAX_REWORKS as usize || stalled {
+                            // Exhausted, OR stalled: this attempt reproduced a prior
+                            // attempt's exact diff + verify result (P1.5 circuit
+                            // breaker) — more rework would only spin. Either way the
+                            // subtask was not going to converge, so fail it.
+                            let why = if stalled {
+                                format!(
+                                "stalled after {} attempt(s) — no progress (identical diff + verify): {}",
+                                attempt_num + 1,
+                                evaluation.feedback
+                            )
+                            } else {
+                                format!(
+                                    "exhausted {} rework attempts: {}",
+                                    MAX_REWORKS, evaluation.feedback
+                                )
+                            };
+                            failed = Some(format!("subtask {} {}", subtask.id, why));
+                            subtask_entries.push(build_subtask_entry(
+                                subtask.id,
+                                &subtask.title,
+                                "failed",
+                                &attempts,
+                                &supervisor_entries,
+                            ));
+                            break 'subtask;
+                        }
+                        // Prepare rework for the next iteration.
+                        let history = mem_history(mem_on, &attempts, hist_cap);
+                        current_prompt = prompts::conduct_rework(
+                            &original_prompt,
+                            &changes,
+                            &evaluation.feedback,
+                            history.as_deref(),
+                        );
+                    }
                 }
+            }
+        }
+
+        // A blown wall-clock budget is terminal — never spend replan calls (more
+        // conductor work) once the budget is exhausted; keep the original reason.
+        let budget_blown = budget.is_some_and(|b| run_start.elapsed() >= b);
+        if halted.is_some() || failed.is_none() || replans_used >= max_replans || budget_blown {
+            break;
+        }
+
+        let reason = failed.take().unwrap_or_default();
+        replans_used += 1;
+        let ledger = render_ledger(&subtask_entries, ledger_cap).unwrap_or_default();
+        let completed_summary = if ledger.is_empty() {
+            format!("completed ids: {:?}", completed)
+        } else {
+            format!("completed ids: {:?}\n{ledger}", completed)
+        };
+        let replan_fo = {
+            let reason = reason.clone();
+            let completed_summary = completed_summary.clone();
+            let prompt = prompts::conduct_replan(task, context, &completed_summary, &reason);
+            let cwd2 = cwd.clone();
+            run_with_failover(
+                &conductor_ladder,
+                "conductor",
+                move |model| RunRequest {
+                    prompt: prompt.clone(),
+                    model,
+                    cwd: cwd2.clone(),
+                    advisory: true,
+                    write: false,
+                },
+                quota,
+                health,
+                timeout,
+            )
+            .await
+        };
+
+        match replan_fo {
+            Ok(fo) => {
+                all_fallbacks.extend(fo.fallbacks);
+                if let Some(p) =
+                    parse_plan(&fo.outcome.final_text).filter(|p| !p.subtasks.is_empty())
+                {
+                    plan = p;
+                    replans.push(serde_json::json!({
+                        "attempt": replans_used,
+                        "reason": reason,
+                    }));
+                } else {
+                    failed = Some("replan produced no usable plan".into());
+                    break;
+                }
+            }
+            Err(e) => {
+                failed = Some(format!("replan failed: {e}"));
+                break;
             }
         }
     }
@@ -765,6 +836,7 @@ pub async fn run_conduct(
         "completed": completed,
         "halted": halted,
         "failed": failed,
+        "replans": replans,
         "fallbacks": fallbacks_json,
         "conductor_memory": {
             "enabled": mem_on,
@@ -803,10 +875,12 @@ fn build_progress(
 ) -> String {
     let mut checklist = String::new();
     for st in all {
-        let mark = if completed.contains(&st.id) {
-            "[x]"
-        } else if st.id == current.id {
+        // Current wins over completed: after a replan, a new subtask may reuse a
+        // completed id, and the active one must still read as `[>]`, not `[x]`.
+        let mark = if st.id == current.id {
             "[>]"
+        } else if completed.contains(&st.id) {
+            "[x]"
         } else {
             "[ ]"
         };
