@@ -62,6 +62,16 @@ pub struct McpServer {
     tool_router: ToolRouter<Self>,
 }
 
+/// Named dependencies for constructing an [`McpServer`].
+pub struct McpServerDeps {
+    pub workers: Vec<CouncilMember>,
+    pub reviewer: Vec<Rung>,
+    pub chairman: Vec<Rung>,
+    pub transcript_base: PathBuf,
+    pub verify: Option<VerifyConfig>,
+    pub quota: QuotaStore,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunWorkerParams {
     /// The full, self-contained instruction for the worker.
@@ -239,26 +249,27 @@ impl McpServer {
         let chairman = roles::resolve_ladder(&config.roles.chairman);
         let transcript_base = crate::orchestrator::transcript::TranscriptStore::default_base()
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
-        Self::from_parts(
+        Self::from_parts(McpServerDeps {
             workers,
             reviewer,
             chairman,
             transcript_base,
-            config.verify,
+            verify: config.verify,
             quota,
-        )
+        })
     }
 
     /// Construct from already-resolved workers + reviewer ladder (used by tests to
     /// inject scripted adapters, and by `new` after resolving from config).
-    pub fn from_parts(
-        workers: Vec<CouncilMember>,
-        reviewer: Vec<Rung>,
-        chairman: Vec<Rung>,
-        transcript_base: PathBuf,
-        verify: Option<VerifyConfig>,
-        quota: QuotaStore,
-    ) -> Self {
+    pub fn from_parts(deps: McpServerDeps) -> Self {
+        let McpServerDeps {
+            workers,
+            reviewer,
+            chairman,
+            transcript_base,
+            verify,
+            quota,
+        } = deps;
         Self {
             workers: Arc::new(workers),
             reviewer: Arc::new(reviewer),
