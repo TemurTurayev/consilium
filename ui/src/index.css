@@ -364,6 +364,134 @@ body {
   border-left-color: var(--err);
 }
 
+/* ---- nav tabs ---- */
+.app__nav {
+  display: flex;
+  gap: 4px;
+}
+.tab {
+  font: inherit;
+  font-size: 13px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab--on {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* ---- usage dashboard ---- */
+.dash {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--pad);
+  box-shadow: var(--shadow);
+}
+.dash__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.dash__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.dash__window {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+.dash__refresh {
+  font: inherit;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  width: 30px;
+  height: 28px;
+  cursor: pointer;
+}
+.dash__refresh:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+.dash__error {
+  color: var(--err);
+  font-size: 13px;
+  margin: 0;
+}
+.dash__empty {
+  color: var(--text-faint);
+  margin: 0;
+}
+.dash__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.dash__row {
+  display: grid;
+  grid-template-columns: 12px 56px 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+.dash__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.dash__name {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.dash__bar {
+  height: 8px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.dash__fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 240ms ease-out;
+}
+.dash__row--claude .dash__fill {
+  background: var(--claude);
+}
+.dash__row--codex .dash__fill {
+  background: var(--codex);
+}
+.dash__row--gemini .dash__fill {
+  background: var(--gemini);
+}
+.dash__nums {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+.dash__total {
+  font-weight: 600;
+}
+.dash__io {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 @keyframes enter {
   from {
     opacity: 0;
