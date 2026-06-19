@@ -10,19 +10,19 @@
 //! engine's collect loop never blocks on socket backpressure.
 
 use crate::config::Config;
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, Provider};
 use crate::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
 use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::progress::{ProgressSink, PROGRESS_SINK};
 use crate::orchestrator::resilience::ModelHealth;
 use crate::orchestrator::roles;
-use crate::protocol::{ServerFrame, SessionRequest};
+use crate::protocol::{ProviderUsage, QuotaSnapshot, ServerFrame, SessionRequest};
 use crate::quota::QuotaStore;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +66,7 @@ impl ServerState {
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/ws/session", get(ws_session))
+        .route("/api/quota", get(quota_handler))
         .with_state(state)
 }
 
@@ -85,6 +86,30 @@ pub async fn serve(
 
 async fn ws_session(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
     ws.on_upgrade(move |socket| handle_session(socket, state))
+}
+
+/// `GET /api/quota` → current per-provider usage over the rolling window.
+async fn quota_handler(State(state): State<ServerState>) -> Json<QuotaSnapshot> {
+    Json(quota_snapshot(state.quota.as_ref()))
+}
+
+/// Build a usage snapshot over the rolling window. Extracted from the handler so
+/// it's unit-testable without standing up the HTTP server.
+pub fn quota_snapshot(quota: &QuotaStore) -> QuotaSnapshot {
+    let since = crate::quota::unix_now() - crate::quota::WINDOW_SECS;
+    let usage = |provider: Provider| -> ProviderUsage {
+        let (input_tokens, output_tokens) = quota.totals_since(provider, since).unwrap_or((0, 0));
+        ProviderUsage {
+            input_tokens,
+            output_tokens,
+        }
+    };
+    QuotaSnapshot {
+        window_secs: crate::quota::WINDOW_SECS,
+        claude: usage(Provider::Claude),
+        codex: usage(Provider::Codex),
+        gemini: usage(Provider::Gemini),
+    }
 }
 
 /// Forwards each engine event (as JSON) into a channel drained by the writer
@@ -221,5 +246,21 @@ mod tests {
         let json = rx.try_recv().expect("sink should forward the event");
         assert!(json.contains("\"type\":\"message\""), "got {json}");
         assert!(json.contains("hello"), "got {json}");
+    }
+
+    #[test]
+    fn quota_snapshot_reports_recorded_usage_per_provider() {
+        let quota = QuotaStore::open_in_memory().unwrap();
+        quota.record(Provider::Gemini, 100, 20).unwrap();
+        quota.record(Provider::Gemini, 50, 10).unwrap();
+        quota.record(Provider::Codex, 7, 3).unwrap();
+
+        let snap = quota_snapshot(&quota);
+        assert_eq!(snap.window_secs, crate::quota::WINDOW_SECS);
+        assert_eq!(snap.gemini.input_tokens, 150);
+        assert_eq!(snap.gemini.output_tokens, 30);
+        assert_eq!(snap.codex.input_tokens, 7);
+        assert_eq!(snap.claude.input_tokens, 0);
+        assert_eq!(snap.claude.output_tokens, 0);
     }
 }

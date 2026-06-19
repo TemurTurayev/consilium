@@ -3,6 +3,11 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// The rolling usage window, in seconds (5 hours) — the period quota totals are
+/// reported over. Single source of truth for the MCP `quota_status` tool and the
+/// server's `/api/quota` endpoint.
+pub const WINDOW_SECS: i64 = 5 * 3600;
+
 pub fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
