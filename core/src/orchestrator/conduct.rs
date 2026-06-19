@@ -405,7 +405,7 @@ pub async fn run_conduct(
             // ── 2d: supervisor gate ─────────────────────────────────────────
             let supervisor_note: Option<String>;
             if let Some(ref sup) = supervisor {
-                let progress = build_progress(&completed, subtask, &changes);
+                let progress = build_progress(task, &plan.subtasks, &completed, subtask, &changes);
                 let fo = {
                     let prompt = prompts::supervisor_gate(
                         task,
@@ -845,11 +845,44 @@ fn status_str(s: &SupervisorStatus) -> &'static str {
     }
 }
 
-fn build_progress(completed: &[u32], current: &Subtask, changes: &str) -> String {
+/// Recited progress for the supervisor (Finding P1.9, lost-in-the-middle /
+/// context-rot): the original task is pinned at the TOP, followed by a full
+/// plan checklist with each subtask's status ([x] done, [>] current, [ ]
+/// pending), then the bulk (latest changes) last. Reciting the goal + checklist
+/// at the prompt edge keeps the model anchored as the run grows.
+fn build_progress(
+    task: &str,
+    all: &[Subtask],
+    completed: &[u32],
+    current: &Subtask,
+    changes: &str,
+) -> String {
+    let mut checklist = String::new();
+    for st in all {
+        let mark = if completed.contains(&st.id) {
+            "[x]"
+        } else if st.id == current.id {
+            "[>]"
+        } else {
+            "[ ]"
+        };
+        // Titles are optional in the plan schema; fall back to a prompt slice so
+        // the checklist is never a bare id.
+        let label = if st.title.is_empty() {
+            st.prompt.chars().take(48).collect::<String>()
+        } else {
+            st.title.clone()
+        };
+        let suffix = if st.id == current.id {
+            "  ← current"
+        } else {
+            ""
+        };
+        checklist.push_str(&format!("{mark} {}. {label}{suffix}\n", st.id));
+    }
     let changes_preview: String = changes.chars().take(500).collect();
     format!(
-        "Completed subtasks: {:?}\nCurrent subtask: {} — {}\nLatest changes (preview):\n{}",
-        completed, current.id, current.title, changes_preview
+        "TASK (keep this in view):\n{task}\n\nPLAN CHECKLIST:\n{checklist}\nLatest changes to the current subtask (preview):\n{changes_preview}"
     )
 }
 
@@ -1078,6 +1111,55 @@ fn mem_blackboard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn st(id: u32, title: &str, prompt: &str) -> Subtask {
+        Subtask {
+            id,
+            title: title.into(),
+            prompt: prompt.into(),
+            depends_note: String::new(),
+        }
+    }
+
+    #[test]
+    fn build_progress_recites_task_and_plan_checklist() {
+        let plan = vec![
+            st(1, "Set up", "p1"),
+            st(2, "Wire it", "p2"),
+            st(3, "Test", "p3"),
+        ];
+        let progress = build_progress("Build the thing", &plan, &[1], &plan[1], "diff here");
+        assert!(
+            progress.contains("TASK (keep this in view):\nBuild the thing"),
+            "task pinned at top: {progress}"
+        );
+        assert!(
+            progress.contains("[x] 1. Set up"),
+            "done marker: {progress}"
+        );
+        assert!(
+            progress.contains("[>] 2. Wire it  ← current"),
+            "current marker: {progress}"
+        );
+        assert!(
+            progress.contains("[ ] 3. Test"),
+            "pending marker: {progress}"
+        );
+        assert!(
+            progress.contains("diff here"),
+            "changes preview last: {progress}"
+        );
+    }
+
+    #[test]
+    fn build_progress_falls_back_to_prompt_when_title_empty() {
+        let plan = vec![st(1, "", "do the long thing here")];
+        let progress = build_progress("T", &plan, &[], &plan[0], "");
+        assert!(
+            progress.contains("[>] 1. do the long thing here  ← current"),
+            "empty title falls back to prompt slice: {progress}"
+        );
+    }
 
     #[test]
     fn parses_plan() {
