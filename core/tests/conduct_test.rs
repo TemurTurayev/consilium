@@ -1212,6 +1212,67 @@ async fn critical_review_forces_rework() {
     assert_eq!(attempts[1]["review"], "clean");
 }
 
+#[tokio::test]
+async fn reviewer_failure_degrades_to_accept() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'result' > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "done")
+    });
+    let reviewer = Arc::new(ScriptedAdapter::failing(
+        Provider::Claude,
+        "reviewer transient failure",
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        budget: None,
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .expect("reviewer failure must not error the whole run");
+
+    assert_eq!(outcome.completed, vec![1]);
+    assert!(outcome.failed.is_none());
+    let attempts = outcome.transcript["subtasks"].as_array().unwrap()[0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts[0]["review"], "unavailable");
+}
+
 // ─── Test 10: arbiter_ships_on_exhaustion ────────────────────────────────
 // Reviewer always returns critical (MAX_REWORKS exhausted at review gate).
 // Arbiter ships → subtask completed; transcript records arbiter decision+reason.
@@ -1370,6 +1431,73 @@ async fn arbiter_fails_on_exhaustion() {
     assert_eq!(entries.len(), 1);
     let arb = &entries[0]["arbiter"];
     assert_eq!(arb["decision"], "fail");
+}
+
+#[tokio::test]
+async fn arbiter_failure_at_exhaustion_fails_closed() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+
+    let worker = Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "done"));
+
+    let reviewer = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &review_critical_json("x.rs", "real blocker"),
+    ));
+
+    let arbiter = Arc::new(ScriptedAdapter::failing(
+        Provider::Claude,
+        "arbiter transient failure",
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker.clone(),
+        )],
+        supervisor: None,
+        reviewer: Some(solo_role_handle(Provider::Claude, "model", reviewer)),
+        arbiter: Some(solo_role_handle(Provider::Claude, "model", arbiter)),
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        budget: None,
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .expect("arbiter failure must not error the whole run");
+
+    assert!(outcome.failed.is_some());
+    assert!(
+        outcome.failed.as_deref().unwrap().contains("arbiter")
+            && outcome.failed.as_deref().unwrap().contains("unavailable")
+    );
+    assert!(outcome.completed.is_empty());
 }
 
 // ─── Test 12: supervisor_ok_does_not_interfere ───────────────────────────

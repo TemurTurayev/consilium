@@ -624,7 +624,7 @@ pub async fn run_conduct(
                         } else {
                             (rev.ladder.clone(), None)
                         };
-                        let (review_result, rev_fallbacks) = super::review::run_review_ladder(
+                        let review_result = super::review::run_review_ladder(
                             &changes,
                             &review_ladder,
                             health,
@@ -632,170 +632,219 @@ pub async fn run_conduct(
                             cwd.clone(),
                             timeout,
                         )
-                        .await?;
-                        all_fallbacks.extend(rev_fallbacks);
+                        .await;
+                        match review_result {
+                            Ok((review_result, rev_fallbacks)) => {
+                                all_fallbacks.extend(rev_fallbacks);
 
-                        // Determine whether review blocks.
-                        let review_blocks = match &review_result.verdict {
-                            Some(v) => v.has_critical(),
-                            None => true, // unparseable → fail-closed
-                        };
+                                // Determine whether review blocks.
+                                let review_blocks = match &review_result.verdict {
+                                    Some(v) => v.has_critical(),
+                                    None => true, // unparseable → fail-closed
+                                };
 
-                        // Summarise findings for feedback / arbiter.
-                        let findings_text = match &review_result.verdict {
-                            Some(v) => serde_json::to_string(&serde_json::json!({
-                                "findings": v.findings.iter().map(|f| serde_json::json!({
-                                    "severity": format!("{:?}", f.severity).to_lowercase(),
-                                    "file": f.file,
-                                    "description": f.description,
-                                })).collect::<Vec<_>>()
-                            }))
-                            .unwrap_or_else(|_| review_result.raw_review.clone()),
-                            None => "reviewer output unparseable".to_string(),
-                        };
+                                // Summarise findings for feedback / arbiter.
+                                let findings_text = match &review_result.verdict {
+                                    Some(v) => serde_json::to_string(&serde_json::json!({
+                                        "findings": v.findings.iter().map(|f| serde_json::json!({
+                                            "severity": format!("{:?}", f.severity).to_lowercase(),
+                                            "file": f.file,
+                                            "description": f.description,
+                                        })).collect::<Vec<_>>()
+                                    }))
+                                    .unwrap_or_else(|_| review_result.raw_review.clone()),
+                                    None => "reviewer output unparseable".to_string(),
+                                };
 
-                        let review_status = if review_result.verdict.is_none() {
-                            "unparseable"
-                        } else if review_blocks {
-                            "critical"
-                        } else {
-                            "clean"
-                        };
-                        // Patch the last attempt entry with the review outcome.
-                        if let Some(last) = attempts.last_mut() {
-                            if let Some(obj) = last.as_object_mut() {
-                                obj.insert(
-                                    "review".to_string(),
-                                    serde_json::Value::String(review_status.to_string()),
-                                );
-                                if let Some(m) = cf_marker {
-                                    obj.insert(
-                                        "cross_family".to_string(),
-                                        serde_json::Value::String(m.to_string()),
-                                    );
-                                }
-                            }
-                        }
-
-                        if review_blocks {
-                            if attempt_num >= MAX_REWORKS as usize {
-                                // Exhausted with review still blocking → try arbiter.
-                                if let Some(ref arb) = arbiter {
-                                    let arb_history = mem_history(mem_on, &attempts, hist_cap);
-                                    // Cross-family arbiter (Finding 7): same rule as the reviewer.
-                                    let arb_ladder = if cross_family {
-                                        cross_family_ladder(
-                                            &arb.ladder,
-                                            &workers,
-                                            worker_providers[worker_idx],
-                                        )
-                                        .0
-                                    } else {
-                                        arb.ladder.clone()
-                                    };
-                                    let arb_fo = {
-                                        let prompt = prompts::arbiter_decide(
-                                            &subtask.prompt,
-                                            &changes,
-                                            &findings_text,
-                                            ledger_str.as_deref(),
-                                            arb_history.as_deref(),
+                                let review_status = if review_result.verdict.is_none() {
+                                    "unparseable"
+                                } else if review_blocks {
+                                    "critical"
+                                } else {
+                                    "clean"
+                                };
+                                // Patch the last attempt entry with the review outcome.
+                                if let Some(last) = attempts.last_mut() {
+                                    if let Some(obj) = last.as_object_mut() {
+                                        obj.insert(
+                                            "review".to_string(),
+                                            serde_json::Value::String(review_status.to_string()),
                                         );
-                                        let cwd2 = cwd.clone();
-                                        run_with_failover(
-                                            &arb_ladder,
-                                            "arbiter",
-                                            move |model| RunRequest {
-                                                prompt: prompt.clone(),
-                                                model,
-                                                cwd: cwd2.clone(),
-                                                advisory: true,
-                                                write: false,
-                                            },
-                                            quota,
-                                            health,
-                                            timeout,
-                                        )
-                                        .await?
-                                    };
-                                    all_fallbacks.extend(arb_fo.fallbacks);
-                                    // Fail-safe: unparseable → Fail.
-                                    let arb_verdict = parse_arbiter(&arb_fo.outcome.final_text)
-                                        .unwrap_or(ArbiterVerdict {
-                                            decision: ArbiterDecision::Fail,
-                                            reason: "arbiter output unparseable".to_string(),
-                                        });
-
-                                    if arb_verdict.decision == ArbiterDecision::Ship {
-                                        completed.push(subtask.id);
-                                        let mut entry = build_subtask_entry(
-                                            subtask.id,
-                                            &subtask.title,
-                                            "completed",
-                                            &attempts,
-                                            &supervisor_entries,
-                                        );
-                                        if let Some(obj) = entry.as_object_mut() {
+                                        if let Some(m) = cf_marker {
                                             obj.insert(
-                                                "arbiter".to_string(),
-                                                serde_json::json!({
-                                                    "decision": "ship",
-                                                    "reason": arb_verdict.reason,
-                                                }),
+                                                "cross_family".to_string(),
+                                                serde_json::Value::String(m.to_string()),
                                             );
                                         }
-                                        subtask_entries.push(entry);
-                                        continue 'subtask;
-                                    } else {
+                                    }
+                                }
+
+                                if review_blocks {
+                                    if attempt_num >= MAX_REWORKS as usize {
+                                        // Exhausted with review still blocking → try arbiter.
+                                        if let Some(ref arb) = arbiter {
+                                            let arb_history =
+                                                mem_history(mem_on, &attempts, hist_cap);
+                                            // Cross-family arbiter (Finding 7): same rule as the reviewer.
+                                            let arb_ladder = if cross_family {
+                                                cross_family_ladder(
+                                                    &arb.ladder,
+                                                    &workers,
+                                                    worker_providers[worker_idx],
+                                                )
+                                                .0
+                                            } else {
+                                                arb.ladder.clone()
+                                            };
+                                            let arb_result = {
+                                                let prompt = prompts::arbiter_decide(
+                                                    &subtask.prompt,
+                                                    &changes,
+                                                    &findings_text,
+                                                    ledger_str.as_deref(),
+                                                    arb_history.as_deref(),
+                                                );
+                                                let cwd2 = cwd.clone();
+                                                run_with_failover(
+                                                    &arb_ladder,
+                                                    "arbiter",
+                                                    move |model| RunRequest {
+                                                        prompt: prompt.clone(),
+                                                        model,
+                                                        cwd: cwd2.clone(),
+                                                        advisory: true,
+                                                        write: false,
+                                                    },
+                                                    quota,
+                                                    health,
+                                                    timeout,
+                                                )
+                                                .await
+                                            };
+                                            match arb_result {
+                                                Ok(arb_fo) => {
+                                                    all_fallbacks.extend(arb_fo.fallbacks);
+                                                    // Fail-safe: unparseable → Fail.
+                                                    let arb_verdict =
+                                                        parse_arbiter(&arb_fo.outcome.final_text)
+                                                            .unwrap_or(ArbiterVerdict {
+                                                                decision: ArbiterDecision::Fail,
+                                                                reason:
+                                                                    "arbiter output unparseable"
+                                                                        .to_string(),
+                                                            });
+
+                                                    if arb_verdict.decision == ArbiterDecision::Ship
+                                                    {
+                                                        completed.push(subtask.id);
+                                                        let mut entry = build_subtask_entry(
+                                                            subtask.id,
+                                                            &subtask.title,
+                                                            "completed",
+                                                            &attempts,
+                                                            &supervisor_entries,
+                                                        );
+                                                        if let Some(obj) = entry.as_object_mut() {
+                                                            obj.insert(
+                                                                "arbiter".to_string(),
+                                                                serde_json::json!({
+                                                                    "decision": "ship",
+                                                                    "reason": arb_verdict.reason,
+                                                                }),
+                                                            );
+                                                        }
+                                                        subtask_entries.push(entry);
+                                                        continue 'subtask;
+                                                    } else {
+                                                        failed = Some(format!(
+                                                            "subtask {} arbiter failed: {}",
+                                                            subtask.id, arb_verdict.reason
+                                                        ));
+                                                        let mut entry = build_subtask_entry(
+                                                            subtask.id,
+                                                            &subtask.title,
+                                                            "failed",
+                                                            &attempts,
+                                                            &supervisor_entries,
+                                                        );
+                                                        if let Some(obj) = entry.as_object_mut() {
+                                                            obj.insert(
+                                                                "arbiter".to_string(),
+                                                                serde_json::json!({
+                                                                    "decision": "fail",
+                                                                    "reason": arb_verdict.reason,
+                                                                }),
+                                                            );
+                                                        }
+                                                        subtask_entries.push(entry);
+                                                        break 'subtask;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "arbiter unavailable; failing closed (not shipping un-arbitrated)");
+                                                    failed = Some(format!(
+                                                        "subtask {} arbiter unavailable: {e}",
+                                                        subtask.id
+                                                    ));
+                                                    let mut entry = build_subtask_entry(
+                                                        subtask.id,
+                                                        &subtask.title,
+                                                        "failed",
+                                                        &attempts,
+                                                        &supervisor_entries,
+                                                    );
+                                                    if let Some(obj) = entry.as_object_mut() {
+                                                        obj.insert(
+                                                            "arbiter".to_string(),
+                                                            serde_json::json!({
+                                                                "decision": "unavailable",
+                                                                "reason": format!("arbiter unavailable: {e}"),
+                                                            }),
+                                                        );
+                                                    }
+                                                    subtask_entries.push(entry);
+                                                    break 'subtask;
+                                                }
+                                            }
+                                        }
+
+                                        // No arbiter — just fail.
                                         failed = Some(format!(
-                                            "subtask {} arbiter failed: {}",
-                                            subtask.id, arb_verdict.reason
+                                            "subtask {} exhausted {} rework attempts (review gate): {}",
+                                            subtask.id, MAX_REWORKS, findings_text
                                         ));
-                                        let mut entry = build_subtask_entry(
+                                        subtask_entries.push(build_subtask_entry(
                                             subtask.id,
                                             &subtask.title,
                                             "failed",
                                             &attempts,
                                             &supervisor_entries,
-                                        );
-                                        if let Some(obj) = entry.as_object_mut() {
-                                            obj.insert(
-                                                "arbiter".to_string(),
-                                                serde_json::json!({
-                                                    "decision": "fail",
-                                                    "reason": arb_verdict.reason,
-                                                }),
-                                            );
-                                        }
-                                        subtask_entries.push(entry);
+                                        ));
                                         break 'subtask;
                                     }
+
+                                    // Not yet exhausted — rework with review findings.
+                                    let history = mem_history(mem_on, &attempts, hist_cap);
+                                    current_prompt = prompts::conduct_rework(
+                                        &original_prompt,
+                                        &changes,
+                                        &findings_text,
+                                        history.as_deref(),
+                                    );
+                                    continue;
                                 }
-
-                                // No arbiter — just fail.
-                                failed = Some(format!(
-                                    "subtask {} exhausted {} rework attempts (review gate): {}",
-                                    subtask.id, MAX_REWORKS, findings_text
-                                ));
-                                subtask_entries.push(build_subtask_entry(
-                                    subtask.id,
-                                    &subtask.title,
-                                    "failed",
-                                    &attempts,
-                                    &supervisor_entries,
-                                ));
-                                break 'subtask;
                             }
-
-                            // Not yet exhausted — rework with review findings.
-                            let history = mem_history(mem_on, &attempts, hist_cap);
-                            current_prompt = prompts::conduct_rework(
-                                &original_prompt,
-                                &changes,
-                                &findings_text,
-                                history.as_deref(),
-                            );
-                            continue;
+                            Err(e) => {
+                                tracing::warn!(error = %e, "reviewer unavailable; accepting subtask this round without review");
+                                if let Some(last) = attempts.last_mut() {
+                                    if let Some(obj) = last.as_object_mut() {
+                                        obj.insert(
+                                            "review".to_string(),
+                                            serde_json::Value::String("unavailable".to_string()),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
 
