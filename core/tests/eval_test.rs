@@ -180,6 +180,7 @@ impl EvalDeps for ConductTestDeps {
             verify,
             memory: Default::default(),
             cross_family_review: cross_family,
+            budget: None,
         }
     }
 }

@@ -83,6 +83,7 @@ async fn ws_streams_conduct_events_then_terminal_frame() {
             verify: None,
             memory: Default::default(),
             cross_family_review: false,
+            budget: None,
         }
     });
 
@@ -212,6 +213,7 @@ async fn ws_run_error_terminal_frame_on_failed_run() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        budget: None,
     });
     let state = ServerState::from_parts(
         deps_fn,
