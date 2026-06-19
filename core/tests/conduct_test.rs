@@ -961,6 +961,76 @@ async fn generous_budget_runs_all_subtasks() {
     assert_eq!(outcome.transcript["subtasks"].as_array().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn supervisor_failure_degrades_instead_of_killing_the_run() {
+    // A transient supervisor failure (all rungs down) must NOT abort the run —
+    // the supervisor is advisory. The run proceeds without its verdict.
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "create out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo hi > out.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+    // The supervisor's only rung always fails — its gate must degrade, not crash.
+    let supervisor = Arc::new(ScriptedAdapter::failing(
+        Provider::Gemini,
+        "transient failure",
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: Some(solo_role_handle(Provider::Gemini, "g", supervisor)),
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        budget: None,
+    };
+
+    let outcome = run_conduct(
+        "do it",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .expect("a supervisor failure must not error the whole run");
+
+    assert_eq!(
+        outcome.completed,
+        vec![1],
+        "run proceeds despite the supervisor being down"
+    );
+    assert!(outcome.halted.is_none() && outcome.failed.is_none());
+    // The degrade is recorded as an "unavailable" supervisor entry, not hidden.
+    let sup = &outcome.transcript["subtasks"].as_array().unwrap()[0]["supervisor"];
+    assert!(
+        serde_json::to_string(sup).unwrap().contains("unavailable"),
+        "supervisor degrade should be recorded: {sup}"
+    );
+}
+
 // ─── Test 8: fail_on_second_preserves_first ────────────────────────────────
 
 #[tokio::test]

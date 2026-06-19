@@ -441,7 +441,7 @@ pub async fn run_conduct(
             let supervisor_note: Option<String>;
             if let Some(ref sup) = supervisor {
                 let progress = build_progress(task, &plan.subtasks, &completed, subtask, &changes);
-                let fo = {
+                let sup_result = {
                     let prompt = prompts::supervisor_gate(
                         task,
                         &progress,
@@ -463,36 +463,52 @@ pub async fn run_conduct(
                         health,
                         timeout,
                     )
-                    .await?
+                    .await
                 };
-                all_fallbacks.extend(fo.fallbacks);
-                let verdict =
-                    parse_supervisor(&fo.outcome.final_text).unwrap_or(SupervisorVerdict {
-                        status: SupervisorStatus::Concern,
-                        note: "supervisor output unparseable".to_string(),
-                    });
+                match sup_result {
+                    Ok(fo) => {
+                        all_fallbacks.extend(fo.fallbacks);
+                        let verdict =
+                            parse_supervisor(&fo.outcome.final_text).unwrap_or(SupervisorVerdict {
+                                status: SupervisorStatus::Concern,
+                                note: "supervisor output unparseable".to_string(),
+                            });
 
-                supervisor_entries.push(serde_json::json!({
-                    "status": status_str(&verdict.status),
-                    "note": verdict.note.clone(),
-                }));
+                        supervisor_entries.push(serde_json::json!({
+                            "status": status_str(&verdict.status),
+                            "note": verdict.note.clone(),
+                        }));
 
-                match verdict.status {
-                    SupervisorStatus::Halt => {
-                        halted = Some(verdict.note.clone());
-                        subtask_entries.push(build_subtask_entry(
-                            subtask.id,
-                            &subtask.title,
-                            "halted",
-                            &attempts,
-                            &supervisor_entries,
-                        ));
-                        break 'subtask;
+                        match verdict.status {
+                            SupervisorStatus::Halt => {
+                                halted = Some(verdict.note.clone());
+                                subtask_entries.push(build_subtask_entry(
+                                    subtask.id,
+                                    &subtask.title,
+                                    "halted",
+                                    &attempts,
+                                    &supervisor_entries,
+                                ));
+                                break 'subtask;
+                            }
+                            SupervisorStatus::Concern => {
+                                supervisor_note = Some(verdict.note.clone());
+                            }
+                            SupervisorStatus::Ok => {
+                                supervisor_note = None;
+                            }
+                        }
                     }
-                    SupervisorStatus::Concern => {
-                        supervisor_note = Some(verdict.note.clone());
-                    }
-                    SupervisorStatus::Ok => {
+                    Err(e) => {
+                        // Advisory gate: a transient supervisor failure (all rungs
+                        // down) must NOT kill the run — the supervisor only raises
+                        // Concern/Halt. Degrade to "no verdict this attempt" and
+                        // proceed; record it in the transcript so it stays visible.
+                        tracing::warn!(error = %e, "supervisor unavailable; proceeding without its verdict");
+                        supervisor_entries.push(serde_json::json!({
+                            "status": "unavailable",
+                            "note": format!("supervisor failed: {e}"),
+                        }));
                         supervisor_note = None;
                     }
                 }
