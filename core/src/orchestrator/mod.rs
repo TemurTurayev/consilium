@@ -11,5 +11,6 @@ pub mod review;
 pub mod roles;
 pub mod routing;
 pub mod runner;
+pub mod stagnation;
 pub mod transcript;
 pub mod verify;
