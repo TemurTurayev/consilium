@@ -50,6 +50,29 @@ impl From<&ConductOutcome> for ServerFrame {
     }
 }
 
+/// Per-provider token usage over the reporting window.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../ui/src/protocol/")]
+pub struct ProviderUsage {
+    #[ts(type = "number")]
+    pub input_tokens: u64,
+    #[ts(type = "number")]
+    pub output_tokens: u64,
+}
+
+/// A snapshot of quota usage per provider over the rolling window — served at
+/// `GET /api/quota` for the dashboard.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../ui/src/protocol/")]
+pub struct QuotaSnapshot {
+    /// The window length the totals cover, in seconds.
+    #[ts(type = "number")]
+    pub window_secs: i64,
+    pub claude: ProviderUsage,
+    pub codex: ProviderUsage,
+    pub gemini: ProviderUsage,
+}
+
 /// Client→server request: the first frame on a `/ws/session` socket.
 #[derive(Debug, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]

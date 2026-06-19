@@ -33,8 +33,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Sliding window for quota reporting (5 hours), matching the CLI `quota` view.
-const QUOTA_WINDOW_SECS: i64 = 5 * 3600;
+/// Sliding window for quota reporting, from the canonical
+/// [`crate::quota::WINDOW_SECS`] (shared with the server's `/api/quota`).
+const QUOTA_WINDOW_SECS: i64 = crate::quota::WINDOW_SECS;
 const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
 const DEFAULT_COUNCIL_TIMEOUT_SECS: u64 = 900;
