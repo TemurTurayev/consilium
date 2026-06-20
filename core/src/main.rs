@@ -54,6 +54,8 @@ enum Command {
         /// Additional context for the conductor (e.g. relevant architecture notes)
         #[arg(long)]
         context: Option<String>,
+        #[arg(long)]
+        no_preflight: bool,
         /// Hard per-session timeout in seconds
         #[arg(long, default_value_t = 900)]
         timeout: u64,
@@ -64,6 +66,8 @@ enum Command {
         /// Shell command to run after conduct completes (exit code determines success)
         #[arg(long)]
         check: Option<String>,
+        #[arg(long)]
+        no_preflight: bool,
         /// Hard per-session timeout in seconds
         #[arg(long, default_value_t = 900)]
         timeout: u64,
@@ -158,41 +162,13 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if models {
-                use consilium::adapters::{
-                    claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter,
-                };
-                use consilium::doctor::{collect_distinct_model_pairs, probe_model};
-                use consilium::event::Provider;
-                use std::sync::Arc;
-
                 let config = consilium::config::Config::load(Some(std::path::Path::new(
                     "consilium.config.json",
                 )))?;
                 let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
-                let pairs = collect_distinct_model_pairs(&config);
-
-                println!("\n── Model availability ──");
-                let mut any_failed = false;
-                for candidate in pairs {
-                    let adapter: Arc<dyn consilium::adapters::Adapter> = match candidate.provider {
-                        Provider::Claude => Arc::new(ClaudeAdapter),
-                        Provider::Codex => Arc::new(CodexAdapter),
-                        Provider::Gemini => Arc::new(GeminiAdapter),
-                    };
-                    let probe = probe_model(adapter, &candidate.model, &store).await;
-                    if probe.ok {
-                        println!("  ✓ {}/{}", candidate.provider.as_str(), candidate.model);
-                    } else {
-                        any_failed = true;
-                        println!(
-                            "  ✗ {}/{} — {}",
-                            candidate.provider.as_str(),
-                            candidate.model,
-                            probe.detail
-                        );
-                    }
-                }
-                if any_failed {
+                let report = consilium::doctor::preflight(&config, &store).await;
+                consilium::doctor::print_preflight(&report);
+                if !report.all_ok() {
                     std::process::exit(1);
                 }
             }
@@ -388,6 +364,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Conduct {
             task,
             context,
+            no_preflight,
             timeout,
         } => {
             use consilium::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
@@ -399,6 +376,26 @@ async fn main() -> anyhow::Result<()> {
                 "consilium.config.json",
             )))?;
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            if !no_preflight {
+                let report = consilium::doctor::preflight(&config, &store).await;
+                consilium::doctor::print_preflight(&report);
+                let conductor_candidates = config.roles.conductor.ladder();
+                if !conductor_candidates
+                    .iter()
+                    .any(|candidate| report.is_alive(candidate.provider, &candidate.model))
+                {
+                    eprintln!(
+                        "preflight: the conductor has no reachable model — re-authenticate the relevant CLI or fix consilium.config.json (run `consilium doctor --models` for detail)"
+                    );
+                    std::process::exit(1);
+                }
+                if !report.all_ok() {
+                    eprintln!(
+                        "preflight: {} model(s) unreachable — those roles will fail over or degrade; continuing.",
+                        report.dead().len()
+                    );
+                }
+            }
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
             let cwd = std::env::current_dir()?;
 
@@ -481,6 +478,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Auto {
             task,
             check,
+            no_preflight,
             timeout,
         } => {
             use consilium::orchestrator::auto::{run_auto, AutoDeps};
@@ -492,6 +490,26 @@ async fn main() -> anyhow::Result<()> {
                 "consilium.config.json",
             )))?;
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            if !no_preflight {
+                let report = consilium::doctor::preflight(&config, &store).await;
+                consilium::doctor::print_preflight(&report);
+                let conductor_candidates = config.roles.conductor.ladder();
+                if !conductor_candidates
+                    .iter()
+                    .any(|candidate| report.is_alive(candidate.provider, &candidate.model))
+                {
+                    eprintln!(
+                        "preflight: the conductor has no reachable model — re-authenticate the relevant CLI or fix consilium.config.json (run `consilium doctor --models` for detail)"
+                    );
+                    std::process::exit(1);
+                }
+                if !report.all_ok() {
+                    eprintln!(
+                        "preflight: {} model(s) unreachable — those roles will fail over or degrade; continuing.",
+                        report.dead().len()
+                    );
+                }
+            }
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
             let cwd = std::env::current_dir()?;
 
