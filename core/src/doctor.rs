@@ -163,6 +163,61 @@ pub async fn probe_model(adapter: Arc<dyn Adapter>, model: &str, quota: &QuotaSt
     }
 }
 
+pub fn adapter_for(provider: Provider) -> std::sync::Arc<dyn crate::adapters::Adapter> {
+    match provider {
+        Provider::Claude => Arc::new(crate::adapters::claude::ClaudeAdapter),
+        Provider::Codex => Arc::new(crate::adapters::codex::CodexAdapter),
+        Provider::Gemini => Arc::new(crate::adapters::gemini::GeminiAdapter),
+    }
+}
+
+#[derive(Debug)]
+pub struct PreflightReport {
+    pub probes: Vec<(ModelCandidate, ModelProbe)>,
+}
+
+impl PreflightReport {
+    pub fn all_ok(&self) -> bool {
+        self.probes.iter().all(|(_, probe)| probe.ok)
+    }
+
+    pub fn is_alive(&self, provider: Provider, model: &str) -> bool {
+        self.probes.iter().any(|(candidate, probe)| {
+            candidate.provider == provider && candidate.model == model && probe.ok
+        })
+    }
+
+    pub fn dead(&self) -> Vec<&(ModelCandidate, ModelProbe)> {
+        self.probes.iter().filter(|(_, probe)| !probe.ok).collect()
+    }
+}
+
+pub async fn preflight(config: &Config, quota: &QuotaStore) -> PreflightReport {
+    let mut probes = Vec::new();
+    for candidate in collect_distinct_model_pairs(config) {
+        let adapter = adapter_for(candidate.provider);
+        let probe = probe_model(adapter, &candidate.model, quota).await;
+        probes.push((candidate, probe));
+    }
+    PreflightReport { probes }
+}
+
+pub fn print_preflight(report: &PreflightReport) {
+    println!("── session preflight ──");
+    for (candidate, probe) in &report.probes {
+        if probe.ok {
+            println!("  ✓ {}/{}", candidate.provider.as_str(), candidate.model);
+        } else {
+            println!(
+                "  ✗ {}/{} — {}",
+                candidate.provider.as_str(),
+                candidate.model,
+                probe.detail
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +235,22 @@ mod tests {
 
     fn fake_bin_dir(name: &str, output: &str) -> tempfile::TempDir {
         fake_bin_dir_script(name, &format!("#!/bin/sh\necho \"{output}\"\n"))
+    }
+
+    fn candidate(provider: Provider, model: &str) -> ModelCandidate {
+        ModelCandidate {
+            provider,
+            model: model.to_string(),
+        }
+    }
+
+    fn probe(provider: Provider, model: &str, ok: bool, detail: &str) -> ModelProbe {
+        ModelProbe {
+            provider,
+            model: model.to_string(),
+            ok,
+            detail: detail.to_string(),
+        }
     }
 
     #[test]
@@ -284,5 +355,67 @@ mod tests {
         assert!(has(Provider::Claude, "opus"));
         assert!(has(Provider::Codex, "gpt-x"));
         assert!(has(Provider::Gemini, "gemini-pro"));
+    }
+
+    #[test]
+    fn preflight_report_marks_only_conductor_candidate_dead() {
+        let report = PreflightReport {
+            probes: vec![(
+                candidate(Provider::Claude, "claude-opus-4-8"),
+                probe(Provider::Claude, "claude-opus-4-8", false, "unavailable"),
+            )],
+        };
+
+        assert!(!report.is_alive(Provider::Claude, "claude-opus-4-8"));
+    }
+
+    #[test]
+    fn preflight_report_keeps_conductor_alive_when_other_model_is_dead() {
+        let report = PreflightReport {
+            probes: vec![
+                (
+                    candidate(Provider::Claude, "claude-opus-4-8"),
+                    probe(Provider::Claude, "claude-opus-4-8", true, "ok"),
+                ),
+                (
+                    candidate(Provider::Codex, "gpt-5.4"),
+                    probe(Provider::Codex, "gpt-5.4", false, "rate-limited"),
+                ),
+            ],
+        };
+
+        assert!(report.is_alive(Provider::Claude, "claude-opus-4-8"));
+        assert!(!report.all_ok());
+    }
+
+    #[test]
+    fn preflight_report_is_alive_and_dead_filter_by_exact_pair() {
+        let report = PreflightReport {
+            probes: vec![
+                (
+                    candidate(Provider::Claude, "claude-opus-4-8"),
+                    probe(Provider::Claude, "claude-opus-4-8", true, "ok"),
+                ),
+                (
+                    candidate(Provider::Codex, "gpt-5.4"),
+                    probe(Provider::Codex, "gpt-5.4", false, "rate-limited"),
+                ),
+                (
+                    candidate(Provider::Gemini, "gemini-3-pro-preview"),
+                    probe(Provider::Gemini, "gemini-3-pro-preview", true, "ok"),
+                ),
+            ],
+        };
+
+        assert!(report.is_alive(Provider::Claude, "claude-opus-4-8"));
+        assert!(!report.is_alive(Provider::Codex, "gpt-5.4"));
+        assert!(!report.is_alive(Provider::Claude, "not-probed"));
+
+        let dead = report.dead();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].0.provider, Provider::Codex);
+        assert_eq!(dead[0].0.model, "gpt-5.4");
+        assert!(!dead[0].1.ok);
+        assert_eq!(dead[0].1.detail, "rate-limited");
     }
 }
