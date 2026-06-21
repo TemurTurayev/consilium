@@ -202,6 +202,28 @@ pub async fn preflight(config: &Config, quota: &QuotaStore) -> PreflightReport {
     PreflightReport { probes }
 }
 
+/// A short, actionable remediation hint for a failed probe, matched on the error
+/// detail. Display-only: a missed match just yields the generic hint, so there's
+/// no correctness risk in the (necessarily fuzzy) string matching.
+pub(crate) fn remediation_hint(detail: &str) -> &'static str {
+    let d = detail.to_ascii_lowercase();
+    if d.contains("no longer supported") || d.contains("ineligible") || d.contains("migrate") {
+        "provider tier looks deprecated — migrate this CLI's auth (a supported tier or API key)"
+    } else if d.contains("401")
+        || d.contains("authenticat")
+        || d.contains("unauthor")
+        || d.contains("credential")
+    {
+        "re-authenticate this CLI (its session/credentials are invalid), then re-run"
+    } else if d.contains("rate") && d.contains("limit") {
+        "rate-limited — wait and retry, or reduce concurrency"
+    } else if d.contains("no output") || d.contains("produced no") {
+        "CLI returned nothing — run it directly (e.g. `gemini -p hi`) to see its error; usually an expired/unsupported session"
+    } else {
+        "re-authenticate or update this CLI, then re-run `consilium doctor --models`"
+    }
+}
+
 pub fn print_preflight(report: &PreflightReport) {
     println!("── session preflight ──");
     for (candidate, probe) in &report.probes {
@@ -214,6 +236,7 @@ pub fn print_preflight(report: &PreflightReport) {
                 candidate.model,
                 probe.detail
             );
+            println!("      → {}", remediation_hint(&probe.detail));
         }
     }
 }
@@ -292,6 +315,21 @@ mod tests {
         assert_eq!(probe_label(FailureKind::ModelUnavailable), "unavailable");
         assert_eq!(probe_label(FailureKind::RateLimited), "rate-limited");
         assert_eq!(probe_label(FailureKind::Transient), "transient failure");
+    }
+
+    #[test]
+    fn remediation_hint_matches_known_failures() {
+        assert!(
+            remediation_hint("API Error: 401 authentication_error: Invalid credentials")
+                .contains("re-authenticate")
+        );
+        assert!(remediation_hint("gemini produced no output").contains("run it directly"));
+        assert!(
+            remediation_hint("This client is no longer supported; migrate to Antigravity")
+                .contains("migrate")
+        );
+        assert!(remediation_hint("error: rate limit exceeded").contains("rate-limited"));
+        assert!(!remediation_hint("some unrecognized failure").is_empty());
     }
 
     #[test]
