@@ -43,6 +43,7 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
 | **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
 | **M-eval — Benchmark harness (Slice A)** | `consilium eval` scores orchestration **approaches** (solo / conduct / ±grounding / ±cross-family) by an *independent* build/test verifier; dry-run by default | ✅ Harness done — live numbers are an opt-in run |
+| **Fan-out DAG (Phase A)** | `conduct` subtasks carry explicit `depends_on` edges, run in dependency-order **waves**, and a failed subtask **isolates** to its dependents (recorded `skipped`) instead of aborting the run | ✅ Done — sequential; per-wave parallelism + worktree isolation is Phase B |
 | **M3 (rest) — MCP tools, memory, dashboards** | `council_run` MCP tool, memory/recitation tools, quota dashboard + Council view | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
@@ -128,9 +129,11 @@ prompt text, so the stateless-process architecture is untouched):
 ```
 
 Empty blocks are elided, so a first attempt / single-subtask run pays nothing.
-Recorded in the transcript per subtask as `status` + `summary`. (Subtasks run
-sequentially over disjoint files; per-subtask git-worktree isolation is deferred
-until parallel workers land.)
+Recorded in the transcript per subtask as `status` + `summary`. (Subtasks form a
+`depends_on` DAG executed in dependency-order waves — still one worker at a time;
+a failed subtask isolates to its dependents, which are recorded `skipped`, instead
+of aborting the whole run. True per-wave parallelism + git-worktree isolation is
+deferred to Phase B.)
 
 ## Attached conductor (MCP): your live session orchestrates the army
 
