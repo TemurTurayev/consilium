@@ -4,9 +4,9 @@ import { formatTokens, formatWindow, maxTotal, quotaRows } from './quotaView'
 
 const snap: QuotaSnapshot = {
   window_secs: 18000,
-  claude: { input_tokens: 1000, output_tokens: 500 },
-  codex: { input_tokens: 200, output_tokens: 0 },
-  gemini: { input_tokens: 0, output_tokens: 0 },
+  claude: { input_tokens: 1000, output_tokens: 500, estimated: false },
+  codex: { input_tokens: 200, output_tokens: 0, estimated: false },
+  gemini: { input_tokens: 0, output_tokens: 0, estimated: true },
 }
 
 describe('quotaRows', () => {
@@ -16,6 +16,8 @@ describe('quotaRows', () => {
     expect(rows[0]).toMatchObject({ label: 'Claude', input: 1000, output: 500, total: 1500 })
     expect(rows[1].total).toBe(200)
     expect(rows[2].total).toBe(0)
+    // The estimated flag flows through per provider (Gemini via agy is estimated).
+    expect(rows.map((r) => r.estimated)).toEqual([false, false, true])
   })
 })
 
@@ -42,9 +44,9 @@ describe('maxTotal', () => {
     expect(maxTotal(quotaRows(snap))).toBe(1500)
     const idle: QuotaSnapshot = {
       window_secs: 18000,
-      claude: { input_tokens: 0, output_tokens: 0 },
-      codex: { input_tokens: 0, output_tokens: 0 },
-      gemini: { input_tokens: 0, output_tokens: 0 },
+      claude: { input_tokens: 0, output_tokens: 0, estimated: false },
+      codex: { input_tokens: 0, output_tokens: 0, estimated: false },
+      gemini: { input_tokens: 0, output_tokens: 0, estimated: false },
     }
     expect(maxTotal(quotaRows(idle))).toBe(1)
   })

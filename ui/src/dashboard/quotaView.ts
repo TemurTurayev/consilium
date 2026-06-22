@@ -11,6 +11,8 @@ export interface QuotaRow {
   input: number
   output: number
   total: number
+  /** Tokens are heuristic estimates (provider reports no usage, e.g. Gemini via agy). */
+  estimated: boolean
 }
 
 const PROVIDERS: ProviderKey[] = ['claude', 'codex', 'gemini']
@@ -30,6 +32,7 @@ export function quotaRows(snap: QuotaSnapshot): QuotaRow[] {
       input: usage.input_tokens,
       output: usage.output_tokens,
       total: usage.input_tokens + usage.output_tokens,
+      estimated: usage.estimated,
     }
   })
 }

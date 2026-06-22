@@ -32,7 +32,17 @@ export function QuotaDashboard({ active }: { active: boolean }) {
           {rows.map((row) => (
             <li key={row.provider} className={`dash__row dash__row--${row.provider}`}>
               <span className={`dash__dot dot--${row.provider}`} aria-hidden="true" />
-              <span className="dash__name">{row.label}</span>
+              <span className="dash__name">
+                {row.label}
+                {row.estimated && (
+                  <span
+                    className="dash__est"
+                    title="estimated — this provider's CLI reports no usage (e.g. Gemini via agy)"
+                  >
+                    {' '}(est.)
+                  </span>
+                )}
+              </span>
               <span className="dash__bar">
                 <span className="dash__fill" style={{ width: `${Math.round((row.total / peak) * 100)}%` }} />
               </span>
