@@ -59,6 +59,11 @@ git clone https://github.com/TemurTurayev/consilium.git
 cd consilium
 cargo build --release
 
+# Start here: the onboarding wizard. Pick your council (or accept the Default),
+# authenticate the providers it needs (it detects what's missing and tells you
+# the exact command to run), and it writes consilium.config.json for you.
+cargo run -q -- init
+
 cargo run -q -- doctor                                    # check agent CLIs
 cargo run -q -- run --provider gemini "Reply with: ok"    # single-agent smoke run
 cargo run -q -- quota                                     # usage in the last 5h window
@@ -81,10 +86,13 @@ cargo run -q -- conduct "Add a CHANGELOG.md with a 0.1.0 entry"
 # check fails.
 cargo run -q -- auto "Fix the typo in README.md" --check "cargo test"
 
-# Write a starter config you can edit, then probe which configured models are
-# actually reachable right now.
-cargo run -q -- init
+# Check provider auth on demand (probes liveness; prints the exact login step
+# for anything not ready), and probe which configured models are reachable.
+cargo run -q -- auth
 cargo run -q -- doctor --models
+
+# Non-interactive setup (CI/scripts): write the recommended council without prompts.
+cargo run -q -- init --yes
 ```
 
 ## Grounded execution: conduct trusts your tests, not vibes
