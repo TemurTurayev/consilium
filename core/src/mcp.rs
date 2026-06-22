@@ -19,7 +19,7 @@ use crate::config::{Config, VerifyConfig};
 use crate::event::Provider;
 use crate::orchestrator::changes::capture_changes;
 use crate::orchestrator::council::{run_council, CouncilMember};
-use crate::orchestrator::resilience::{run_with_failover, ModelHealth, Rung};
+use crate::orchestrator::resilience::{run_with_failover, ModelHealth, RetryConfig, Rung};
 use crate::orchestrator::review::{run_review_ladder, Severity};
 use crate::orchestrator::{roles, verify};
 use crate::quota::{unix_now, QuotaStore};
@@ -276,7 +276,7 @@ impl McpServer {
             chairman: Arc::new(chairman),
             transcript_base,
             verify,
-            health: ModelHealth::new(),
+            health: ModelHealth::with_retry(RetryConfig::prod()),
             quota: Arc::new(quota),
             tool_router: Self::tool_router(),
         }
@@ -612,7 +612,7 @@ impl McpServer {
             })
             .collect();
         let chairman = self.chairman.as_ref().clone();
-        let health = ModelHealth::new();
+        let health = ModelHealth::with_retry(RetryConfig::prod());
 
         match run_council(
             &p.question,

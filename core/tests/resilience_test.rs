@@ -4,7 +4,7 @@ use common::{ScriptedAdapter, SequencedAdapter, SpawnFailAdapter};
 use consilium::adapters::{Adapter, RunRequest};
 use consilium::config::ModelCandidate;
 use consilium::event::Provider;
-use consilium::orchestrator::resilience::{run_with_failover, ModelHealth, Rung};
+use consilium::orchestrator::resilience::{run_with_failover, ModelHealth, RetryConfig, Rung};
 use consilium::quota::QuotaStore;
 use std::sync::Arc;
 use std::time::Duration;
@@ -265,4 +265,84 @@ async fn transient_retry_recovers_on_same_rung() {
     assert_eq!(res.outcome.final_text, "recovered");
     // model_used reflects the rung that produced the outcome.
     assert_eq!(res.model_used, "claude/opus");
+}
+
+// RateLimited now RETRIES on the same rung before demoting (previously it
+// demoted immediately). With the default RetryConfig (one retry, zero backoff),
+// a rung rate-limited once then recovering stays on rung 0 — the fix that keeps
+// a briefly-throttled conductor from being abandoned. (claw-code-agent #3)
+#[tokio::test]
+async fn rate_limited_retries_same_rung_and_recovers() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let health = ModelHealth::new();
+    let ladder = vec![rung(
+        Provider::Claude,
+        "opus",
+        Arc::new(SequencedAdapter::new(
+            Provider::Claude,
+            vec![
+                ScriptedAdapter::failing(
+                    Provider::Claude,
+                    "Claude usage limit reached; try again later",
+                ),
+                ScriptedAdapter::ok_with_text(Provider::Claude, "recovered"),
+            ],
+        )),
+    )];
+    let res = run_with_failover(
+        &ladder,
+        "conductor",
+        req,
+        &store,
+        &health,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.rung_used, 0, "recovered on the same rung, no demotion");
+    assert!(res.fallbacks.is_empty());
+    assert_eq!(res.outcome.final_text, "recovered");
+}
+
+// The prod-style RetryConfig sleeps an exponential backoff before each same-rung
+// retry. With base 60ms + 2 retries the two backoffs (60ms + 120ms) mean the
+// call cannot complete in under ~180ms — proving the backoff is actually applied
+// (process-spawn time alone is far below this).
+#[tokio::test]
+async fn backoff_is_applied_before_each_retry() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let health = ModelHealth::with_retry(RetryConfig {
+        backoff_base: Duration::from_millis(60),
+        max_retries: 2,
+    });
+    let ladder = vec![rung(
+        Provider::Claude,
+        "opus",
+        Arc::new(SequencedAdapter::new(
+            Provider::Claude,
+            vec![
+                ScriptedAdapter::failing(Provider::Claude, "connection reset by peer"),
+                ScriptedAdapter::failing(Provider::Claude, "connection reset by peer"),
+                ScriptedAdapter::ok_with_text(Provider::Claude, "recovered"),
+            ],
+        )),
+    )];
+    let start = std::time::Instant::now();
+    let res = run_with_failover(
+        &ladder,
+        "conductor",
+        req,
+        &store,
+        &health,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(res.rung_used, 0);
+    assert_eq!(res.outcome.final_text, "recovered");
+    assert!(
+        elapsed >= Duration::from_millis(180),
+        "two backoffs (60ms + 120ms) must elapse; got {elapsed:?}"
+    );
 }
