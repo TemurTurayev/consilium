@@ -12,3 +12,4 @@ pub mod recommend;
 pub mod server;
 pub mod sessions;
 pub mod tokenizer;
+pub mod wizard;
