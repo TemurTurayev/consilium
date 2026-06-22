@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod orchestrator;
 pub mod protocol;
 pub mod quota;
+pub mod recommend;
 pub mod server;
 pub mod sessions;
 pub mod tokenizer;
