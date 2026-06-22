@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
             if !all_ok {
                 println!("\nInstall missing CLIs:");
                 println!("  codex:  npm install -g @openai/codex   (then: codex login)");
-                println!("  gemini: npm install -g @google/gemini-cli");
+                println!("  agy:    the Antigravity CLI (replaces the gemini CLI) — https://antigravity.google");
                 println!("  claude: see https://code.claude.com");
                 std::process::exit(1);
             }

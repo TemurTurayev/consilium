@@ -193,12 +193,12 @@ impl Default for Config {
                 },
                 workers: vec![
                     RoleConfig::new(Provider::Codex, "gpt-5.4"),
-                    RoleConfig::new(Provider::Gemini, "gemini-3-pro-preview"),
+                    RoleConfig::new(Provider::Gemini, "Gemini 3.1 Pro (High)"),
                 ],
                 reviewer: RoleConfig::new(Provider::Codex, "gpt-5.4"),
                 supervisor: RoleConfig {
                     intervention_threshold: Some("medium".into()),
-                    ..RoleConfig::new(Provider::Gemini, "gemini-3-pro-preview")
+                    ..RoleConfig::new(Provider::Gemini, "Gemini 3.1 Pro (High)")
                 },
             },
             quota: QuotaConfig::default(),
