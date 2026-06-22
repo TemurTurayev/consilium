@@ -45,6 +45,7 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **M-eval — Benchmark harness (Slice A)** | `consilium eval` scores orchestration **approaches** (solo / conduct / ±grounding / ±cross-family) by an *independent* build/test verifier; dry-run by default | ✅ Harness done — live numbers are an opt-in run |
 | **Fan-out DAG (Phase A)** | `conduct` subtasks carry explicit `depends_on` edges, run in dependency-order **waves**, and a failed subtask **isolates** to its dependents (recorded `skipped`) instead of aborting the run | ✅ Done — sequential; per-wave parallelism + worktree isolation is Phase B |
 | **Onboarding foundation** | curated provider **catalog** (per-role recommendation scores + auth metadata) + a pure **recommendation resolver** (authed+available → best-model-per-role `RolesConfig`, graceful single-provider degradation) | ✅ Done — `consilium init` wiring + auth wizard are follow-on slices |
+| **Auth orchestrator** | `consilium auth` — probes each provider's liveness and prints the exact "detect + guide" next step (`claude setup-token` / `codex login` / `agy login`); concurrent probes | ✅ Done — the `init` wizard (slice 4) consumes it |
 | **M3 (rest) — MCP tools, memory, dashboards** | `council_run` MCP tool, memory/recitation tools, quota dashboard + Council view | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 

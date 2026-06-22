@@ -20,6 +20,13 @@ enum Command {
         #[arg(long)]
         models: bool,
     },
+    /// Report each provider's auth state and the exact next step to authenticate
+    /// it (probes liveness — spends ~1 token per provider).
+    Auth {
+        /// Probe just one provider (claude|codex|gemini) instead of all.
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Run a single prompt through one agent (smoke test)
     Run {
         #[arg(long)]
@@ -172,6 +179,32 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Command::Auth { provider } => {
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+            let report = match provider {
+                Some(name) => {
+                    let p: consilium::event::Provider = name
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("unknown provider '{name}': {e}"))?;
+                    vec![(p, consilium::auth::probe_auth(p, &store).await)]
+                }
+                None => consilium::auth::auth_report(&store).await,
+            };
+            let ready = report
+                .iter()
+                .filter(|(_, s)| matches!(s, consilium::auth::ProviderAuth::Ready))
+                .count();
+            println!("── provider auth ──");
+            for (p, status) in &report {
+                let mark = if matches!(status, consilium::auth::ProviderAuth::Ready) {
+                    "✓"
+                } else {
+                    "✗"
+                };
+                println!("  {mark} {}", consilium::auth::guidance(*p, status));
+            }
+            println!("{ready}/{} providers ready", report.len());
         }
         Command::Run {
             provider,
