@@ -241,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Council { question, timeout } => {
             use consilium::orchestrator::council::CouncilMember;
-            use consilium::orchestrator::resilience::ModelHealth;
+            use consilium::orchestrator::resilience::{ModelHealth, RetryConfig};
             use consilium::orchestrator::{council, roles, transcript::TranscriptStore};
 
             let config = consilium::config::Config::load(Some(std::path::Path::new(
@@ -259,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
 
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
-            let health = ModelHealth::new();
+            let health = ModelHealth::with_retry(RetryConfig::prod());
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
             let outcome = council::run_council(
                 &question,
@@ -369,7 +369,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             use consilium::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
             use consilium::orchestrator::council::CouncilMember;
-            use consilium::orchestrator::resilience::ModelHealth;
+            use consilium::orchestrator::resilience::{ModelHealth, RetryConfig};
             use consilium::orchestrator::{roles, transcript::TranscriptStore};
 
             let config = consilium::config::Config::load(Some(std::path::Path::new(
@@ -409,7 +409,7 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .collect();
 
-            let health = ModelHealth::new();
+            let health = ModelHealth::with_retry(RetryConfig::prod());
             let deps = ConductDeps {
                 conductor: RoleHandle {
                     ladder: roles::resolve_ladder(&config.roles.conductor),

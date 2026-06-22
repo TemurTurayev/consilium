@@ -16,16 +16,73 @@ pub struct Rung {
     pub adapter: Arc<dyn Adapter>,
 }
 
-/// Per-run registry of models proven dead (ModelUnavailable). Shared across all
-/// roles in a run so a model pulled mid-run is skipped everywhere afterward.
+/// Retry/backoff policy for a rung that fails Transient or RateLimited. Carried
+/// on [`ModelHealth`] so it threads to [`run_with_failover`] with no call-site
+/// change. The default is the historical behavior (one same-rung retry, no
+/// sleep) so existing callers and tests are unaffected and fast; production
+/// entry points opt into [`RetryConfig::prod`].
+#[derive(Clone, Copy)]
+pub struct RetryConfig {
+    /// Base backoff before a same-rung retry; doubles each retry (capped at
+    /// 60s). ZERO disables sleeping.
+    pub backoff_base: Duration,
+    /// Max same-rung retries on Transient/RateLimited before demoting.
+    pub max_retries: u32,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            backoff_base: Duration::ZERO,
+            max_retries: 1,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Production policy: a brief throttle on the conductor (which is a single
+    /// Claude-family ladder) or any rung should not kill the run — retry the
+    /// same rung a few times with exponential backoff before demoting. (Designed
+    /// fresh — the claw-code-agent review confirmed it has no backoff to copy.)
+    pub fn prod() -> Self {
+        Self {
+            backoff_base: Duration::from_secs(2),
+            max_retries: 3,
+        }
+    }
+
+    /// Backoff before same-rung retry `idx` (0-based): `base * 2^idx`, capped at 60s.
+    fn backoff_for(&self, idx: u32) -> Duration {
+        if self.backoff_base.is_zero() {
+            return Duration::ZERO;
+        }
+        let mult = 1u32.checked_shl(idx).unwrap_or(u32::MAX);
+        self.backoff_base
+            .saturating_mul(mult)
+            .min(Duration::from_secs(60))
+    }
+}
+
+/// Per-run registry of models proven dead (ModelUnavailable) plus the run's
+/// retry/backoff policy. Shared across all roles in a run so a model pulled
+/// mid-run is skipped everywhere afterward.
 #[derive(Clone, Default)]
 pub struct ModelHealth {
     dead: Arc<Mutex<HashSet<(Provider, String)>>>,
+    retry: RetryConfig,
 }
 
 impl ModelHealth {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Construct with an explicit retry/backoff policy (production entry points
+    /// pass [`RetryConfig::prod`] to enable backoff under throttle).
+    pub fn with_retry(retry: RetryConfig) -> Self {
+        Self {
+            dead: Arc::default(),
+            retry,
+        }
     }
     pub fn mark_dead(&self, provider: Provider, model: &str) {
         self.dead
@@ -83,9 +140,11 @@ fn classify_attempt(
 
 /// Runs a role's ladder with failover. `build_req` takes the rung's model
 /// (Some) and returns the RunRequest for that attempt. Demotes on
-/// ModelUnavailable (marks dead) and RateLimited; retries Transient once on the
-/// same rung — which covers both a transient Failed event AND a spawn/launch
-/// Err — before demoting. A rung attempt NEVER propagates with `?`: a spawn
+/// ModelUnavailable (marks dead). Transient AND RateLimited retry on the SAME
+/// rung up to `health`'s `RetryConfig.max_retries` with exponential backoff
+/// before demoting (a brief throttle/blip shouldn't burn the rung) — covering a
+/// transient/rate-limited Failed event AND a spawn/launch Err. A rung attempt
+/// NEVER propagates with `?`: a spawn
 /// error demotes to the next rung rather than aborting the whole ladder. Every
 /// rung failure is logged loudly to stderr (demotions also recorded in
 /// `fallbacks`); the bail carries every rung's failure reason. Errors only when
@@ -136,11 +195,32 @@ pub async fn run_with_failover(
         let mut result: anyhow::Result<RunOutcome> = attempt(rung.adapter.clone()).await;
         let mut kind = classify_attempt(&rung.adapter, &result);
 
-        // Transient (transient Failed event OR spawn-err OR timeout) gets one
-        // retry on the same rung before demoting.
-        if kind == Some(FailureKind::Transient) {
+        // Transient (transient Failed event OR spawn-err OR timeout) AND
+        // RateLimited get up to `max_retries` same-rung retries with exponential
+        // backoff before demoting — a brief throttle/blip shouldn't burn the
+        // rung. This matters most for the conductor, whose ladder is single
+        // Claude-family: an instant demote+bail under throttle killed whole runs.
+        // ModelUnavailable is terminal (dead) and never retried here.
+        let mut retries = 0u32;
+        while matches!(
+            kind,
+            Some(FailureKind::Transient) | Some(FailureKind::RateLimited)
+        ) && retries < health.retry.max_retries
+        {
+            // A genuine TimedOut (classified Transient) is unlikely to recover on
+            // retry, and EACH retry costs a full `timeout` — cap it at one retry
+            // regardless of max_retries so a hung rung demotes promptly. Rate
+            // limits and transient network blips still get the full retry budget.
+            if retries >= 1 && matches!(&result, Ok(o) if o.status == RunStatus::TimedOut) {
+                break;
+            }
+            let backoff = health.retry.backoff_for(retries);
+            if !backoff.is_zero() {
+                tokio::time::sleep(backoff).await;
+            }
             result = attempt(rung.adapter.clone()).await;
             kind = classify_attempt(&rung.adapter, &result);
+            retries += 1;
         }
 
         // Success on this rung → done.

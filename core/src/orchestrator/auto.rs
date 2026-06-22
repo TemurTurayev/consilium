@@ -3,7 +3,7 @@
 use crate::adapters::RunRequest;
 use crate::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use crate::orchestrator::council::{run_council, CouncilMember};
-use crate::orchestrator::resilience::{run_with_failover, ModelHealth};
+use crate::orchestrator::resilience::{run_with_failover, ModelHealth, RetryConfig};
 use crate::quota::QuotaStore;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -47,7 +47,7 @@ pub async fn run_auto(
     use super::prompts;
 
     // ONE ModelHealth for the entire auto run (planning + execution share it).
-    let health = ModelHealth::new();
+    let health = ModelHealth::with_retry(RetryConfig::prod());
 
     // ── 1. Triage ────────────────────────────────────────────────────────────
     // Use the conductor's ladder (the same one conduct will use for decompose).
