@@ -42,6 +42,24 @@ impl ScriptedAdapter {
         }
     }
 
+    /// Like [`ok_with_text`](Self::ok_with_text) but emits NO `usage` field, so
+    /// no `Usage` event is produced — mirrors a CLI (e.g. Gemini via `agy`) that
+    /// reports no token usage, forcing the runner's estimate fallback.
+    pub fn ok_with_text_no_usage(provider: Provider, text: &str) -> Self {
+        let script = format!(
+            r#"{{"type":"system","subtype":"init","session_id":"scripted","model":"fake","tools":[]}}
+{{"type":"assistant","message":{{"id":"m1","role":"assistant","content":[{{"type":"text","text":{text_json}}}]}},"session_id":"scripted"}}
+{{"type":"result","subtype":"success","is_error":false,"result":{text_json},"session_id":"scripted"}}"#,
+            text_json = serde_json::to_string(text).unwrap()
+        );
+        Self {
+            provider,
+            script,
+            delay_secs: 0,
+            pre_script: String::new(),
+        }
+    }
+
     pub fn failing(provider: Provider, error: &str) -> Self {
         let script = format!(
             r#"{{"type":"result","subtype":"error","is_error":true,"result":{e},"session_id":"scripted"}}"#,

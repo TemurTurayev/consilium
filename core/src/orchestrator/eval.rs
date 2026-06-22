@@ -604,7 +604,7 @@ pub fn markdown_report(report: &SuiteReport) -> String {
     }
     s.push_str("\n## Per-approach overall\n\n");
     s.push_str(
-        "| Approach | Pass (k/N) | Unscored | Claude tok | Codex tok | Gemini tok | Total tok | Median ms |\n|---|---|---|---|---|---|---|---|\n",
+        "| Approach | Pass (k/N) | Unscored | Claude tok | Codex tok | Gemini tok (est.) | Total tok | Median ms |\n|---|---|---|---|---|---|---|---|\n",
     );
     for a in &report.aggregate.per_approach {
         s.push_str(&format!(
@@ -626,7 +626,11 @@ pub fn markdown_report(report: &SuiteReport) -> String {
          Conservative lower bound: a trial where no verifier ran counts as not-passed (\"Unscored\"). \
          Prefer stable cells; small N over-states a bare %. Claims hold only for this suite. \
          The win condition is conduct matching `solo`'s pass-rate while spending fewer **Claude** \
-         (expensive) tokens — watch the Claude-tok column, not just Total._\n",
+         (expensive) tokens — watch the Claude-tok column, not just Total. \
+         NOTE: Gemini runs via the Antigravity `agy` CLI, which reports no usage, so its tokens are \
+         ESTIMATED at ~4 chars/token (stored flagged `estimated`; queryable via \
+         `estimated_totals_since`) — not directly comparable to measured Claude/Codex counts, and \
+         folded into Total only as a rough figure._\n",
     );
     s
 }
