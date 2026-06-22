@@ -3,7 +3,10 @@
 //! the I/O shell (`probe_auth`/`auth_report`, added next) reuses `crate::doctor`
 //! and is not unit-tested, mirroring `doctor::probe_model`.
 
+use crate::catalog::catalog;
+use crate::doctor;
 use crate::event::Provider;
+use crate::quota::QuotaStore;
 
 /// One provider's authentication state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +85,42 @@ pub fn guidance(p: Provider, status: &ProviderAuth) -> String {
     }
 }
 
+/// The model probed to test a provider's auth — its first catalog entry (the
+/// curated primary). Every v1 provider has at least one catalog entry.
+pub fn primary_model(p: Provider) -> Option<String> {
+    catalog()
+        .into_iter()
+        .find(|e| e.provider == p)
+        .map(|e| e.model)
+}
+
+/// Probe one provider's auth state: CLI presence (`doctor::check`) then, if
+/// present, a live liveness probe (`doctor::probe_model`, ~1 token) on its
+/// primary catalog model. I/O — not unit-tested (spawns a real CLI).
+pub async fn probe_auth(p: Provider, quota: &QuotaStore) -> ProviderAuth {
+    let bin = cli_binary(p);
+    if !doctor::check(bin).found {
+        return ProviderAuth::CliMissing;
+    }
+    let Some(model) = primary_model(p) else {
+        return ProviderAuth::Down(format!("no catalog model for {}", p.as_str()));
+    };
+    let adapter = doctor::adapter_for(p);
+    let probe = doctor::probe_model(adapter, &model, quota).await;
+    classify(true, Some((probe.ok, &probe.detail)))
+}
+
+/// Probe all v1 providers concurrently, so a cold-starting Claude (~30s) does not
+/// serialize the wait. Returns one (provider, status) per v1 provider, in a
+/// stable order (claude, codex, gemini).
+pub async fn auth_report(quota: &QuotaStore) -> Vec<(Provider, ProviderAuth)> {
+    let providers = [Provider::Claude, Provider::Codex, Provider::Gemini];
+    let futs = providers
+        .into_iter()
+        .map(|p| async move { (p, probe_auth(p, quota).await) });
+    futures::future::join_all(futs).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +195,15 @@ mod tests {
             !g.contains("agy login"),
             "Down must not suggest re-login: {g}"
         );
+    }
+
+    #[test]
+    fn primary_model_is_the_first_catalog_entry_per_provider() {
+        assert_eq!(
+            primary_model(Provider::Claude).as_deref(),
+            Some("claude-opus-4-8")
+        );
+        assert_eq!(primary_model(Provider::Codex).as_deref(), Some("gpt-5.4"));
+        assert!(primary_model(Provider::Gemini).is_some());
     }
 }
