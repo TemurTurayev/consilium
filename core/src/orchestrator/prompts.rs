@@ -82,13 +82,17 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
          signatures, the required output or return shape, naming conventions, and \
          the specific edge cases and acceptance tests that define \"done\". A vague \
          prompt (\"implement X\") fails — name the artifact precisely. Design \
-         subtasks so they touch DISJOINT files; they run sequentially.\n\n\
+         subtasks so they touch DISJOINT files. Express ordering explicitly: each \
+         subtask has a `depends_on` array listing the ids of subtasks that must \
+         finish first (empty for independent subtasks). Independent subtasks may run \
+         together; a subtask whose dependency fails is skipped, so only add an edge \
+         when the work genuinely needs the earlier result.\n\n\
          Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
          Example of well-specified subtasks — note how each names exact signatures, \
          paths, and tests (this example is Rust; mirror the same precision in the \
          task's actual language/stack):\n\
-         ```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"retry helper\",\"prompt\":\"In src/util/retry.rs add `pub async fn with_backoff<F,T>(max: u32, base: Duration, f: F) -> anyhow::Result<T>` that retries f up to max times, sleeping base*2^attempt between tries and returning the last error on exhaustion. Add #[tokio::test]s for success-after-one-failure and exhaustion. Touch only this file.\",\"depends_note\":\"\"}},{{\"id\":2,\"title\":\"wire --max-retries\",\"prompt\":\"In src/main.rs add a clap flag --max-retries <u32> (default 3) to the run subcommand and pass it into with_backoff; leave other flags unchanged.\",\"depends_note\":\"uses retry helper from subtask 1\"}}]}}\n```\n\n\
-         Now output EXACTLY one JSON code block in the same shape for the task above:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
+         ```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"retry helper\",\"prompt\":\"In src/util/retry.rs add `pub async fn with_backoff<F,T>(max: u32, base: Duration, f: F) -> anyhow::Result<T>` that retries f up to max times, sleeping base*2^attempt between tries and returning the last error on exhaustion. Add #[tokio::test]s for success-after-one-failure and exhaustion. Touch only this file.\",\"depends_note\":\"\",\"depends_on\":[]}},{{\"id\":2,\"title\":\"wire --max-retries\",\"prompt\":\"In src/main.rs add a clap flag --max-retries <u32> (default 3) to the run subcommand and pass it into with_backoff; leave other flags unchanged.\",\"depends_note\":\"uses retry helper from subtask 1\",\"depends_on\":[1]}}]}}\n```\n\n\
+         Now output EXACTLY one JSON code block in the same shape for the task above:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\",\"depends_on\":[]}}]}}\n```"
     )
 }
 
@@ -110,12 +114,14 @@ pub fn conduct_replan(
          naming conventions, and the specific edge cases and acceptance tests that \
          define \"done\" (a vague \"implement X\" fails). Do NOT redo already-completed work. \
          Number the new subtasks with fresh ids that continue AFTER the highest id \
-         in the completed work above (never reuse a completed id). Design subtasks so \
-         they touch DISJOINT files; they run sequentially.\n\n\
+         in the completed work above (never reuse a completed or skipped id). Design subtasks so \
+         they touch DISJOINT files, and give each a `depends_on` array of the ids it \
+         requires (use ids from the completed work above when a new subtask builds on \
+         finished work; empty for independent subtasks).\n\n\
          Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
          Already completed work:\n<completed_summary>\n{completed_summary}\n</completed_summary>\n\n\
          Failure that requires replanning:\n<failure_reason>\n{failure_reason}\n</failure_reason>\n\n\
-         Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
+         Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\",\"depends_on\":[]}}]}}\n```"
     )
 }
 
@@ -313,7 +319,7 @@ mod tests {
         let p = conduct_replan("task", "ctx", "done: subtask 1", "subtask 2 failed");
         assert!(p.contains("RESTATE every concrete constraint"));
         assert!(p.contains("subtask 2 failed")); // failure_reason interpolated
-        assert!(p.contains("never reuse a completed id")); // replan invariant preserved
+        assert!(p.contains("never reuse a completed or skipped id")); // replan invariant preserved
     }
 
     #[test]

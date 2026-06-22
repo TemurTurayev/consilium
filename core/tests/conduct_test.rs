@@ -49,6 +49,20 @@ fn plan_json(subtasks: &[(u32, &str, &str)]) -> String {
     format!(r#"{{"subtasks":[{}]}}"#, entries.join(","))
 }
 
+/// Like `plan_json` but each subtask also carries an explicit `depends_on` edge list.
+fn plan_json_with_deps(subtasks: &[(u32, &str, &str, &[u32])]) -> String {
+    let entries: Vec<String> = subtasks
+        .iter()
+        .map(|(id, title, prompt, deps)| {
+            let deps_csv = deps.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+            format!(
+                r#"{{"id":{id},"title":"{title}","prompt":"{prompt}","depends_note":"","depends_on":[{deps_csv}]}}"#
+            )
+        })
+        .collect();
+    format!(r#"{{"subtasks":[{}]}}"#, entries.join(","))
+}
+
 fn accept_json() -> String {
     r#"{"decision":"accept","feedback":""}"#.to_string()
 }
@@ -515,6 +529,98 @@ async fn replan_rescues_a_failed_run() {
         outcome.transcript["replans"].as_array().unwrap().len(),
         1,
         "transcript should record exactly one replan"
+    );
+}
+
+#[tokio::test]
+async fn replan_with_cross_plan_depends_on_succeeds() {
+    let repo = temp_repo();
+    let quota = store();
+    // Pass 1: subtask 1 completes, subtask 2 fails → replan. Pass 2: subtask 3
+    // depends_on [1] — a COMPLETED id from the prior plan — must be accepted as a
+    // satisfied edge, not rejected as "invalid plan: ... unknown subtask 1".
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json_with_deps(&[
+                    (1, "ok", "create one.txt", &[]),
+                    (2, "doomed", "create two.txt", &[]),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()), // eval subtask 1
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("subtask 2 wrong")), // eval subtask 2
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json_with_deps(&[(3, "build on 1", "create three.txt", &[1])]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()), // eval subtask 3
+        ],
+    ));
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo one > one.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "one")
+            },
+            ScriptedAdapter {
+                pre_script: "echo two > two.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "two")
+            },
+            ScriptedAdapter {
+                pre_script: "echo three > three.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "three")
+            },
+        ],
+    ));
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 1,
+        budget: None,
+    };
+    let outcome = run_conduct(
+        "cross-plan deps",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        outcome.completed.contains(&3),
+        "replanned subtask depending on a completed id must run; got completed={:?} failed={:?}",
+        outcome.completed,
+        outcome.failed
+    );
+    assert!(
+        repo.path().join("three.txt").exists(),
+        "three.txt should exist"
+    );
+    assert!(
+        !outcome
+            .failed
+            .as_deref()
+            .unwrap_or("")
+            .contains("invalid plan"),
+        "must not spuriously reject the cross-plan dependency: {:?}",
+        outcome.failed
     );
 }
 
@@ -3238,6 +3344,160 @@ async fn cross_family_arbiter_runs_and_ships() {
     let st = &outcome.transcript["subtasks"][0];
     assert_eq!(st["arbiter"]["decision"], "ship", "subtask: {st}");
     assert_eq!(st["attempts"][0]["cross_family"], "applied");
+}
+
+// ─── Failure isolation: an independent subtask runs despite an earlier failure ──
+#[tokio::test]
+async fn independent_subtask_runs_despite_an_earlier_failure() {
+    let repo = temp_repo();
+    let quota = store();
+    // Subtask 1 (no deps) FAILS at conductor eval; subtask 2 (no deps) is
+    // independent → must still run+complete. Both wave 0 (slice order).
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json_with_deps(&[
+                    (1, "doomed", "do part one", &[]),
+                    (2, "independent", "do part two", &[]),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("subtask 1 is wrong")),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo one > one.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did part one")
+            },
+            ScriptedAdapter {
+                pre_script: "echo two > two.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did part two")
+            },
+        ],
+    ));
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 0,
+        budget: None,
+    };
+    let outcome = run_conduct(
+        "two independent parts",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome.completed,
+        vec![2],
+        "independent subtask 2 runs despite subtask 1's failure"
+    );
+    assert!(
+        outcome.failed.as_deref().unwrap_or("").contains("wrong"),
+        "the run still reports subtask 1's failure"
+    );
+    assert!(
+        repo.path().join("two.txt").exists(),
+        "subtask 2's work landed"
+    );
+    assert!(
+        outcome.transcript["skipped"].as_array().unwrap().is_empty(),
+        "nothing is skipped (subtask 2 has no unmet deps)"
+    );
+}
+
+// ─── skip-failed-dependency: a dependent is skipped when its prereq fails ──────
+#[tokio::test]
+async fn dependent_subtask_is_skipped_when_prerequisite_fails() {
+    let repo = temp_repo();
+    let quota = store();
+    // Subtask 1 (no deps) FAILS; subtask 2 depends_on [1] → SKIPPED (never run).
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json_with_deps(&[
+                    (1, "prereq", "do the prerequisite", &[]),
+                    (2, "dependent", "do the dependent work", &[1]),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("prereq failed")),
+            // No eval for subtask 2 — it is skipped before any worker/eval runs.
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo one > one.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did prereq")
+    });
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 0,
+        budget: None,
+    };
+    let outcome = run_conduct(
+        "prereq then dependent",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        outcome.completed.is_empty(),
+        "prereq failed → nothing completed"
+    );
+    let skipped = outcome.transcript["skipped"].as_array().unwrap();
+    assert!(
+        skipped.iter().any(|v| v.as_u64() == Some(2)),
+        "the dependent subtask is recorded skipped: {skipped:?}"
+    );
+    let entries = outcome.transcript["subtasks"].as_array().unwrap();
+    let s2 = entries
+        .iter()
+        .find(|e| e["id"] == 2)
+        .expect("subtask 2 entry exists");
+    assert_eq!(s2["status"], "skipped");
+    assert!(
+        s2["attempts"].as_array().unwrap().is_empty(),
+        "a skipped subtask records no attempts"
+    );
 }
 
 // With the flag OFF (default), no cross_family marker is emitted — pinning the
