@@ -35,6 +35,58 @@ async fn collects_final_text_and_records_usage() {
     assert_eq!((input, output), (10, 5));
 }
 
+// A CLI that reports no usage (e.g. Gemini via `agy`) emits no Usage event; the
+// runner must fall back to a heuristic estimate so the provider isn't recorded
+// as 0 tokens (which would blind quota + least-loaded routing). Fixes the
+// routing-skew + invisible-quota issue observed in the 3-AI benchmark.
+#[tokio::test]
+async fn no_usage_event_records_estimated_quota() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let adapter = Arc::new(ScriptedAdapter::ok_with_text_no_usage(
+        Provider::Gemini,
+        "some output text here",
+    ));
+    let outcome = run_to_completion(adapter, req(), &store, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(matches!(outcome.status, RunStatus::Completed));
+    // Estimated from prompt "q" (input) and the output text — both > 0.
+    let (input, output) = store.totals_since(Provider::Gemini, 0).unwrap();
+    assert!(
+        input > 0,
+        "input tokens should be estimated from the prompt"
+    );
+    assert!(
+        output > 0,
+        "output tokens should be estimated from the final text"
+    );
+}
+
+// The estimate fallback is provider-agnostic by design: it keys on the absence
+// of a Usage event, not on the provider. A Claude/Codex completion that emitted
+// no usage (e.g. a future CLI output-format change) is also estimated, rather
+// than recorded as 0. Documents intended behavior so the no-usage branch isn't
+// mistaken for agy-only scoping.
+#[tokio::test]
+async fn no_usage_estimate_is_provider_agnostic() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let adapter = Arc::new(ScriptedAdapter::ok_with_text_no_usage(
+        Provider::Claude,
+        "claude output without a usage envelope",
+    ));
+    let outcome = run_to_completion(adapter, req(), &store, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(matches!(outcome.status, RunStatus::Completed));
+    let (input, output) = store.totals_since(Provider::Claude, 0).unwrap();
+    assert!(input > 0 && output > 0, "no-usage completion is estimated");
+    // And it is recorded as an ESTIMATE, not measured.
+    assert_eq!(
+        store.estimated_totals_since(Provider::Claude, 0).unwrap(),
+        (input, output)
+    );
+}
+
 #[tokio::test]
 async fn failed_event_yields_failed_status() {
     let store = QuotaStore::open_in_memory().unwrap();

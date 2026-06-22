@@ -38,6 +38,9 @@ pub async fn run_to_completion(
     timeout: Duration,
 ) -> anyhow::Result<RunOutcome> {
     let provider = adapter.provider();
+    // Captured before `req` is moved into spawn — used to estimate input tokens
+    // when the provider's CLI reports no usage (see the no-usage branch below).
+    let prompt = req.prompt.clone();
     let sessions::SessionHandle {
         id: session_id,
         events: mut event_rx,
@@ -111,6 +114,31 @@ pub async fn run_to_completion(
 
     let status =
         status.unwrap_or_else(|| RunStatus::Failed("stream ended without terminal event".into()));
+
+    // Estimate-on-no-usage fallback. This is keyed on the ABSENCE of usage, not
+    // on the provider: any COMPLETED run that emitted no non-zero Usage event
+    // gets a heuristic estimate (from the prompt + final text, flagged
+    // `estimated`) rather than being recorded as 0 — which would leave quota +
+    // least-loaded routing blind to the provider (it looks permanently idle).
+    // In practice this fires for Gemini via the Antigravity `agy` CLI, which
+    // prints plain text with no usage envelope. Claude/Codex are unaffected only
+    // because their CLIs currently always emit usage on success; if a future CLI
+    // dropped it, estimating beats recording nothing. (Borrowed from claw-code-agent.)
+    if status == RunStatus::Completed
+        && !events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::Usage { input_tokens, output_tokens }
+                    if *input_tokens > 0 || *output_tokens > 0
+            )
+        })
+    {
+        let input = crate::tokenizer::estimate_tokens(&prompt);
+        let output = crate::tokenizer::estimate_tokens(&final_text);
+        if let Err(e) = quota.record_estimated(provider, input, output) {
+            tracing::warn!(error = %e, "estimated quota record failed; continuing");
+        }
+    }
 
     Ok(RunOutcome {
         session_id,
