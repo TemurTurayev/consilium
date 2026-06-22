@@ -3,7 +3,7 @@ use crate::config::ModelCandidate;
 use crate::event::Provider;
 use crate::orchestrator::runner::{run_to_completion, RunOutcome, RunStatus};
 use crate::quota::QuotaStore;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +28,10 @@ pub struct RetryConfig {
     pub backoff_base: Duration,
     /// Max same-rung retries on Transient/RateLimited before demoting.
     pub max_retries: u32,
+    /// After this many RateLimited rung-failures ACROSS the run, the rung is
+    /// marked "cold" and skipped fast for the rest of the run (circuit-breaker).
+    /// `0` disables the breaker.
+    pub cold_after: u32,
 }
 
 impl Default for RetryConfig {
@@ -35,6 +39,7 @@ impl Default for RetryConfig {
         Self {
             backoff_base: Duration::ZERO,
             max_retries: 1,
+            cold_after: 0,
         }
     }
 }
@@ -48,6 +53,7 @@ impl RetryConfig {
         Self {
             backoff_base: Duration::from_secs(2),
             max_retries: 3,
+            cold_after: 3,
         }
     }
 
@@ -69,6 +75,12 @@ impl RetryConfig {
 #[derive(Clone, Default)]
 pub struct ModelHealth {
     dead: Arc<Mutex<HashSet<(Provider, String)>>>,
+    /// Rungs tripped by the rate-limit circuit-breaker — skipped for the rest of
+    /// the run once they hit `RetryConfig.cold_after` RateLimited failures. Unlike
+    /// `dead`, the model isn't broken; we just stop paying to retry a throttled
+    /// rung this run.
+    cold: Arc<Mutex<HashSet<(Provider, String)>>>,
+    rate_limit_hits: Arc<Mutex<HashMap<(Provider, String), u32>>>,
     retry: RetryConfig,
 }
 
@@ -81,6 +93,8 @@ impl ModelHealth {
     pub fn with_retry(retry: RetryConfig) -> Self {
         Self {
             dead: Arc::default(),
+            cold: Arc::default(),
+            rate_limit_hits: Arc::default(),
             retry,
         }
     }
@@ -95,6 +109,30 @@ impl ModelHealth {
             .lock()
             .unwrap()
             .contains(&(provider, model.to_string()))
+    }
+    /// True once a rung has been tripped cold by the rate-limit circuit-breaker.
+    pub fn is_cold(&self, provider: Provider, model: &str) -> bool {
+        self.cold
+            .lock()
+            .unwrap()
+            .contains(&(provider, model.to_string()))
+    }
+    /// Record a RateLimited rung-failure; returns true if it just tripped the
+    /// circuit-breaker (marked the rung cold). No-op when `cold_after == 0`.
+    fn record_rate_limit(&self, provider: Provider, model: &str) -> bool {
+        if self.retry.cold_after == 0 {
+            return false;
+        }
+        let k = (provider, model.to_string());
+        let mut hits = self.rate_limit_hits.lock().unwrap();
+        let c = hits.entry(k.clone()).or_insert(0);
+        *c += 1;
+        if *c >= self.retry.cold_after {
+            self.cold.lock().unwrap().insert(k);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -168,19 +206,27 @@ pub async fn run_with_failover(
         let model = &rung.candidate.model;
         let provider = rung.candidate.provider;
 
-        // Skip models already known dead this run.
-        if health.is_dead(provider, model) {
-            reasons.push(format!("{} known-dead", key(&rung.candidate)));
+        // Skip models already known dead, or tripped cold by the rate-limit
+        // circuit-breaker, this run.
+        let skip = if health.is_dead(provider, model) {
+            Some("known-dead")
+        } else if health.is_cold(provider, model) {
+            Some("rate-limit-cold")
+        } else {
+            None
+        };
+        if let Some(sr) = skip {
+            reasons.push(format!("{} {sr}", key(&rung.candidate)));
             if let Some(next) = ladder.get(i + 1) {
                 let fb = Fallback {
                     from: key(&rung.candidate),
                     to: key(&next.candidate),
-                    reason: format!("{label}: {} is known-dead this run", key(&rung.candidate)),
+                    reason: format!("{label}: {} is {sr} this run", key(&rung.candidate)),
                 };
-                eprintln!("↳ {label} fell back: {} → {} (known-dead)", fb.from, fb.to);
+                eprintln!("↳ {label} fell back: {} → {} ({sr})", fb.from, fb.to);
                 fallbacks.push(fb);
             } else {
-                eprintln!("✗ {label}: {} failed (known-dead)", key(&rung.candidate));
+                eprintln!("✗ {label}: {} failed ({sr})", key(&rung.candidate));
             }
             continue;
         }
@@ -237,6 +283,11 @@ pub async fn run_with_failover(
         // timed-out, or spawn-err), record a loud failure line + the demotion.
         if kind == FailureKind::ModelUnavailable {
             health.mark_dead(provider, model);
+        } else if kind == FailureKind::RateLimited && health.record_rate_limit(provider, model) {
+            eprintln!(
+                "🧊 {label}: {} tripped the rate-limit circuit-breaker — cold for the rest of the run",
+                key(&rung.candidate)
+            );
         }
         let reason = match kind {
             FailureKind::ModelUnavailable => "model unavailable",
