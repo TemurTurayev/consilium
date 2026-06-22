@@ -103,10 +103,12 @@ pub fn conduct_replan(
          repository. Produce a REVISED plan for the task below covering ONLY \
          the work still needed after some subtasks already completed and the \
          run then hit a failure. Decompose the remaining work into the \
-         SMALLEST number of self-contained subtasks (1-5). Each subtask prompt \
-         must carry ALL context the worker needs (file paths, conventions, \
-         acceptance criteria) — workers cannot see this conversation, each \
-         other, or earlier subtasks. Do NOT redo already-completed work. \
+         SMALLEST number of self-contained subtasks (1-5). Workers cannot see \
+         this conversation, each other, or earlier subtasks, so each subtask \
+         `prompt` MUST RESTATE every concrete constraint the worker needs: exact \
+         file paths, function/type signatures, the required output/return shape, \
+         naming conventions, and the specific edge cases and acceptance tests that \
+         define \"done\" (a vague \"implement X\" fails). Do NOT redo already-completed work. \
          Number the new subtasks with fresh ids that continue AFTER the highest id \
          in the completed work above (never reuse a completed id). Design subtasks so \
          they touch DISJOINT files; they run sequentially.\n\n\
@@ -302,6 +304,16 @@ mod tests {
         assert!(p.contains("HUNT"));
         assert!(p.to_lowercase().contains("edge case"));
         assert!(p.contains(r#""findings""#));
+    }
+
+    // The replan prompt mirrors decompose's constraint-restating, while keeping
+    // its replan-specific invariants (id continuation, failure context).
+    #[test]
+    fn replan_demands_concrete_constraints_and_keeps_invariants() {
+        let p = conduct_replan("task", "ctx", "done: subtask 1", "subtask 2 failed");
+        assert!(p.contains("RESTATE every concrete constraint"));
+        assert!(p.contains("subtask 2 failed")); // failure_reason interpolated
+        assert!(p.contains("never reuse a completed id")); // replan invariant preserved
     }
 
     #[test]
