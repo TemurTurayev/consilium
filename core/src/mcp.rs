@@ -221,6 +221,9 @@ pub struct PageInOutput {
 pub struct ProviderQuota {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// True when these tokens are heuristic estimates (the provider's CLI reports
+    /// no usage, e.g. Gemini via agy) rather than CLI-measured.
+    pub estimated: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -423,9 +426,11 @@ impl McpServer {
         let q = self.quota.as_ref();
         let totals = |provider: Provider| -> ProviderQuota {
             let (input_tokens, output_tokens) = q.totals_since(provider, since).unwrap_or((0, 0));
+            let (est_in, est_out) = q.estimated_totals_since(provider, since).unwrap_or((0, 0));
             ProviderQuota {
                 input_tokens,
                 output_tokens,
+                estimated: est_in + est_out > 0,
             }
         };
         QuotaStatusOutput {
