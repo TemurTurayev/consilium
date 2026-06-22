@@ -2,7 +2,7 @@
 
 > Get a second opinion. And a third.
 
-One orchestrator for the AI coding subscriptions you already pay for. Consilium drives the **official CLI agents** — Claude Code, Codex CLI, Gemini CLI — so they can deliberate on hard problems, cross-review each other's work, and split tasks between providers without burning through any single subscription's limits.
+One orchestrator for the AI coding subscriptions you already pay for. Consilium drives the **official CLI agents** — Claude Code, Codex CLI, and the Antigravity CLI (`agy`, which drives Gemini) — so they can deliberate on hard problems, cross-review each other's work, and split tasks between providers without burning through any single subscription's limits.
 
 Named after the medical *consilium*: specialists from different fields gathering around one patient.
 
@@ -48,7 +48,7 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 
 ## Quick start
 
-Prerequisites: Rust ≥ 1.85 and at least one of the agent CLIs installed and logged in (`claude`, `codex`, `gemini`).
+Prerequisites: Rust ≥ 1.85 and at least one of the agent CLIs installed and logged in (`claude`, `codex`, `agy`). The `gemini` provider is driven through Antigravity's `agy` CLI (the standalone Gemini CLI is retired).
 
 ```bash
 git clone https://github.com/TemurTurayev/consilium.git
@@ -284,13 +284,13 @@ the anonymization map and per-reviewer scores, so you can audit who said what
 $ cargo run -q -- doctor
 ✓ claude   2.1.111 (Claude Code)
 ✓ codex    codex-cli 0.139.0
-✓ gemini   0.36.0
+✓ agy      1.0.10            (Antigravity — drives the gemini provider)
 ```
 
 ## How it works (M1)
 
 ```
- claude / codex / gemini CLIs          (your subscriptions)
+ claude / codex / agy CLIs             (your subscriptions; agy=Antigravity→Gemini)
         │ headless stdout
         ▼
  adapters/        pure parsers: raw CLI output → normalized AgentEvent
@@ -313,7 +313,7 @@ Verified against recorded real CLI outputs (`core/tests/fixtures/*/recorded/`):
 |---|---|---|
 | Claude | `input + cache_creation + cache_read` — cache tokens are **disjoint** additions | `output` |
 | Codex | `input` only — `cached_input_tokens` is a **subset**, summing would double-count | `output + reasoning_output_tokens` |
-| Gemini | Σ over **all** internal models (`prompt + cached`) — one request may use several | Σ `candidates + thoughts` |
+| Gemini (via `agy`) | Antigravity's `agy` reports no usage envelope, so tokens are **estimated** (~4 chars/token, flagged `estimated` in the quota log) | estimated |
 
 ## Development
 
