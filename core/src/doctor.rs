@@ -129,7 +129,12 @@ pub async fn probe_model(adapter: Arc<dyn Adapter>, model: &str, quota: &QuotaSt
         advisory: true,
         write: false,
     };
-    let timeout = Duration::from_secs(30);
+    // Claude Code's headless `-p` cold start can take well over 30s (it loads
+    // settings, MCP servers, etc.); codex/agy answer faster. Use a generous probe
+    // timeout so a slow-but-alive conductor isn't falsely reported dead (which
+    // would wrongly abort the conduct/auto preflight gate). A genuinely dead model
+    // costs this once each — rare, and `--no-preflight` skips the gate entirely.
+    let timeout = Duration::from_secs(120);
     match run_to_completion(adapter.clone(), req, quota, timeout).await {
         Ok(outcome) => match outcome.status {
             RunStatus::Completed => ModelProbe {
