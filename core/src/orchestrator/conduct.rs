@@ -288,6 +288,7 @@ pub async fn run_conduct(
         .collect();
 
     let mut completed: Vec<u32> = Vec::new();
+    let mut skipped: Vec<u32> = Vec::new();
     let mut halted: Option<String> = None;
     let mut failed: Option<String> = None;
     let mut subtask_entries: Vec<serde_json::Value> = Vec::new();
@@ -315,6 +316,16 @@ pub async fn run_conduct(
     // cannot clobber an earlier one. Worktree-per-subtask isolation is deferred
     // until real parallel workers land (it would also break the cross-subtask
     // inheritance the blackboard provides by starting each worker from HEAD).
+    //
+    // Failure model:
+    // - Supervisor Halt and budget-exceeded are GLOBAL aborts → `break 'plan`.
+    // - Subtask-specific failures ISOLATE → `continue 'next_subtask`: independent
+    //   subtasks still run, and a failed subtask's dependents are skipped by the
+    //   unmet-deps guard (a skip never enters `completed`, so it cascades).
+    // - `failed` is FIRST-WINS: it holds the root-cause failure and later
+    //   failures/skips never overwrite it — hence the `if failed.is_none()` guards.
+    // - `completed`/`skipped`/`subtask_entries` ACCUMULATE across replan passes
+    //   (cumulative run history; each replan emits fresh subtask ids).
     loop {
         // DAG layering: iterate dependency waves, not raw plan order. An
         // unlayerable plan (cycle / bad edge from the conductor) fails the run
@@ -340,6 +351,37 @@ pub async fn run_conduct(
                         ));
                         break 'plan;
                     }
+                }
+
+                // DAG failure isolation: a subtask whose prerequisites did not
+                // COMPLETE (failed or were themselves skipped) is skipped, not
+                // attempted. Because a skipped subtask never enters `completed`,
+                // this transitively skips its dependents.
+                let unmet: Vec<u32> = subtask
+                    .depends_on
+                    .iter()
+                    .copied()
+                    .filter(|d| !completed.contains(d))
+                    .collect();
+                if !unmet.is_empty() {
+                    skipped.push(subtask.id);
+                    subtask_entries.push(build_subtask_entry(
+                        subtask.id,
+                        &subtask.title,
+                        "skipped",
+                        &[],
+                        &[],
+                    ));
+                    // Defensive fallback: the upstream failure that caused this skip
+                    // already set `failed` (topology order ran the prereq first), so
+                    // this rarely fires — it only guards a skip with no prior failure.
+                    if failed.is_none() {
+                        failed = Some(format!(
+                            "subtask {} skipped: unmet dependencies {:?}",
+                            subtask.id, unmet
+                        ));
+                    }
+                    continue 'next_subtask;
                 }
 
                 let mut attempts: Vec<serde_json::Value> = Vec::new();
@@ -414,10 +456,12 @@ pub async fn run_conduct(
                             "verify": "not_run",
                         }));
                         if attempt_num >= MAX_REWORKS as usize {
-                            failed = Some(format!(
-                                "subtask {} exhausted reworks (last: {})",
-                                subtask.id, err_msg
-                            ));
+                            if failed.is_none() {
+                                failed = Some(format!(
+                                    "subtask {} exhausted reworks (last: {})",
+                                    subtask.id, err_msg
+                                ));
+                            }
                             subtask_entries.push(build_subtask_entry(
                                 subtask.id,
                                 &subtask.title,
@@ -425,7 +469,7 @@ pub async fn run_conduct(
                                 &attempts,
                                 &supervisor_entries,
                             ));
-                            break 'plan;
+                            continue 'next_subtask;
                         }
                         // Prepare rework prompt for next attempt. History includes the
                         // just-recorded failed round.
@@ -702,7 +746,9 @@ pub async fn run_conduct(
                                     reason,
                                     arbiter_entry,
                                 } => {
-                                    failed = Some(reason);
+                                    if failed.is_none() {
+                                        failed = Some(reason);
+                                    }
                                     let mut entry = build_subtask_entry(
                                         subtask.id,
                                         &subtask.title,
@@ -716,15 +762,17 @@ pub async fn run_conduct(
                                         }
                                     }
                                     subtask_entries.push(entry);
-                                    break 'plan;
+                                    continue 'next_subtask;
                                 }
                             }
                         }
                         EvalDecision::Fail => {
-                            failed = Some(format!(
-                                "subtask {} failed: {}",
-                                subtask.id, evaluation.feedback
-                            ));
+                            if failed.is_none() {
+                                failed = Some(format!(
+                                    "subtask {} failed: {}",
+                                    subtask.id, evaluation.feedback
+                                ));
+                            }
                             subtask_entries.push(build_subtask_entry(
                                 subtask.id,
                                 &subtask.title,
@@ -732,7 +780,7 @@ pub async fn run_conduct(
                                 &attempts,
                                 &supervisor_entries,
                             ));
-                            break 'plan;
+                            continue 'next_subtask;
                         }
                         EvalDecision::Rework => {
                             if attempt_num >= MAX_REWORKS as usize || stalled {
@@ -752,7 +800,9 @@ pub async fn run_conduct(
                                         MAX_REWORKS, evaluation.feedback
                                     )
                                 };
-                                failed = Some(format!("subtask {} {}", subtask.id, why));
+                                if failed.is_none() {
+                                    failed = Some(format!("subtask {} {}", subtask.id, why));
+                                }
                                 subtask_entries.push(build_subtask_entry(
                                     subtask.id,
                                     &subtask.title,
@@ -760,7 +810,7 @@ pub async fn run_conduct(
                                     &attempts,
                                     &supervisor_entries,
                                 ));
-                                break 'plan;
+                                continue 'next_subtask;
                             }
                             // Prepare rework for the next iteration.
                             let history = mem_history(mem_on, &attempts, hist_cap);
@@ -853,6 +903,7 @@ pub async fn run_conduct(
         "plan": plan_summary,
         "subtasks": subtask_entries,
         "completed": completed,
+        "skipped": skipped,
         "halted": halted,
         "failed": failed,
         "replans": replans,
