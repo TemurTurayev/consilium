@@ -1757,6 +1757,31 @@ mod tests {
     }
 
     #[test]
+    fn decompose_template_emits_depends_on_edge() {
+        // The few-shot example must teach the edge: subtask 2 depends on subtask 1.
+        // We extract the FIRST fenced ```json block (the example) since parse_plan
+        // picks the last block (the output-shape template which has only one subtask).
+        let p = crate::orchestrator::prompts::conduct_decompose("t", "ctx");
+        let example_json = p
+            .split("```json")
+            .nth(1)
+            .and_then(|s| s.split("```").next())
+            .expect("decompose prompt must contain a fenced json example block");
+        let plan: Plan = serde_json::from_str(example_json.trim())
+            .expect("decompose template example must parse as Plan");
+        let s2 = plan
+            .subtasks
+            .iter()
+            .find(|s| s.id == 2)
+            .expect("example has subtask 2");
+        assert_eq!(
+            s2.depends_on,
+            vec![1],
+            "example must show a real depends_on edge"
+        );
+    }
+
+    #[test]
     fn decompose_template_example_parses_as_plan() {
         let p = crate::orchestrator::prompts::conduct_decompose("t", "ctx");
         assert!(parse_plan(&p).is_some());
