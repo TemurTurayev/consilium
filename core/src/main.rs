@@ -234,9 +234,22 @@ async fn main() -> anyhow::Result<()> {
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             let since = consilium::quota::unix_now() - 5 * 3600;
             println!("usage in the last 5h window:");
+            let mut any_estimated = false;
             for p in [Provider::Claude, Provider::Codex, Provider::Gemini] {
                 let (input, output) = store.totals_since(p, since)?;
-                println!("  {:8} in={input:>8} out={output:>8}", p.as_str());
+                let (est_in, est_out) = store.estimated_totals_since(p, since)?;
+                // Tokens with no CLI usage report (e.g. Gemini via agy) are
+                // heuristic estimates, not measured — flag them so the accounting
+                // stays honest (the headline feature).
+                let estimated = est_in + est_out > 0;
+                any_estimated |= estimated;
+                let marker = if estimated { "  (est.)" } else { "" };
+                println!("  {:8} in={input:>8} out={output:>8}{marker}", p.as_str());
+            }
+            if any_estimated {
+                println!(
+                    "\n  (est.) = estimated (the CLI reports no usage, e.g. Gemini via agy) — not measured"
+                );
             }
         }
         Command::Council { question, timeout } => {
