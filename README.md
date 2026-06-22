@@ -13,6 +13,22 @@ Named after the medical *consilium*: specialists from different fields gathering
 - **Built for shifting quota rules.** A June 2026 plan to meter `claude -p` (headless) against a separate credit was put on hold on June 17, 2026 — headless Claude currently runs on flat subscription limits, same as interactive. Consilium doesn't depend on either outcome: heavy lifting routes to the worker with the freest quota, and the *attached mode* (M3) can keep the conductor inside your interactive Claude Code session via MCP — useful insurance if metered headless usage returns.
 - **Accurate accounting is the headline feature.** Provider token semantics genuinely differ — we verified each against recorded real CLI output (see table below). Most tools get at least one of them wrong.
 
+## Compared to a hosted orchestrator (e.g. Sakana Fugu)
+
+Sakana's **Fugu** (June 2026) validates the core bet: it ships a multi-agent system *as a model* — an LLM that orchestrates a pool of others with Thinker/Worker/Verifier roles and a learned "Conductor" — and it trades blows with the frontier on coding and reasoning benchmarks. Multi-agent orchestration works.
+
+Consilium takes the opposite *delivery* model, and that's the point:
+
+| | Sakana Fugu | Consilium |
+|---|---|---|
+| **Access** | Closed, hosted, metered ($20–200/mo or per-token) | Open-source, self-hosted |
+| **Cost** | Pay the vendor per token | The flat-rate subscriptions you already pay for |
+| **Model pool** | A fixed internal pool — *cannot* use Claude Opus / GPT-5.x / Gemini (not publicly accessible to it) | Orchestrates the actual frontier CLIs you're already paying for |
+| **Lock-in** | Trades model lock-in for single-vendor lock-in | None — you own the council and swap any role |
+| **Transparency** | Black box | Every prompt, diff, verdict, and token is local and inspectable |
+
+Fugu proves the approach pays off. Consilium runs the same idea on the models a hosted pool can't reach, on subscriptions you already have, with nothing hidden — and you can read every line of how it decides.
+
 ## Status
 
 | Milestone | Scope | State |
