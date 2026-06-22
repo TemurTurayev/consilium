@@ -45,7 +45,7 @@ pub fn check(binary: &str) -> CliStatus {
 }
 
 pub fn run_doctor() -> Vec<CliStatus> {
-    ["claude", "codex", "gemini"]
+    ["claude", "codex", "agy"]
         .iter()
         .map(|b| check(b))
         .collect()
@@ -214,7 +214,7 @@ pub(crate) fn remediation_hint(detail: &str) -> &'static str {
         || d.contains("unauthor")
         || d.contains("credential")
     {
-        "re-authenticate this CLI (its session/credentials are invalid), then re-run"
+        "re-authenticate this CLI — Claude: run `claude setup-token` then export CLAUDE_CODE_OAUTH_TOKEN; others: re-login — then re-run"
     } else if d.contains("rate") && d.contains("limit") {
         "rate-limited — wait and retry, or reduce concurrency"
     } else if d.contains("no output") || d.contains("produced no") {
