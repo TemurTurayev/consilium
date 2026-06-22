@@ -12,5 +12,6 @@ pub mod roles;
 pub mod routing;
 pub mod runner;
 pub mod stagnation;
+pub mod topology;
 pub mod transcript;
 pub mod verify;
