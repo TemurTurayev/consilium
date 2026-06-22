@@ -72,12 +72,19 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
     format!(
         "You are the conductor of a team of AI coding agents working in this \
          repository. Decompose the task below into the SMALLEST number of \
-         self-contained subtasks (1-5). Each subtask prompt must carry ALL \
-         context the worker needs (file paths, conventions, acceptance criteria) \
-         — workers cannot see this conversation, each other, or earlier subtasks. \
-         Design subtasks so they touch DISJOINT files; they run sequentially.\n\n\
+         self-contained subtasks (1-5). Workers cannot see this conversation, each \
+         other, or earlier subtasks, so each subtask `prompt` MUST RESTATE every \
+         concrete constraint the worker needs: exact file paths, function/type \
+         signatures, the required output or return shape, naming conventions, and \
+         the specific edge cases and acceptance tests that define \"done\". A vague \
+         prompt (\"implement X\") fails — name the artifact precisely. Design \
+         subtasks so they touch DISJOINT files; they run sequentially.\n\n\
          Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
-         Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
+         Example of well-specified subtasks — note how each names exact signatures, \
+         paths, and tests (this example is Rust; mirror the same precision in the \
+         task's actual language/stack):\n\
+         ```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"retry helper\",\"prompt\":\"In src/util/retry.rs add `pub async fn with_backoff<F,T>(max: u32, base: Duration, f: F) -> anyhow::Result<T>` that retries f up to max times, sleeping base*2^attempt between tries and returning the last error on exhaustion. Add #[tokio::test]s for success-after-one-failure and exhaustion. Touch only this file.\",\"depends_note\":\"\"}},{{\"id\":2,\"title\":\"wire --max-retries\",\"prompt\":\"In src/main.rs add a clap flag --max-retries <u32> (default 3) to the run subcommand and pass it into with_backoff; leave other flags unchanged.\",\"depends_note\":\"uses retry helper from subtask 1\"}}]}}\n```\n\n\
+         Now output EXACTLY one JSON code block in the same shape for the task above:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\"}}]}}\n```"
     )
 }
 
@@ -222,10 +229,15 @@ pub fn arbiter_decide(
 
 pub fn diff_review(diff: &str) -> String {
     format!(
-        "Review this diff for real problems: bugs, security issues, broken edge \
-         cases, misleading naming. Do not invent style nitpicks. Then output EXACTLY \
-         one JSON code block:\n```json\n{{\"findings\":[{{\"severity\":\"critical|important|minor\",\"file\":\"path\",\"description\":\"...\"}}]}}\n```\n\
-         Empty findings array means the diff is clean.\n\n\
+        "Review this diff for real problems. Actively HUNT for failure modes — do \
+         not merely confirm it looks right: enumerate the edge cases and inputs the \
+         change must handle (empty / zero / negative / overflow / unicode / \
+         concurrent / error-and-timeout paths) and check each against the diff, then \
+         flag any that are unhandled or untested — plus bugs, security issues, and \
+         misleading naming. Do not invent style nitpicks. Then output EXACTLY one \
+         JSON code block:\n```json\n{{\"findings\":[{{\"severity\":\"critical|important|minor\",\"file\":\"path\",\"description\":\"...\"}}]}}\n```\n\
+         An empty findings array means you verified the diff is correct AND its edge \
+         cases are handled — not merely that nothing obvious jumped out.\n\n\
          The diff is delimited by <diff> tags (tags chosen so backtick fences \
          inside the diff cannot break the structure):\n<diff>\n{diff}\n</diff>"
     )
@@ -262,6 +274,25 @@ mod tests {
     fn diff_review_prompt_embeds_diff_and_contract() {
         let p = diff_review("--- a/x.rs\n+++ b/x.rs");
         assert!(p.contains("+++ b/x.rs"));
+        assert!(p.contains(r#""findings""#));
+    }
+
+    // TRINITY/Conductor borrows: the conductor prompt must demand concrete,
+    // restated constraints and carry a few-shot exemplar (the largest ablation
+    // delta in the Conductor paper); the reviewer must actively hunt edge cases.
+    #[test]
+    fn decompose_demands_concrete_constraints_with_exemplar() {
+        let p = conduct_decompose("build a thing", "ctx");
+        assert!(p.contains("RESTATE every concrete constraint"));
+        assert!(p.contains("with_backoff"), "few-shot exemplar present");
+        assert!(p.contains("build a thing") && p.contains("ctx"));
+    }
+
+    #[test]
+    fn diff_review_demands_edge_case_hunt() {
+        let p = diff_review("--- a/x");
+        assert!(p.contains("HUNT"));
+        assert!(p.to_lowercase().contains("edge case"));
         assert!(p.contains(r#""findings""#));
     }
 
