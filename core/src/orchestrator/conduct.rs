@@ -21,6 +21,11 @@ pub struct Subtask {
     pub prompt: String,
     #[serde(default)]
     pub depends_note: String,
+    /// Ids of subtasks that must COMPLETE before this one runs. `#[serde(default)]`
+    /// ⇒ a plan that omits it parses as no-edges (today's behavior). Validated +
+    /// layered by `crate::orchestrator::topology::plan_waves`.
+    #[serde(default)]
+    pub depends_on: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1354,7 +1359,23 @@ mod tests {
             title: title.into(),
             prompt: prompt.into(),
             depends_note: String::new(),
+            depends_on: Vec::new(),
         }
+    }
+
+    #[test]
+    fn subtask_depends_on_defaults_empty_and_parses() {
+        // Back-compat: a plan with NO depends_on parses with an empty edge set.
+        let old =
+            parse_plan(r#"{"subtasks":[{"id":1,"title":"t","prompt":"p","depends_note":""}]}"#)
+                .unwrap();
+        assert!(old.subtasks[0].depends_on.is_empty());
+
+        // New: an explicit edge list parses.
+        let new =
+            parse_plan(r#"{"subtasks":[{"id":2,"title":"t","prompt":"p","depends_on":[1]}]}"#)
+                .unwrap();
+        assert_eq!(new.subtasks[0].depends_on, vec![1]);
     }
 
     #[test]
