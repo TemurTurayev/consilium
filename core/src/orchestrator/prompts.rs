@@ -72,8 +72,12 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
     format!(
         "You are the conductor of a team of AI coding agents working in this \
          repository. Decompose the task below into the SMALLEST number of \
-         self-contained subtasks (1-5). Workers cannot see this conversation, each \
-         other, or earlier subtasks, so each subtask `prompt` MUST RESTATE every \
+         self-contained subtasks (1-5). FIRST judge the task's difficulty and let \
+         it set the count: a trivial one-file change → 1 subtask, a standard \
+         feature → 2-3, a hard multi-part task → 4-5 (over-decomposing an easy task \
+         wastes work; under-decomposing a hard one drops quality). Workers cannot \
+         see this conversation, each other, or earlier subtasks, so each subtask \
+         `prompt` MUST RESTATE every \
          concrete constraint the worker needs: exact file paths, function/type \
          signatures, the required output or return shape, naming conventions, and \
          the specific edge cases and acceptance tests that define \"done\". A vague \
@@ -285,6 +289,10 @@ mod tests {
         let p = conduct_decompose("build a thing", "ctx");
         assert!(p.contains("RESTATE every concrete constraint"));
         assert!(p.contains("with_backoff"), "few-shot exemplar present");
+        assert!(
+            p.contains("judge the task's difficulty"),
+            "difficulty-first guidance"
+        );
         assert!(p.contains("build a thing") && p.contains("ctx"));
     }
 
