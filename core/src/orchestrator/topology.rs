@@ -7,16 +7,18 @@ use crate::orchestrator::conduct::Subtask;
 
 /// Group subtasks into dependency waves, returned as vectors of INDICES into
 /// `subtasks`. Within a wave, original slice order is preserved (deterministic).
+/// `completed` carries ids already shipped by prior (pre-replan) plans: a
+/// `depends_on` id in `completed` is a satisfied cross-plan edge (valid, and
+/// ready immediately), not an unknown-subtask error.
 ///
 /// Errors (the conductor produced an invalid DAG):
-/// - a `depends_on` id that no subtask defines,
+/// - a `depends_on` id that is neither in this plan nor already completed,
 /// - a self-edge,
 /// - duplicate subtask ids (ambiguous edges),
 /// - a cycle (no subtask becomes ready while work remains).
-pub fn plan_waves(subtasks: &[Subtask]) -> anyhow::Result<Vec<Vec<usize>>> {
+pub fn plan_waves(subtasks: &[Subtask], completed: &[u32]) -> anyhow::Result<Vec<Vec<usize>>> {
     use std::collections::HashSet;
 
-    // Unique-id check: edges reference ids, so duplicate ids make edges ambiguous.
     let mut ids: HashSet<u32> = HashSet::new();
     for s in subtasks {
         if !ids.insert(s.id) {
@@ -24,20 +26,21 @@ pub fn plan_waves(subtasks: &[Subtask]) -> anyhow::Result<Vec<Vec<usize>>> {
         }
     }
 
-    // Edge validation: every dep must reference a known, non-self id.
+    // Edge validation: a dep must reference a known same-plan id OR an
+    // already-completed id from a prior plan (a satisfied cross-plan edge).
     for s in subtasks {
         for d in &s.depends_on {
             if *d == s.id {
                 anyhow::bail!("subtask {} depends on itself", s.id);
             }
-            if !ids.contains(d) {
+            if !ids.contains(d) && !completed.contains(d) {
                 anyhow::bail!("subtask {} depends on unknown subtask {}", s.id, d);
             }
         }
     }
 
-    // Kahn layering: each round, a wave = every not-yet-placed subtask whose deps
-    // are all already placed. O(n^2) — n <= 5 in practice.
+    // Kahn layering: a subtask is ready when every dep is already placed in an
+    // earlier wave OR was completed by a prior plan. O(n^2) — n <= 5 in practice.
     let mut placed: HashSet<u32> = HashSet::new();
     let mut done = vec![false; subtasks.len()];
     let mut waves: Vec<Vec<usize>> = Vec::new();
@@ -46,7 +49,12 @@ pub fn plan_waves(subtasks: &[Subtask]) -> anyhow::Result<Vec<Vec<usize>>> {
         let wave: Vec<usize> = subtasks
             .iter()
             .enumerate()
-            .filter(|(i, s)| !done[*i] && s.depends_on.iter().all(|d| placed.contains(d)))
+            .filter(|(i, s)| {
+                !done[*i]
+                    && s.depends_on
+                        .iter()
+                        .all(|d| placed.contains(d) || completed.contains(d))
+            })
             .map(|(i, _)| i)
             .collect();
         if wave.is_empty() {
@@ -79,7 +87,7 @@ mod tests {
     #[test]
     fn no_deps_is_one_wave_in_original_order() {
         let s = vec![sub(1, &[]), sub(2, &[]), sub(3, &[])];
-        let waves = plan_waves(&s).unwrap();
+        let waves = plan_waves(&s, &[]).unwrap();
         assert_eq!(waves, vec![vec![0, 1, 2]], "empty edges => today's order");
     }
 
@@ -87,7 +95,7 @@ mod tests {
     fn linear_chain_is_one_per_wave() {
         // 1 -> 2 -> 3, declared out of order to prove layering, not slice order, wins.
         let s = vec![sub(3, &[2]), sub(1, &[]), sub(2, &[1])];
-        let waves = plan_waves(&s).unwrap();
+        let waves = plan_waves(&s, &[]).unwrap();
         // indices: 1 is at idx 1, 2 at idx 2, 3 at idx 0.
         assert_eq!(waves, vec![vec![1], vec![2], vec![0]]);
     }
@@ -96,33 +104,39 @@ mod tests {
     fn diamond_groups_the_middle_pair() {
         // 1 -> {2,3} -> 4
         let s = vec![sub(1, &[]), sub(2, &[1]), sub(3, &[1]), sub(4, &[2, 3])];
-        let waves = plan_waves(&s).unwrap();
+        let waves = plan_waves(&s, &[]).unwrap();
         assert_eq!(waves, vec![vec![0], vec![1, 2], vec![3]]);
     }
 
     #[test]
     fn unknown_dependency_is_an_error() {
         let s = vec![sub(1, &[9])];
-        let err = plan_waves(&s).unwrap_err().to_string();
+        let err = plan_waves(&s, &[]).unwrap_err().to_string();
         assert!(err.contains("unknown"), "got: {err}");
     }
 
     #[test]
     fn self_edge_is_an_error() {
         let s = vec![sub(1, &[1])];
-        assert!(plan_waves(&s).unwrap_err().to_string().contains("itself"));
+        assert!(plan_waves(&s, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("itself"));
     }
 
     #[test]
     fn cycle_is_an_error() {
         let s = vec![sub(1, &[2]), sub(2, &[1])];
-        assert!(plan_waves(&s).unwrap_err().to_string().contains("cycle"));
+        assert!(plan_waves(&s, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("cycle"));
     }
 
     #[test]
     fn duplicate_ids_are_an_error() {
         let s = vec![sub(1, &[]), sub(1, &[])];
-        assert!(plan_waves(&s)
+        assert!(plan_waves(&s, &[])
             .unwrap_err()
             .to_string()
             .contains("duplicate"));
@@ -130,6 +144,16 @@ mod tests {
 
     #[test]
     fn empty_plan_is_no_waves() {
-        assert_eq!(plan_waves(&[]).unwrap(), Vec::<Vec<usize>>::new());
+        assert_eq!(plan_waves(&[], &[]).unwrap(), Vec::<Vec<usize>>::new());
+    }
+
+    #[test]
+    fn completed_dependency_from_a_prior_plan_is_satisfied() {
+        // A replanned subtask depends on id 2, which is NOT in this plan slice but
+        // WAS completed in a prior (pre-replan) plan → valid + ready in wave 0.
+        let s = vec![sub(3, &[2])];
+        assert_eq!(plan_waves(&s, &[2]).unwrap(), vec![vec![0]]);
+        // Without the completed context, the same dep is an unknown-subtask error.
+        assert!(plan_waves(&s, &[]).is_err());
     }
 }

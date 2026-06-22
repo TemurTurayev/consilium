@@ -533,6 +533,98 @@ async fn replan_rescues_a_failed_run() {
 }
 
 #[tokio::test]
+async fn replan_with_cross_plan_depends_on_succeeds() {
+    let repo = temp_repo();
+    let quota = store();
+    // Pass 1: subtask 1 completes, subtask 2 fails → replan. Pass 2: subtask 3
+    // depends_on [1] — a COMPLETED id from the prior plan — must be accepted as a
+    // satisfied edge, not rejected as "invalid plan: ... unknown subtask 1".
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json_with_deps(&[
+                    (1, "ok", "create one.txt", &[]),
+                    (2, "doomed", "create two.txt", &[]),
+                ]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()), // eval subtask 1
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("subtask 2 wrong")), // eval subtask 2
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json_with_deps(&[(3, "build on 1", "create three.txt", &[1])]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()), // eval subtask 3
+        ],
+    ));
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo one > one.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "one")
+            },
+            ScriptedAdapter {
+                pre_script: "echo two > two.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "two")
+            },
+            ScriptedAdapter {
+                pre_script: "echo three > three.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "three")
+            },
+        ],
+    ));
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 1,
+        budget: None,
+    };
+    let outcome = run_conduct(
+        "cross-plan deps",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        outcome.completed.contains(&3),
+        "replanned subtask depending on a completed id must run; got completed={:?} failed={:?}",
+        outcome.completed,
+        outcome.failed
+    );
+    assert!(
+        repo.path().join("three.txt").exists(),
+        "three.txt should exist"
+    );
+    assert!(
+        !outcome
+            .failed
+            .as_deref()
+            .unwrap_or("")
+            .contains("invalid plan"),
+        "must not spuriously reject the cross-plan dependency: {:?}",
+        outcome.failed
+    );
+}
+
+#[tokio::test]
 async fn replan_disabled_by_default_still_fails() {
     let repo = temp_repo();
     let quota = store();

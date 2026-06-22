@@ -330,7 +330,7 @@ pub async fn run_conduct(
         // DAG layering: iterate dependency waves, not raw plan order. An
         // unlayerable plan (cycle / bad edge from the conductor) fails the run
         // cleanly rather than panicking.
-        let waves = match topology::plan_waves(&plan.subtasks) {
+        let waves = match topology::plan_waves(&plan.subtasks, &completed) {
             Ok(w) => w,
             Err(e) => {
                 failed = Some(format!("invalid plan: {e}"));
@@ -1443,7 +1443,7 @@ mod tests {
             st_dep(2, "second", "p2", &[1]),
             st_dep(1, "first", "p1", &[]),
         ];
-        let waves = plan_waves(&plan).unwrap();
+        let waves = plan_waves(&plan, &[]).unwrap();
         let flat: Vec<u32> = waves.iter().flatten().map(|&i| plan[i].id).collect();
         assert_eq!(flat, vec![1, 2], "dependency runs before dependent");
     }

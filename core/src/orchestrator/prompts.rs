@@ -114,7 +114,7 @@ pub fn conduct_replan(
          naming conventions, and the specific edge cases and acceptance tests that \
          define \"done\" (a vague \"implement X\" fails). Do NOT redo already-completed work. \
          Number the new subtasks with fresh ids that continue AFTER the highest id \
-         in the completed work above (never reuse a completed id). Design subtasks so \
+         in the completed work above (never reuse a completed or skipped id). Design subtasks so \
          they touch DISJOINT files, and give each a `depends_on` array of the ids it \
          requires (use ids from the completed work above when a new subtask builds on \
          finished work; empty for independent subtasks).\n\n\
@@ -319,7 +319,7 @@ mod tests {
         let p = conduct_replan("task", "ctx", "done: subtask 1", "subtask 2 failed");
         assert!(p.contains("RESTATE every concrete constraint"));
         assert!(p.contains("subtask 2 failed")); // failure_reason interpolated
-        assert!(p.contains("never reuse a completed id")); // replan invariant preserved
+        assert!(p.contains("never reuse a completed or skipped id")); // replan invariant preserved
     }
 
     #[test]
