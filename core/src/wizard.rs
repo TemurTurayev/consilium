@@ -4,9 +4,15 @@
 //! shell (added next) is not (it drives `dialoguer` + live probes, like
 //! `doctor::probe_model`).
 
+use crate::auth::{self, ProviderAuth};
+use crate::catalog::{catalog, CatalogEntry};
 use crate::config::Config;
 use crate::config::RolesConfig;
 use crate::event::Provider;
+use crate::quota::QuotaStore;
+use crate::recommend::recommend_roles;
+use dialoguer::{Confirm, Select};
+use std::path::Path;
 
 /// Distinct providers a resolved lineup uses, across every role's primary AND
 /// fallback rungs, in stable first-seen order. Used to tell the user which
@@ -44,6 +50,145 @@ pub fn build_config(roles: RolesConfig) -> Config {
         roles,
         ..Config::default()
     }
+}
+
+/// Run the interactive onboarding wizard: preview → choose Default/Custom →
+/// auth gate (detect + guide, degrade) → write `consilium.config.json`. Returns
+/// Err only on I/O failure or zero ready providers. Not unit-tested (drives
+/// `dialoguer` + live probes); proven by an operator dogfood.
+pub async fn run_init_wizard(quota: &QuotaStore, target: &Path, force: bool) -> anyhow::Result<()> {
+    // 1. Overwrite guard.
+    if target.exists() && !force {
+        let overwrite = Confirm::new()
+            .with_prompt(format!("{} exists — overwrite?", target.display()))
+            .default(false)
+            .interact()?;
+        if !overwrite {
+            println!("Keeping the existing config. Nothing written.");
+            return Ok(());
+        }
+    }
+
+    // 2. Preview the recommended council (resolved over the full catalog).
+    let recommended = recommend_roles(&catalog())?;
+    println!("\nRecommended council (the Default):");
+    print_lineup(&recommended);
+
+    // 3. Default or Custom.
+    let custom = Select::new()
+        .with_prompt("\nHow do you want to set up roles?")
+        .items(&["Use the Default (recommended)", "Customize each role"])
+        .default(0)
+        .interact()?
+        == 1;
+
+    // 4. Auth gate over all v1 providers (concurrent first probe, then guide).
+    println!("\nChecking provider auth (this spends ~1 token per provider)…");
+    let mut report = auth::auth_report(quota).await;
+    loop {
+        for (p, status) in &report {
+            let mark = if matches!(status, ProviderAuth::Ready) {
+                "✓"
+            } else {
+                "✗"
+            };
+            println!("  {mark} {}", auth::guidance(*p, status));
+        }
+        let all_ready = report.iter().all(|(_, s)| matches!(s, ProviderAuth::Ready));
+        if all_ready {
+            break;
+        }
+        let pick = Select::new()
+            .with_prompt("Some providers aren't ready")
+            .items(&[
+                "Re-check now (after you've logged in)",
+                "Continue with what's ready",
+                "Quit",
+            ])
+            .default(0)
+            .interact()?;
+        match pick {
+            0 => report = auth::auth_report(quota).await,
+            1 => break,
+            _ => anyhow::bail!("onboarding aborted by user"),
+        }
+    }
+
+    // 5. Require >=1 ready; build the available catalog subset.
+    let ready: Vec<Provider> = report
+        .iter()
+        .filter(|(_, s)| matches!(s, ProviderAuth::Ready))
+        .map(|(p, _)| *p)
+        .collect();
+    if ready.is_empty() {
+        anyhow::bail!(
+            "no authenticated providers — run the printed login commands (or `consilium auth`) and try again"
+        );
+    }
+    let available: Vec<CatalogEntry> = catalog()
+        .into_iter()
+        .filter(|e| ready.contains(&e.provider))
+        .collect();
+
+    // 6. Resolve roles.
+    let roles = if custom {
+        customize_roles(&available)?
+    } else {
+        recommend_roles(&available)?
+    };
+
+    // 7. Write config.
+    let cfg = build_config(roles);
+    std::fs::write(target, cfg.to_pretty_json()?)?;
+    println!("\n✓ wrote {}", target.display());
+    print_lineup(&cfg.roles);
+    println!("\nVerify any time with: consilium doctor --models");
+    Ok(())
+}
+
+/// Per-role custom picker: for each role, Select a model from `available`
+/// (default-highlighting the first). `available` is non-empty.
+fn customize_roles(available: &[CatalogEntry]) -> anyhow::Result<crate::config::RolesConfig> {
+    use crate::config::RoleConfig;
+    let labels: Vec<String> = available
+        .iter()
+        .map(|e| format!("{}/{}", e.provider.as_str(), e.model))
+        .collect();
+    let pick_role = |prompt: &str| -> anyhow::Result<RoleConfig> {
+        let idx = Select::new()
+            .with_prompt(prompt)
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        let e = &available[idx];
+        Ok(RoleConfig::new(e.provider, &e.model))
+    };
+    let conductor = pick_role("Conductor (plans + reviews)")?;
+    let chairman = pick_role("Chairman (final synthesis)")?;
+    let reviewer = pick_role("Reviewer (audits diffs)")?;
+    let supervisor = pick_role("Supervisor (watches for trouble)")?;
+    let worker = pick_role("Worker (writes the code)")?;
+    Ok(crate::config::RolesConfig {
+        conductor,
+        chairman,
+        workers: vec![worker],
+        reviewer,
+        supervisor,
+    })
+}
+
+/// Print a one-line-per-role summary of a lineup.
+fn print_lineup(roles: &crate::config::RolesConfig) {
+    fn line(label: &str, r: &crate::config::RoleConfig) {
+        println!("  {label:<11} {}/{}", r.provider.as_str(), r.model);
+    }
+    line("conductor", &roles.conductor);
+    line("chairman", &roles.chairman);
+    for (i, w) in roles.workers.iter().enumerate() {
+        line(&format!("worker {}", i + 1), w);
+    }
+    line("reviewer", &roles.reviewer);
+    line("supervisor", &roles.supervisor);
 }
 
 #[cfg(test)]
