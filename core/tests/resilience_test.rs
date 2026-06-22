@@ -314,6 +314,7 @@ async fn backoff_is_applied_before_each_retry() {
     let health = ModelHealth::with_retry(RetryConfig {
         backoff_base: Duration::from_millis(60),
         max_retries: 2,
+        cold_after: 0,
     });
     let ladder = vec![rung(
         Provider::Claude,
@@ -345,4 +346,72 @@ async fn backoff_is_applied_before_each_retry() {
         elapsed >= Duration::from_millis(180),
         "two backoffs (60ms + 120ms) must elapse; got {elapsed:?}"
     );
+}
+
+// Rate-limit circuit-breaker: after `cold_after` RateLimited rung-failures across
+// the run, the rung is marked cold and skipped fast (without an attempt) for the
+// rest of the run — so a throttled provider isn't hammered every subtask. It is
+// NOT marked dead (rate-limit is recoverable). (claw-code-agent #3, deferred half)
+#[tokio::test]
+async fn rate_limit_circuit_breaker_trips_cold_after_threshold() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    // cold_after=2, no same-rung retries → each run = exactly one rung-failure.
+    let health = ModelHealth::with_retry(RetryConfig {
+        backoff_base: Duration::ZERO,
+        max_retries: 0,
+        cold_after: 2,
+    });
+    let ladder = vec![
+        rung(
+            Provider::Claude,
+            "opus",
+            Arc::new(ScriptedAdapter::failing(
+                Provider::Claude,
+                "Claude usage limit reached; try again later",
+            )),
+        ),
+        rung(
+            Provider::Claude,
+            "sonnet",
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Claude, "recovered")),
+        ),
+    ];
+    // Runs 1-2: opus rate-limits → demotes to sonnet; run 2 trips the breaker.
+    for _ in 0..2 {
+        let res = run_with_failover(
+            &ladder,
+            "conductor",
+            req,
+            &store,
+            &health,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.rung_used, 1);
+    }
+    assert!(
+        health.is_cold(Provider::Claude, "opus"),
+        "opus cold after 2 rate-limits"
+    );
+    assert!(
+        !health.is_dead(Provider::Claude, "opus"),
+        "rate-limit is not death"
+    );
+    // Run 3: opus is cold → skipped fast, fallback recorded with the cold reason.
+    let res = run_with_failover(
+        &ladder,
+        "conductor",
+        req,
+        &store,
+        &health,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.rung_used, 1);
+    assert!(res
+        .fallbacks
+        .iter()
+        .any(|f| f.reason.contains("rate-limit-cold")));
 }
