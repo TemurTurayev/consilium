@@ -79,11 +79,15 @@ enum Command {
         #[arg(long, default_value_t = 900)]
         timeout: u64,
     },
-    /// Write a starter consilium.config.json in the current directory
+    /// Set up consilium.config.json. With no flags, runs the interactive
+    /// onboarding wizard; --yes writes the recommended lineup non-interactively.
     Init {
-        /// Overwrite an existing consilium.config.json
+        /// Overwrite an existing consilium.config.json without asking.
         #[arg(long)]
         force: bool,
+        /// Skip the wizard: write the recommended council non-interactively (CI/scripts).
+        #[arg(long)]
+        yes: bool,
     },
     /// Run as an MCP server over stdio (attached-conductor mode). Register this
     /// in your interactive Claude Code session to drive workers via the
@@ -669,18 +673,27 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Command::Init { force } => {
+        Command::Init { force, yes } => {
+            use std::io::IsTerminal;
             let target = std::env::current_dir()?.join("consilium.config.json");
-            if target.exists() && !force {
-                eprintln!("consilium.config.json already exists; use --force to overwrite");
-                std::process::exit(1);
+            // Non-interactive when --yes, or when stdin isn't a TTY (CI/pipes) —
+            // never hang a wizard waiting on input that won't come.
+            if yes || !std::io::stdin().is_terminal() {
+                if target.exists() && !force {
+                    eprintln!("consilium.config.json already exists; use --force to overwrite");
+                    std::process::exit(1);
+                }
+                let roles = consilium::recommend::recommend_roles(&consilium::catalog::catalog())?;
+                let cfg = consilium::wizard::build_config(roles);
+                std::fs::write(&target, cfg.to_pretty_json()?)?;
+                let n_roles = 2 + cfg.roles.workers.len() + 1 + 1;
+                println!(
+                    "wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)"
+                );
+            } else {
+                let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+                consilium::wizard::run_init_wizard(&store, &target, force).await?;
             }
-            let cfg = consilium::config::Config::default();
-            let json = cfg.to_pretty_json()?;
-            // Count roles: conductor + chairman + workers + reviewer + supervisor
-            let n_roles = 2 + cfg.roles.workers.len() + 1 + 1;
-            std::fs::write(&target, &json)?;
-            println!("wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)");
         }
         Command::Mcp => {
             // The MCP server owns stdout for JSON-RPC; logs already go to stderr
