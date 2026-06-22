@@ -3,4 +3,9 @@
 /**
  * Per-provider token usage over the reporting window.
  */
-export type ProviderUsage = { input_tokens: number, output_tokens: number, };
+export type ProviderUsage = { input_tokens: number, output_tokens: number, 
+/**
+ * True when these tokens are heuristic estimates (the provider's CLI reports
+ * no usage, e.g. Gemini via the Antigravity `agy` CLI) rather than measured.
+ */
+estimated: boolean, };

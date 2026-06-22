@@ -58,6 +58,9 @@ pub struct ProviderUsage {
     pub input_tokens: u64,
     #[ts(type = "number")]
     pub output_tokens: u64,
+    /// True when these tokens are heuristic estimates (the provider's CLI reports
+    /// no usage, e.g. Gemini via the Antigravity `agy` CLI) rather than measured.
+    pub estimated: bool,
 }
 
 /// A snapshot of quota usage per provider over the rolling window — served at

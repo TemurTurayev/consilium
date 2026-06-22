@@ -99,9 +99,13 @@ pub fn quota_snapshot(quota: &QuotaStore) -> QuotaSnapshot {
     let since = crate::quota::unix_now() - crate::quota::WINDOW_SECS;
     let usage = |provider: Provider| -> ProviderUsage {
         let (input_tokens, output_tokens) = quota.totals_since(provider, since).unwrap_or((0, 0));
+        let (est_in, est_out) = quota
+            .estimated_totals_since(provider, since)
+            .unwrap_or((0, 0));
         ProviderUsage {
             input_tokens,
             output_tokens,
+            estimated: est_in + est_out > 0,
         }
     };
     QuotaSnapshot {
@@ -264,5 +268,13 @@ mod tests {
         assert_eq!(snap.codex.input_tokens, 7);
         assert_eq!(snap.claude.input_tokens, 0);
         assert_eq!(snap.claude.output_tokens, 0);
+        // Measured-only providers are not flagged estimated.
+        assert!(!snap.gemini.estimated && !snap.codex.estimated);
+
+        // An estimated row (agy/Gemini) flips the flag.
+        quota.record_estimated(Provider::Gemini, 5, 1).unwrap();
+        let snap2 = quota_snapshot(&quota);
+        assert!(snap2.gemini.estimated, "gemini now has an estimated row");
+        assert!(!snap2.codex.estimated, "codex stays measured-only");
     }
 }
