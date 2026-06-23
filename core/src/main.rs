@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -130,6 +130,26 @@ enum Command {
     },
 }
 
+fn print_welcome() {
+    println!(
+        r#"Consilium — your AI coding council.
+One command, several AI agents: your smartest model plans and reviews,
+cheaper models write the code — all on the subscriptions you already pay for.
+
+New here?
+  consilium init          set up your council (takes ~2 minutes)
+
+Then try your first task:
+  consilium conduct "add a function that reverses a string, with a test"
+
+Or ask your council a question:
+  consilium council "what's the cleanest way to handle errors in Rust?"
+
+More:  auth · doctor · quota · review · auto · serve
+Run `consilium <command> --help` for details on any command."#
+    );
+}
+
 fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
     let home = std::env::var("HOME")
         .map_err(|_| anyhow::anyhow!("$HOME is not set; cannot locate ~/.consilium/usage.db"))?;
@@ -147,7 +167,14 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
-    match cli.command {
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            print_welcome();
+            return Ok(());
+        }
+    };
+    match command {
         Command::Doctor { models } => {
             let mut all_ok = true;
             // check_with_path uses std::process::Command (blocking); acceptable for a
@@ -435,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
                     .any(|candidate| report.is_alive(candidate.provider, &candidate.model))
                 {
                     eprintln!(
-                        "preflight: the conductor has no reachable model — re-authenticate the relevant CLI or fix consilium.config.json (run `consilium doctor --models` for detail)"
+                        "preflight: the conductor has no reachable model — re-authenticate the relevant CLI or fix consilium.config.json (run `consilium doctor --models` for detail) — or run `consilium init` to set up your council from scratch."
                     );
                     std::process::exit(1);
                 }
@@ -549,7 +576,7 @@ async fn main() -> anyhow::Result<()> {
                     .any(|candidate| report.is_alive(candidate.provider, &candidate.model))
                 {
                     eprintln!(
-                        "preflight: the conductor has no reachable model — re-authenticate the relevant CLI or fix consilium.config.json (run `consilium doctor --models` for detail)"
+                        "preflight: the conductor has no reachable model — re-authenticate the relevant CLI or fix consilium.config.json (run `consilium doctor --models` for detail) — or run `consilium init` to set up your council from scratch."
                     );
                     std::process::exit(1);
                 }
@@ -691,6 +718,7 @@ async fn main() -> anyhow::Result<()> {
                     "wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)"
                 );
                 println!("Next: authenticate providers with `consilium auth`, then verify with `consilium doctor --models`.");
+                println!("Then run your first task:  consilium conduct \"add a hello() function with a test\"");
             } else {
                 let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
                 consilium::wizard::run_init_wizard(&store, &target, force).await?;

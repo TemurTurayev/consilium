@@ -51,49 +51,82 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **M3 (rest) — dashboards** | quota dashboard + **Council view** in the web UI | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
-## Quick start
+## Install
 
-Prerequisites: Rust ≥ 1.85 and at least one of the agent CLIs installed and logged in (`claude`, `codex`, `agy`). The `gemini` provider is driven through Antigravity's `agy` CLI (the standalone Gemini CLI is retired).
+You need at least one agent CLI installed and authenticated (`claude`, `codex`, or `agy`). Pick the install path that suits you:
 
-```bash
+### 1. Prebuilt binary — macOS / Linux (no Rust needed)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TemurTurayev/consilium/main/install.sh | sh
+```
+
+_(Prebuilt binaries publish on each tagged release; if you get a 404, the project hasn't cut its first release yet — use one of the options below.)_
+
+The script auto-detects your platform (macOS arm64/x86\_64, Linux x86\_64), installs the binary to `~/.local/bin/consilium`, and tells you if you need to add it to `$PATH`.
+
+### 2. With Rust (works today, no git clone needed)
+
+```sh
+cargo install --git https://github.com/TemurTurayev/consilium consilium
+```
+
+### 3. From source
+
+```sh
 git clone https://github.com/TemurTurayev/consilium.git
 cd consilium
 cargo build --release
+# binary is at target/release/consilium — add it to your PATH or run via cargo run -q --
+```
 
+---
+
+Once installed, start here:
+
+```bash
+consilium init      # set up your council — pick models, authenticate, done
+```
+
+## Quick start
+
+Prerequisites: at least one of the agent CLIs installed and logged in (`claude`, `codex`, `agy`). The `gemini` provider is driven through Antigravity's `agy` CLI (the standalone Gemini CLI is retired).
+
+```bash
 # Start here: the onboarding wizard. Pick your council (or accept the Default),
 # authenticate the providers it needs (it detects what's missing and tells you
 # the exact command to run), and it writes consilium.config.json for you.
-cargo run -q -- init
+consilium init
 
-cargo run -q -- doctor                                    # check agent CLIs
-cargo run -q -- run --provider gemini "Reply with: ok"    # single-agent smoke run
-cargo run -q -- quota                                     # usage in the last 5h window
+consilium doctor                                    # check agent CLIs
+consilium run --provider gemini "Reply with: ok"    # single-agent smoke run
+consilium quota                                     # usage in the last 5h window
 
 # The flagship: convene a council — workers answer independently, cross-review
 # each other anonymously, the chairman synthesizes the best answer.
-cargo run -q -- council "Async Rust: when is spawning a task per request wrong?"
+consilium council "Async Rust: when is spawning a task per request wrong?"
 
 # Audit a diff with the reviewer role. Exit codes: 0 no critical findings,
 # 2 critical findings, 3 reviewer output unparseable (fails closed).
-git diff | cargo run -q -- review --diff-file /dev/stdin
+git diff | consilium review --diff-file /dev/stdin
 
 # Execution: a conductor decomposes the task, routes subtasks to the worker
 # with the freest quota, each worker edits real files, a reviewer audits the
 # diff, and a supervisor watches. Runs in a git repo.
-cargo run -q -- conduct "Add a CHANGELOG.md with a 0.1.0 entry"
+consilium conduct "Add a CHANGELOG.md with a 0.1.0 entry"
 
 # The full pipeline: triage → (council plan if non-trivial) → conduct → optional
 # check command (runs in a shell). Exit 1 if the run fails, is halted, or the
 # check fails.
-cargo run -q -- auto "Fix the typo in README.md" --check "cargo test"
+consilium auto "Fix the typo in README.md" --check "cargo test"
 
 # Check provider auth on demand (probes liveness; prints the exact login step
 # for anything not ready), and probe which configured models are reachable.
-cargo run -q -- auth
-cargo run -q -- doctor --models
+consilium auth
+consilium doctor --models
 
 # Non-interactive setup (CI/scripts): write the recommended council without prompts.
-cargo run -q -- init --yes
+consilium init --yes
 ```
 
 ## Grounded execution: conduct trusts your tests, not vibes
@@ -300,7 +333,7 @@ the anonymization map and per-reviewer scores, so you can audit who said what
 (and whether an agent favored its own anonymized answer).
 
 ```
-$ cargo run -q -- doctor
+$ consilium doctor
 ✓ claude   2.1.111 (Claude Code)
 ✓ codex    codex-cli 0.139.0
 ✓ agy      1.0.10            (Antigravity — drives the gemini provider)

@@ -73,6 +73,13 @@ pub async fn run_init_wizard(quota: &QuotaStore, target: &Path, force: bool) -> 
     let recommended = recommend_roles(&catalog())?;
     println!("\nRecommended council (the Default):");
     print_lineup(&recommended);
+    println!();
+    println!("  What each role does:");
+    println!("    conductor  — plans the work and reviews every change (your smartest model)");
+    println!("    chairman   — makes the final call when the models disagree");
+    println!("    worker     — writes the actual code (cheaper, faster models)");
+    println!("    reviewer   — double-checks each change for bugs");
+    println!("    supervisor — watches the whole run and flags trouble");
 
     // 3. Default or Custom.
     let custom = Select::new()
@@ -142,7 +149,16 @@ pub async fn run_init_wizard(quota: &QuotaStore, target: &Path, force: bool) -> 
     std::fs::write(target, cfg.to_pretty_json()?)?;
     println!("\n✓ wrote {}", target.display());
     print_lineup(&cfg.roles);
-    println!("\nVerify any time with: consilium doctor --models");
+    println!();
+    println!("🎉 You're all set — your council is ready.");
+    println!();
+    println!("Try your first task:");
+    println!("  consilium conduct \"add a hello() function in src/lib.rs with a test\"");
+    println!();
+    println!("Or ask your council a question:");
+    println!("  consilium council \"when should I reach for async in Rust?\"");
+    println!();
+    println!("Anytime: `consilium doctor --models` checks every model is reachable.");
     Ok(())
 }
 
