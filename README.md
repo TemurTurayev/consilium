@@ -80,6 +80,10 @@ cargo build --release
 # binary is at target/release/consilium — add it to your PATH or run via cargo run -q --
 ```
 
+### 4. Windows — use WSL
+
+Consilium drives the official agent CLIs, which are Linux/macOS-first. On Windows, run it inside [WSL](https://learn.microsoft.com/windows/wsl/install) (a real Ubuntu inside Windows): open your WSL shell and follow the **Prebuilt binary** or **Rust** steps above — everything works exactly as on Linux. _(Native Windows isn't supported yet: the build/test grounding shells out to `sh`, and the agent CLIs are `.cmd` shims Rust won't spawn directly.)_
+
 ---
 
 Once installed, start here:
