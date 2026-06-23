@@ -20,7 +20,8 @@ use crate::protocol::{ProviderUsage, QuotaSnapshot, ServerFrame, SessionRequest}
 use crate::quota::QuotaStore;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
@@ -39,26 +40,40 @@ pub struct ServerState {
     deps_fn: Arc<DepsFn>,
     quota: Arc<QuotaStore>,
     timeout: Duration,
+    /// The directory `consilium serve` was launched in. Client-supplied `cwd`
+    /// values are validated to be within this root before any run is started.
+    launch_root: Arc<PathBuf>,
 }
 
 impl ServerState {
-    /// Production: resolve `ConductDeps` from config on each run.
+    /// Production: resolve `ConductDeps` from config on each run. The
+    /// `launch_root` is captured once at startup from the process working dir.
     pub fn from_config(config: Config, quota: QuotaStore, timeout: Duration) -> Self {
         let config = Arc::new(config);
         Self {
             deps_fn: Arc::new(move || build_conduct_deps(&config)),
             quota: Arc::new(quota),
             timeout,
+            launch_root: Arc::new(std::env::current_dir().unwrap_or_default()),
         }
     }
 
     /// Tests: supply a `ConductDeps` builder (e.g. scripted adapters) directly.
+    /// The `launch_root` defaults to the process cwd; pass a custom one via
+    /// [`ServerState::with_launch_root`] when the test uses a temp dir as cwd.
     pub fn from_parts(deps_fn: Arc<DepsFn>, quota: QuotaStore, timeout: Duration) -> Self {
         Self {
             deps_fn,
             quota: Arc::new(quota),
             timeout,
+            launch_root: Arc::new(std::env::current_dir().unwrap_or_default()),
         }
+    }
+
+    /// Override the launch root (used in tests that run agents in a temp dir).
+    pub fn with_launch_root(mut self, root: PathBuf) -> Self {
+        self.launch_root = Arc::new(root);
+        self
     }
 }
 
@@ -84,7 +99,56 @@ pub async fn serve(
     Ok(())
 }
 
-async fn ws_session(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
+/// True if a WebSocket upgrade with this `Origin` header value is allowed.
+/// Absent Origin (non-browser clients) is allowed; a present Origin is allowed
+/// only when its host is loopback (localhost / 127.0.0.1 / ::1). This blocks a
+/// malicious web page from driving the local server cross-origin (CSRF / DNS-rebind).
+fn origin_allowed(origin: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    // origin looks like "http://localhost:5173" or "https://evil.com"
+    let host = origin
+        .split("://")
+        .nth(1)
+        .unwrap_or(origin)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    // strip port
+    let host_no_port = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    matches!(host_no_port, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+/// True if `requested` resolves to a path inside `root` (the dir `serve` was
+/// launched in). Both are canonicalized; a path that cannot be canonicalized
+/// (e.g. doesn't exist) is rejected. Prevents a client from pointing
+/// write-enabled agents outside the server's working tree.
+fn cwd_within_root(requested: &std::path::Path, root: &std::path::Path) -> bool {
+    match (requested.canonicalize(), root.canonicalize()) {
+        (Ok(req), Ok(rt)) => req.starts_with(&rt),
+        _ => false,
+    }
+}
+
+async fn ws_session(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+) -> Response {
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+    if !origin_allowed(origin) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "cross-origin WebSocket rejected",
+        )
+            .into_response();
+    }
     ws.on_upgrade(move |socket| handle_session(socket, state))
 }
 
@@ -171,9 +235,17 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
 
     match req {
         SessionRequest::Conduct { task, context, cwd } => {
-            let cwd = cwd
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let root = state.launch_root.as_ref();
+            let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+            if !cwd_within_root(&cwd, root) {
+                let frame = ServerFrame::Error {
+                    error: "cwd is outside the server's working directory; refusing to run".into(),
+                };
+                let _ = term_tx.send(serde_json::to_string(&frame).unwrap_or_default());
+                drop(term_tx);
+                let _ = writer.await;
+                return;
+            }
             let deps = (state.deps_fn)();
             let health = ModelHealth::new();
             let result = PROGRESS_SINK
@@ -241,6 +313,82 @@ fn build_conduct_deps(config: &Config) -> ConductDeps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── origin_allowed ────────────────────────────────────────────────────────
+
+    #[test]
+    fn origin_allowed_none_permits_non_browser_clients() {
+        assert!(origin_allowed(None));
+    }
+
+    #[test]
+    fn origin_allowed_localhost_port() {
+        assert!(origin_allowed(Some("http://localhost:5173")));
+    }
+
+    #[test]
+    fn origin_allowed_loopback_ipv4_port() {
+        assert!(origin_allowed(Some("http://127.0.0.1:7878")));
+    }
+
+    #[test]
+    fn origin_allowed_loopback_ipv6_bracketed() {
+        assert!(origin_allowed(Some("http://[::1]:8080")));
+    }
+
+    #[test]
+    fn origin_allowed_rejects_external_domain() {
+        assert!(!origin_allowed(Some("https://evil.com")));
+    }
+
+    #[test]
+    fn origin_allowed_rejects_localhost_subdomain() {
+        assert!(!origin_allowed(Some("http://localhost.evil.com")));
+    }
+
+    #[test]
+    fn origin_allowed_rejects_attacker_subdomain_of_localhost() {
+        assert!(!origin_allowed(Some("https://localhost.attacker.com:80")));
+    }
+
+    // ── cwd_within_root ───────────────────────────────────────────────────────
+
+    #[test]
+    fn cwd_within_root_root_itself_is_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(cwd_within_root(root.path(), root.path()));
+    }
+
+    #[test]
+    fn cwd_within_root_subdir_is_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        let sub = root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(cwd_within_root(&sub, root.path()));
+    }
+
+    #[test]
+    fn cwd_within_root_parent_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().parent().unwrap();
+        assert!(!cwd_within_root(parent, root.path()));
+    }
+
+    #[test]
+    fn cwd_within_root_unrelated_temp_dir_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        assert!(!cwd_within_root(other.path(), root.path()));
+    }
+
+    #[test]
+    fn cwd_within_root_nonexistent_path_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("does_not_exist");
+        assert!(!cwd_within_root(&missing, root.path()));
+    }
+
+    // ── existing tests ────────────────────────────────────────────────────────
 
     #[test]
     fn ws_sink_forwards_serialized_events() {

@@ -38,7 +38,7 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **M2b — Execution** | `conduct` (conductor decomposes → workers edit real files → review gate → arbiter), `auto` pipeline, supervisor, quota-aware routing | ✅ Done — verified on live providers |
 | **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — verified against a live model outage |
 | **Harness leveling (P0)** | build/test **grounding**, **ConductorMemory** (plan ledger + attempt history), **worker blackboard** | ✅ Done — research-backed |
-| **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing `run_worker` + `quota_status` + `review_diff` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
+| **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing six tools: `run_worker`, `quota_status`, `review_diff`, `council_run`, `search_recall`, `page_in` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
 | **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
 | **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
@@ -47,7 +47,8 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **Onboarding foundation** | curated provider **catalog** (per-role recommendation scores + auth metadata) + a pure **recommendation resolver** (authed+available → best-model-per-role `RolesConfig`, graceful single-provider degradation) | ✅ Done — `consilium init` wiring + auth wizard are follow-on slices |
 | **Auth orchestrator** | `consilium auth` — probes each provider's liveness and prints the exact "detect + guide" next step (`claude setup-token` / `codex login` / `agy login`); concurrent probes | ✅ Done — the `init` wizard (slice 4) consumes it |
 | **Onboarding wizard** | `consilium init` — interactive: preview the recommended council → auth providers (detect + guide, degrade to what's ready) → write `consilium.config.json`; `--yes` writes the recommended lineup non-interactively | ✅ Done — completes the pick-your-council onboarding |
-| **M3 (rest) — MCP tools, memory, dashboards** | `council_run` MCP tool, memory/recitation tools, quota dashboard + Council view | 🚧 Next |
+| **M3d — MCP tools & memory** | `council_run` MCP tool, `search_recall` + `page_in` memory/recitation tools | ✅ Done — shipped in M3a server |
+| **M3 (rest) — dashboards** | quota dashboard + **Council view** in the web UI | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Quick start
@@ -162,6 +163,11 @@ primitives as tools your session calls:
   read-only audit; returns structured findings (`parse_ok:false` ⇒ unusable
   review, fail closed; `has_critical:true` ⇒ blocking). For a true cross-family
   check, configure a reviewer of a different family than the worker.
+- **`council_run`** — convene the full council (workers answer independently,
+  anonymized cross-review, chairman synthesis) from inside your session.
+- **`search_recall`** — query the run-memory store for prior subtask results
+  relevant to a search term (memory/recitation tools).
+- **`page_in`** — fetch the full stored text of a specific memory entry by id.
 
 Register it in a Claude Code session (`.mcp.json` or `claude mcp add`):
 
@@ -171,8 +177,7 @@ Register it in a Claude Code session (`.mcp.json` or `claude mcp add`):
 
 Then ask your session to delegate: it decides *what* to hand off and whether to
 accept; the engine executes. Logs go to stderr so they never corrupt the stdio
-protocol. (M3a — the remaining MCP tools, the WebSocket server, and the web UI
-are the next M3 slices.)
+protocol.
 
 ## Live run streaming (`consilium serve`)
 

@@ -690,6 +690,7 @@ async fn main() -> anyhow::Result<()> {
                 println!(
                     "wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)"
                 );
+                println!("Next: authenticate providers with `consilium auth`, then verify with `consilium doctor --models`.");
             } else {
                 let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
                 consilium::wizard::run_init_wizard(&store, &target, force).await?;

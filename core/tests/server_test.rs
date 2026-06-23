@@ -92,7 +92,8 @@ async fn ws_streams_conduct_events_then_terminal_frame() {
         deps_fn,
         QuotaStore::open_in_memory().unwrap(),
         Duration::from_secs(30),
-    );
+    )
+    .with_launch_root(repo.path().to_path_buf());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -221,7 +222,8 @@ async fn ws_run_error_terminal_frame_on_failed_run() {
         deps_fn,
         QuotaStore::open_in_memory().unwrap(),
         Duration::from_secs(30),
-    );
+    )
+    .with_launch_root(repo.path().to_path_buf());
     let addr = spawn_server(state).await;
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/session"))
