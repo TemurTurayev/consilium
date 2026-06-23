@@ -35,8 +35,15 @@ pub fn cli_binary(p: Provider) -> &'static str {
 pub fn is_auth_failure(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
     d.contains("401")
+        || d.contains("403")
         || d.contains("authenticat")
         || d.contains("unauthor")
+        || d.contains("forbidden")
+        || d.contains("permission_denied")
+        || d.contains("permission denied")
+        || d.contains("token expired")
+        || d.contains("session expired")
+        || d.contains("expired")
         || d.contains("credential")
         || d.contains("setup-token")
         || d.contains("not logged in")
@@ -138,6 +145,12 @@ mod tests {
         assert!(is_auth_failure("invalid credentials"));
         assert!(is_auth_failure("Please log in to continue"));
         assert!(is_auth_failure("run claude setup-token"));
+        // 403 / permission-denied / expired shapes (Codex org/tier, Gemini PERMISSION_DENIED)
+        assert!(is_auth_failure("API Error: 403 Forbidden"));
+        assert!(is_auth_failure("permission_denied"));
+        assert!(is_auth_failure("Your token has expired"));
+        assert!(is_auth_failure("session expired"));
+        // non-auth failures must not be mis-classified
         assert!(!is_auth_failure("rate limit exceeded"));
         assert!(!is_auth_failure("connection timed out"));
     }
