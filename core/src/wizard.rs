@@ -148,6 +148,9 @@ pub async fn run_init_wizard(quota: &QuotaStore, target: &Path, force: bool) -> 
 
 /// Per-role custom picker: for each role, Select a model from `available`
 /// (default-highlighting the first). `available` is non-empty.
+///
+/// Workers use the recommended pool (same two-worker selection as the Default
+/// path). Per-worker customization is a future enhancement.
 fn customize_roles(available: &[CatalogEntry]) -> anyhow::Result<crate::config::RolesConfig> {
     use crate::config::RoleConfig;
     let labels: Vec<String> = available
@@ -167,11 +170,11 @@ fn customize_roles(available: &[CatalogEntry]) -> anyhow::Result<crate::config::
     let chairman = pick_role("Chairman (final synthesis)")?;
     let reviewer = pick_role("Reviewer (audits diffs)")?;
     let supervisor = pick_role("Supervisor (watches for trouble)")?;
-    let worker = pick_role("Worker (writes the code)")?;
+    let workers = recommend_roles(available)?.workers;
     Ok(crate::config::RolesConfig {
         conductor,
         chairman,
-        workers: vec![worker],
+        workers,
         reviewer,
         supervisor,
     })
