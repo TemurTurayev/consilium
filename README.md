@@ -31,6 +31,8 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 
 ## Status
 
+**v0.1.0 — beta.** One-line install on macOS (Apple Silicon + Intel) and Linux (see [Install](#install)). The orchestration engine, resilience/failover, grounded execution, onboarding (`init` / `auth`), and the MCP + live-streaming + web-UI surfaces are all shipped and verified on live providers; `conduct` was benchmarked at solo's pass-rate on ~⅓ the Claude tokens.
+
 | Milestone | Scope | State |
 |---|---|---|
 | **M1 — Engine foundation** | CLI adapters, session manager, quota store, `doctor`/`run`/`quota` commands | ✅ Done — verified E2E |
@@ -48,7 +50,8 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **Auth orchestrator** | `consilium auth` — probes each provider's liveness and prints the exact "detect + guide" next step (`claude setup-token` / `codex login` / `agy login`); concurrent probes | ✅ Done — the `init` wizard (slice 4) consumes it |
 | **Onboarding wizard** | `consilium init` — interactive: preview the recommended council → auth providers (detect + guide, degrade to what's ready) → write `consilium.config.json`; `--yes` writes the recommended lineup non-interactively | ✅ Done — completes the pick-your-council onboarding |
 | **M3d — MCP tools & memory** | `council_run` MCP tool, `search_recall` + `page_in` memory/recitation tools | ✅ Done — shipped in M3a server |
-| **M3 (rest) — dashboards** | quota dashboard + **Council view** in the web UI | 🚧 Next |
+| **Web UI — Usage dashboard** | per-provider token-usage panel (`GET /api/quota` + React, with `(est.)` markers for estimated tokens) | ✅ Done |
+| **Web UI — Council view** | a live council-deliberation view (the next web-UI slice) | 🚧 Next |
 | v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
 
 ## Install
