@@ -42,7 +42,7 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
 | **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
-| **M-eval — Benchmark harness (Slice A)** | `consilium eval` scores orchestration **approaches** (solo / conduct / ±grounding / ±cross-family) by an *independent* build/test verifier; dry-run by default | ✅ Harness done — live numbers are an opt-in run |
+| **M-eval — Benchmark harness (Slice A)** | `consilium eval` scores orchestration **approaches** (solo / conduct / ±grounding / ±cross-family) by an *independent* build/test verifier; dry-run by default | ✅ Done — first live run (N=1, 4 tasks): `conduct` = solo pass-rate on ~⅓ the Claude tokens |
 | **Fan-out DAG (Phase A)** | `conduct` subtasks carry explicit `depends_on` edges, run in dependency-order **waves**, and a failed subtask **isolates** to its dependents (recorded `skipped`) instead of aborting the run | ✅ Done — sequential; per-wave parallelism + worktree isolation is Phase B |
 | **Onboarding foundation** | curated provider **catalog** (per-role recommendation scores + auth metadata) + a pure **recommendation resolver** (authed+available → best-model-per-role `RolesConfig`, graceful single-provider degradation) | ✅ Done — `consilium init` wiring + auth wizard are follow-on slices |
 | **Auth orchestrator** | `consilium auth` — probes each provider's liveness and prints the exact "detect + guide" next step (`claude setup-token` / `codex login` / `agy login`); concurrent probes | ✅ Done — the `init` wizard (slice 4) consumes it |
@@ -61,7 +61,7 @@ You need at least one agent CLI installed and authenticated (`claude`, `codex`, 
 curl -fsSL https://raw.githubusercontent.com/TemurTurayev/consilium/main/install.sh | sh
 ```
 
-_(Prebuilt binaries publish on each tagged release; if you get a 404, the project hasn't cut its first release yet — use one of the options below.)_
+_(macOS arm64 + Intel and Linux x86_64 binaries ship with every release — currently [v0.1.0](https://github.com/TemurTurayev/consilium/releases/latest).)_
 
 The script auto-detects your platform (macOS arm64/x86\_64, Linux x86\_64), installs the binary to `~/.local/bin/consilium`, and tells you if you need to add it to `$PATH`.
 
@@ -279,7 +279,9 @@ benchmark can't pollute your usage. Tasks live in `eval/tasks/<name>/` (a
 `task.json` + a `repo/` whose committed test fails until the change is made).
 Results print as a markdown table (`k/N` + stability + median tokens) and save to
 JSON. The cleanest single-variable claim is `conduct` vs `conduct-no-grounding` —
-same external scorer, only the grounding gate differs. See
+same external scorer, only the grounding gate differs.
+
+**First live run** (`--spend-quota`, 4 tasks, N=1): `solo`, `conduct`, and `conduct-no-grounding` all passed **4/4** — and `conduct` did it on **~76K Claude tokens vs solo's ~220K** (the build work offloads to Codex/Gemini). Same correctness, a third of the expensive Claude quota. N=1 can't separate *quality* (everything passed), but the token-cost delta is the headline — raise `--trials` for tighter numbers. See
 `docs/plans/2026-06-18-m-eval-slice-a.md`.
 
 ## Cross-family review: the army checks itself
