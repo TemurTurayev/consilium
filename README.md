@@ -382,11 +382,27 @@ Verified against recorded real CLI outputs (`core/tests/fixtures/*/recorded/`):
 - Adapter parsers are tested against **recorded real CLI outputs** committed as fixtures — format regressions surface without spending quota. Re-record with `script/record_fixtures.sh` (spends a few real requests).
 - Design spec: [`docs/specs/`](docs/specs/) · implementation plans: [`docs/plans/`](docs/plans/)
 
-## Roadmap highlights
+## Roadmap
 
-- **`council`** — the [llm-council](https://github.com/karpathy/llm-council) pattern ported to coding agents on subscriptions: independent answers → anonymized cross-review → chairman synthesis.
-- **`auto`** (default mode) — council for planning, conductor for execution, cross-review per subtask, supervisor watching everything ("reads a lot, writes rarely" — input tokens are cheap).
-- **Attached conductor** — your interactive Claude Code session orchestrates workers through Consilium's MCP server: richer context, and resilient to any future return of metered headless usage.
+Shipped milestones are in [Status](#status). What's planned next:
+
+**Smarter orchestration**
+- **Parallel waves (fan-out Phase B)** — run a dependency wave's independent subtasks *concurrently*, each in an isolated git worktree. The sequential `depends_on` DAG already ships; this adds the speed.
+- **Self-improving recommendations** — feed `consilium eval` results back into the provider catalog's per-role scores, so "best model per role" calibrates from real benchmarks instead of hand-tuned defaults.
+- **Research-backed routing** (from Sakana's TRINITY / Conductor work) — task-type → preferred-family bias on top of least-loaded routing, cross-family review *on by default* for hard tasks, a configurable rework cap, and skipping the planning step on trivial tasks.
+
+**Providers & onboarding**
+- **Self-updating model pool** — live model discovery + a remotely-refreshable recommendations catalog, so weekly model releases appear without a Consilium update.
+- **More providers** — Chinese frontier models (GLM / DeepSeek / Kimi) via the catalog + auth frame (CLI or OpenAI-compatible adapters — the same shape as the `agy` adapter).
+
+**Distribution & platform**
+- **Homebrew + checksummed installers** (via cargo-dist) on top of today's `curl | sh`.
+- **Native Windows** — today via WSL; native needs the verify/spawn paths de-POSIX'd.
+- **Web UI Council view**, **Warp** terminal integration (OSC 777), and a **Tauri** desktop app.
+
+**Hardening** — prompt-injection delimiting on the model→model prompt channels, restricted-permission run transcripts, and a "trust this repo?" prompt before running config-declared verify commands.
+
+Detail lives in [`docs/specs/`](docs/specs/) and [`docs/plans/`](docs/plans/); deferred items are each tracked.
 
 ## License
 
