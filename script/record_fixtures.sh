@@ -23,7 +23,7 @@ record claude core/tests/fixtures/claude/recorded/basic.jsonl \
   claude -p 'Reply with exactly: ok' --output-format stream-json --verbose
 record codex core/tests/fixtures/codex/recorded/basic.jsonl \
   codex exec --json 'Reply with exactly: ok'
-record gemini core/tests/fixtures/gemini/recorded/basic.json \
-  gemini -p 'Reply with exactly: ok' --output-format json
+record gemini core/tests/fixtures/gemini/recorded/basic.txt \
+  agy -p 'Reply with exactly: ok'
 
 echo "Now diff recorded vs synthetic fixtures; update parsers if formats drifted."

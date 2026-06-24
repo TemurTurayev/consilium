@@ -11,7 +11,7 @@ Named after the medical *consilium*: specialists from different fields gathering
 - **It automates the workflow you already do by hand.** Plenty of developers already plan a feature with Claude (best code quality, deep analysis) and then hand the spec to Codex/Gemini to implement (cheaper, more throughput) — switching tools and copy-pasting by hand. Consilium does it in one command: the **smartest model conducts** (decomposes the task, reviews the diffs), **cheaper models build**, and a build/test signal keeps everyone honest. You set the best model per role, and swap it as the landscape shifts (today's strongest coder won't be next month's).
 - **Subscriptions, not API keys.** Consilium never calls provider APIs directly — it runs the official CLIs authenticated with your existing Claude Max / ChatGPT / Google plans. All their features keep working; nothing gray-zone.
 - **Built for shifting quota rules.** A June 2026 plan to meter `claude -p` (headless) against a separate credit was put on hold on June 17, 2026 — headless Claude currently runs on flat subscription limits, same as interactive. Consilium doesn't depend on either outcome: heavy lifting routes to the worker with the freest quota, and the *attached mode* (M3) can keep the conductor inside your interactive Claude Code session via MCP — useful insurance if metered headless usage returns.
-- **Accurate accounting is the headline feature.** Provider token semantics genuinely differ — we verified each against recorded real CLI output (see table below). Most tools get at least one of them wrong.
+- **Accurate accounting is the headline feature.** Provider token semantics genuinely differ — we verified Claude's and Codex's against recorded real CLI output (Gemini via `agy` is plain-text, so its tokens are estimated — see table below). Most tools get at least one of them wrong.
 
 ## Compared to a hosted orchestrator (e.g. Sakana Fugu)
 
@@ -21,9 +21,9 @@ Consilium takes the opposite *delivery* model, and that's the point:
 
 | | Sakana Fugu | Consilium |
 |---|---|---|
-| **Access** | Closed, hosted, metered ($20–200/mo or per-token) | Open-source, self-hosted |
+| **Access** | Closed, hosted, usage-metered (subscription or per-token) | Open-source, self-hosted |
 | **Cost** | Pay the vendor per token | The flat-rate subscriptions you already pay for |
-| **Model pool** | A fixed internal pool — *cannot* use Claude Opus / GPT-5.x / Gemini (not publicly accessible to it) | Orchestrates the actual frontier CLIs you're already paying for |
+| **Model pool** | A fixed internal pool — not an orchestrator of the external frontier CLIs (Claude Code / Codex / Gemini) you already pay for | Orchestrates the actual frontier CLIs you're already paying for |
 | **Lock-in** | Trades model lock-in for single-vendor lock-in | None — you own the council and swap any role |
 | **Transparency** | Black box | Every prompt, diff, verdict, and token is local and inspectable |
 
@@ -38,12 +38,12 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **M1 — Engine foundation** | CLI adapters, session manager, quota store, `doctor`/`run`/`quota` commands | ✅ Done — verified E2E |
 | **M2a — Deliberation** | `council` (anonymized peer review → chairman synthesis), `review` (diff audit with CI exit codes) | ✅ Done — verified on live providers |
 | **M2b — Execution** | `conduct` (conductor decomposes → workers edit real files → review gate → arbiter), `auto` pipeline, supervisor, quota-aware routing | ✅ Done — verified on live providers |
-| **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — verified against a live model outage |
+| **M2c — Resilience** | per-role model **failover ladders**, real-error classification, run-wide `ModelHealth`, `doctor --models`, `init` | ✅ Done — tested against captured real model-unavailable errors |
 | **Harness leveling (P0)** | build/test **grounding**, **ConductorMemory** (plan ledger + attempt history), **worker blackboard** | ✅ Done — research-backed |
 | **M3a — Attached conductor (MCP)** | `consilium mcp` stdio server exposing six tools: `run_worker`, `quota_status`, `review_diff`, `council_run`, `search_recall`, `page_in` — your live Claude Code session is the conductor; no programmatic Claude credit spent | ✅ Done — verified over stdio |
 | **M3b — Live streaming server** | `consilium serve` — axum WebSocket at `/ws/session` streams a run's events live (task-local `ProgressSink`) | ✅ Done — verified E2E over a real socket |
 | **M3c — Cross-family review** | `conduct` routes a subtask's diff to a reviewer/arbiter of a *different* model family than the worker that wrote it (`crossFamilyReview`) | ✅ Done — opt-in, verified |
-| **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — live-verified in browser |
+| **M3e — Live web UI (Slice A)** | Vite + React **Session** view over `/ws/session`; typed protocol via `ts-rs` single-source-of-truth bindings, a pure unit-tested reducer, and a zero-backend demo mode | ✅ Done — manually verified in browser; unit-tested reducer + ts-rs bindings |
 | **M-eval — Benchmark harness (Slice A)** | `consilium eval` scores orchestration **approaches** (solo / conduct / ±grounding / ±cross-family) by an *independent* build/test verifier; dry-run by default | ✅ Done — first live run (N=1, 4 tasks): `conduct` = solo pass-rate on ~⅓ the Claude tokens |
 | **Fan-out DAG (Phase A)** | `conduct` subtasks carry explicit `depends_on` edges, run in dependency-order **waves**, and a failed subtask **isolates** to its dependents (recorded `skipped`) instead of aborting the run | ✅ Done — sequential; per-wave parallelism + worktree isolation is Phase B |
 | **Onboarding foundation** | curated provider **catalog** (per-role recommendation scores + auth metadata) + a pure **recommendation resolver** (authed+available → best-model-per-role `RolesConfig`, graceful single-provider degradation) | ✅ Done — `consilium init` wiring + auth wizard are follow-on slices |
@@ -205,9 +205,8 @@ primitives as tools your session calls:
   check, configure a reviewer of a different family than the worker.
 - **`council_run`** — convene the full council (workers answer independently,
   anonymized cross-review, chairman synthesis) from inside your session.
-- **`search_recall`** — query the run-memory store for prior subtask results
-  relevant to a search term (memory/recitation tools).
-- **`page_in`** — fetch the full stored text of a specific memory entry by id.
+- **`search_recall`** — search your past run transcripts on disk for a term; returns matching run ids, tasks, and snippets (memory/recitation tools).
+- **`page_in`** — load a compact, ~4000-char digest (task, outcome, per-subtask titles + summaries) of a past run transcript by id.
 
 Register it in a Claude Code session (`.mcp.json` or `claude mcp add`):
 
@@ -228,7 +227,8 @@ as it happens, then a terminal `run_complete` frame:
 ```bash
 consilium serve --addr 127.0.0.1:7878
 # then, from a WS client:
-#   → {"kind":"conduct","task":"add a CHANGELOG","cwd":"/path/to/repo"}
+#   → {"kind":"conduct","task":"add a CHANGELOG"}   # cwd optional
+#     (cwd defaults to — and must stay within — the dir you launched `serve` in; cross-origin connections are rejected)
 #   ← {"type":"tool_call",...}  {"type":"message",...}  {"type":"usage",...}  ...
 #   ← {"type":"run_complete","completed":[1],"halted":null,"failed":null}
 ```
@@ -256,8 +256,7 @@ quota, zero setup.
 
 The protocol is a single source of truth: `ts-rs` generates the TypeScript
 bindings in `ui/src/protocol/` from the Rust types (`core/src/event.rs`,
-`core/src/protocol.rs`), so `cargo test` regenerates them and the UI's `tsc`
-build fails if they drift. The view's logic is a pure reducer (unit-tested with
+`core/src/protocol.rs`), so `cargo test` regenerates them, and if a Rust change renames or removes a field the UI uses, the next `tsc` build catches it. The view's logic is a pure reducer (unit-tested with
 Vitest); only `useSession` touches the socket. See `ui/README.md`.
 
 ## Benchmarking approaches (`consilium eval`)
@@ -328,7 +327,6 @@ with it as the conductor's primary recovered automatically:
 
 ```
 ↳ conductor fell back: claude/claude-fable-5 → claude/claude-opus-4-8 (model unavailable)
-↳ conductor fell back: claude/claude-fable-5 → claude/claude-opus-4-8 (known-dead)
 completed subtasks: [1]
 ```
 
@@ -345,7 +343,7 @@ the anonymization map and per-reviewer scores, so you can audit who said what
 $ consilium doctor
 ✓ claude   2.1.111 (Claude Code)
 ✓ codex    codex-cli 0.139.0
-✓ agy      1.0.10            (Antigravity — drives the gemini provider)
+✓ agy      1.0.10
 ```
 
 ## How it works (M1)
@@ -360,7 +358,7 @@ $ consilium doctor
  sessions.rs      tokio process spawn, event streaming, stderr-drain
         │
         ▼
- AgentEvent       SessionStarted · Message · Thinking · ToolCall ·
+ AgentEvent       SessionStarted · Thinking · Message · ToolCall ·
         │         FileChanged · Usage · Completed · Failed
         ▼
  quota.rs         SQLite usage log, sliding-window aggregation
@@ -368,7 +366,7 @@ $ consilium doctor
 
 ### Token semantics actually differ per provider
 
-Verified against recorded real CLI outputs (`core/tests/fixtures/*/recorded/`):
+Claude and Codex are verified against recorded real CLI outputs (`core/tests/fixtures/{claude,codex}/recorded/`); Gemini via `agy` emits plain text, so its tokens are estimated:
 
 | Provider | Input side | Output side |
 |---|---|---|
