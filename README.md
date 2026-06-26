@@ -132,6 +132,12 @@ consilium auto "Fix the typo in README.md" --check "cargo test"
 consilium auth
 consilium doctor --models
 
+# Stay on the latest models: probe each provider's current top model and adopt
+# it. Run this after a provider ships a newer model — council/conduct/auto also
+# print a one-line hint when your config has fallen behind.
+consilium models            # report the best live model per provider
+consilium models --write    # rewrite consilium.config.json to adopt them
+
 # Non-interactive setup (CI/scripts): write the recommended council without prompts.
 consilium init --yes
 ```

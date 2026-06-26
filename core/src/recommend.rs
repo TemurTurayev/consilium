@@ -167,13 +167,13 @@ mod tests {
         assert_eq!(
             worker_pairs,
             vec![
-                (Provider::Codex, "gpt-5.4"),
+                (Provider::Codex, "gpt-5.5"),
                 (Provider::Gemini, "Gemini 3.1 Pro (High)")
             ]
         );
 
         assert_eq!(roles.reviewer.provider, Provider::Codex);
-        assert_eq!(roles.reviewer.model, "gpt-5.4");
+        assert_eq!(roles.reviewer.model, "gpt-5.5");
 
         assert_eq!(roles.supervisor.provider, Provider::Gemini);
         assert_eq!(roles.supervisor.model, "Gemini 3.1 Pro (High)");
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn single_provider_fills_every_role_and_never_errors() {
         // Only Codex authed → every role is Codex (degraded, functional).
-        let codex = vec![find(&catalog(), Provider::Codex, "gpt-5.4").clone()];
+        let codex = vec![find(&catalog(), Provider::Codex, "gpt-5.5").clone()];
         let roles = recommend_roles(&codex).unwrap();
         for p in [
             roles.conductor.provider,

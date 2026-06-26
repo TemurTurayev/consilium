@@ -89,6 +89,14 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Check each provider's current top model (probes ~1 token per provider)
+    /// and, with --write, update consilium.config.json so superseded models
+    /// adopt the latest. Run it after a provider ships a newer model.
+    Models {
+        /// Rewrite consilium.config.json to adopt each provider's top live model.
+        #[arg(long)]
+        write: bool,
+    },
     /// Run as an MCP server over stdio (attached-conductor mode). Register this
     /// in your interactive Claude Code session to drive workers via the
     /// `run_worker` and `quota_status` tools without spending Claude credit.
@@ -156,6 +164,23 @@ fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(home)
         .join(".consilium")
         .join("usage.db"))
+}
+
+/// Print a one-line, free (no-probe) hint on stderr if the config pins any model
+/// the catalog has superseded — shown before council/conduct/auto runs so the
+/// operator always knows when a newer model is available.
+fn print_staleness_hint(config: &consilium::config::Config) {
+    let stale = consilium::models::stale_models(config);
+    if !stale.is_empty() {
+        let names: Vec<String> = stale
+            .iter()
+            .map(|s| format!("{}/{}", s.provider.as_str(), s.current))
+            .collect();
+        eprintln!(
+            "ℹ superseded model(s) in config: {} — run `consilium models --write` to adopt the latest.",
+            names.join(", ")
+        );
+    }
 }
 
 #[tokio::main]
@@ -236,6 +261,80 @@ async fn main() -> anyhow::Result<()> {
                 println!("  {mark} {}", consilium::auth::guidance(*p, status));
             }
             println!("{ready}/{} providers ready", report.len());
+        }
+        Command::Models { write } => {
+            use consilium::event::Provider;
+            use consilium::models::{self, TopModel};
+
+            let config_path = std::path::Path::new("consilium.config.json");
+            let config = consilium::config::Config::load(Some(config_path))?;
+            let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
+
+            println!("── available top models ──");
+            let resolved = models::resolve_top_models(&store).await;
+            let mut chosen: Vec<(Provider, String)> = Vec::new();
+            for (p, top) in &resolved {
+                match top {
+                    TopModel::Live(m) => {
+                        println!("  ✓ {:8} {m}", p.as_str());
+                        chosen.push((*p, m.clone()));
+                    }
+                    TopModel::NoLiveModel => {
+                        println!(
+                            "  ✗ {:8} no model answered — check `consilium auth`",
+                            p.as_str()
+                        )
+                    }
+                    TopModel::CliMissing => {
+                        println!("  ✗ {:8} CLI not installed", p.as_str())
+                    }
+                }
+            }
+
+            let stale = models::stale_models(&config);
+            if stale.is_empty() {
+                println!("\nconsilium.config.json is up to date.");
+            } else {
+                println!("\nsuperseded models in consilium.config.json:");
+                for s in &stale {
+                    // Show what `--write` would actually adopt: the live-probed top
+                    // (`chosen`) when available, falling back to the catalog top
+                    // only when the provider has no live model. Keeps the preview
+                    // honest when an account is gated out of the catalog's #1.
+                    let live = chosen
+                        .iter()
+                        .find(|(p, _)| *p == s.provider)
+                        .map(|(_, m)| m.as_str());
+                    match live.or(s.suggested.as_deref()) {
+                        Some(target) => {
+                            println!("  • {}/{} → {target}", s.provider.as_str(), s.current)
+                        }
+                        None => {
+                            println!(
+                                "  • {}/{} (no catalog replacement)",
+                                s.provider.as_str(),
+                                s.current
+                            )
+                        }
+                    }
+                }
+                if write {
+                    let upgraded = models::upgrade_config(&config, &chosen);
+                    if upgraded == config {
+                        println!(
+                            "\nnothing written — no live replacement available for the superseded provider(s)."
+                        );
+                    } else {
+                        std::fs::write(config_path, upgraded.to_pretty_json()?)?;
+                        println!(
+                            "\n✓ updated {} to the latest models.",
+                            config_path.display()
+                        );
+                    }
+                } else {
+                    println!("\nrun `consilium models --write` to adopt them.");
+                }
+            }
         }
         Command::Run {
             provider,
@@ -324,6 +423,7 @@ async fn main() -> anyhow::Result<()> {
             let config = consilium::config::Config::load(Some(std::path::Path::new(
                 "consilium.config.json",
             )))?;
+            print_staleness_hint(&config);
             let chairman_ladder = roles::resolve_ladder(&config.roles.chairman);
             let members: Vec<CouncilMember> = config
                 .roles
@@ -452,6 +552,7 @@ async fn main() -> anyhow::Result<()> {
             let config = consilium::config::Config::load(Some(std::path::Path::new(
                 "consilium.config.json",
             )))?;
+            print_staleness_hint(&config);
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             if !no_preflight {
                 let report = consilium::doctor::preflight(&config, &store).await;
@@ -566,6 +667,7 @@ async fn main() -> anyhow::Result<()> {
             let config = consilium::config::Config::load(Some(std::path::Path::new(
                 "consilium.config.json",
             )))?;
+            print_staleness_hint(&config);
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             if !no_preflight {
                 let report = consilium::doctor::preflight(&config, &store).await;

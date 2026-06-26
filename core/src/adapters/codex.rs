@@ -159,7 +159,7 @@ mod tests {
     fn command_args(advisory: bool, write: bool) -> Vec<String> {
         let req = RunRequest {
             prompt: "hi".into(),
-            model: Some("gpt-5.4".into()),
+            model: Some("gpt-5.5".into()),
             cwd: std::env::temp_dir(),
             advisory,
             write,
@@ -177,7 +177,7 @@ mod tests {
         let args = command_args(false, false);
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"--json".to_string()));
-        assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.4"]));
+        assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.5"]));
         assert_eq!(args.last().unwrap(), "hi");
     }
 

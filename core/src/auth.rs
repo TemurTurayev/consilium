@@ -216,7 +216,7 @@ mod tests {
             primary_model(Provider::Claude).as_deref(),
             Some("claude-opus-4-8")
         );
-        assert_eq!(primary_model(Provider::Codex).as_deref(), Some("gpt-5.4"));
+        assert_eq!(primary_model(Provider::Codex).as_deref(), Some("gpt-5.5"));
         assert!(primary_model(Provider::Gemini).is_some());
     }
 }
