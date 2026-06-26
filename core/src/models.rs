@@ -32,12 +32,14 @@ pub struct StaleModel {
 }
 
 /// Pure: the distinct configured models (across every role's full ladder) that
-/// are no longer endorsed by the catalog. Empty = the lineup is current. No I/O,
-/// so this is cheap enough to call before every run for the staleness hint.
+/// have been explicitly retired in favor of a newer version (see
+/// `catalog::superseded_models`). Empty = the lineup is current. No I/O, so this
+/// is cheap enough to call before every run for the staleness hint. Valid but
+/// uncurated models (e.g. a cross-family Antigravity fallback) are never flagged.
 pub fn stale_models(config: &Config) -> Vec<StaleModel> {
     let mut out = Vec::new();
     for candidate in doctor::collect_distinct_model_pairs(config) {
-        if !catalog::contains_model(candidate.provider, &candidate.model) {
+        if catalog::is_superseded(candidate.provider, &candidate.model) {
             out.push(StaleModel {
                 provider: candidate.provider,
                 current: candidate.model,
@@ -104,10 +106,11 @@ fn chosen_for(chosen: &[(Provider, String)], provider: Provider) -> Option<&str>
         .map(|(_, m)| m.as_str())
 }
 
-/// Pure: the new model string for one (provider, model) — keep it if still
-/// endorsed, otherwise adopt the chosen top model for its provider (if any).
+/// Pure: the new model string for one (provider, model) — adopt the chosen top
+/// model for its provider only if this exact model has been retired; otherwise
+/// keep it (still-current or deliberately-uncurated choices are untouched).
 fn upgrade_model(provider: Provider, model: &str, chosen: &[(Provider, String)]) -> String {
-    if catalog::contains_model(provider, model) {
+    if !catalog::is_superseded(provider, model) {
         return model.to_string();
     }
     chosen_for(chosen, provider)
@@ -228,6 +231,38 @@ mod tests {
         assert_eq!(same.roles.workers[0].model, "gpt-5.4");
         // original is untouched (immutability)
         assert_eq!(cfg.roles.workers[0].model, "gpt-5.4");
+    }
+
+    #[test]
+    fn uncurated_cross_family_fallback_is_never_stale_or_rewritten() {
+        // The `gemini` provider running a Claude model via Antigravity is a valid,
+        // deliberate fallback that isn't in the curated catalog. It must NOT be
+        // flagged as stale, and `--write` must leave it exactly as-is — only the
+        // explicitly-retired gpt-5.4 moves.
+        let json = r#"{
+          "roles": {
+            "conductor":  { "provider": "claude", "model": "claude-opus-4-8",
+              "fallbacks": [{"provider": "gemini", "model": "Claude Opus 4.6 (Thinking)"}] },
+            "chairman":   { "provider": "claude", "model": "claude-opus-4-8" },
+            "workers":    [ { "provider": "codex", "model": "gpt-5.4" } ],
+            "reviewer":   { "provider": "codex", "model": "gpt-5.4" },
+            "supervisor": { "provider": "gemini", "model": "Gemini 3.1 Pro (High)" }
+          }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+
+        let stale = stale_models(&cfg);
+        assert_eq!(stale.len(), 1, "only gpt-5.4 is retired: {stale:?}");
+        assert_eq!(stale[0].current, "gpt-5.4");
+
+        let upgraded = upgrade_config(&cfg, &[(Provider::Codex, "gpt-5.5".to_string())]);
+        // the cross-family fallback survives untouched
+        assert_eq!(
+            upgraded.roles.conductor.fallbacks[0].model,
+            "Claude Opus 4.6 (Thinking)"
+        );
+        // and the retired codex model still upgraded
+        assert_eq!(upgraded.roles.workers[0].model, "gpt-5.5");
     }
 
     #[test]

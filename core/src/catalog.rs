@@ -46,10 +46,10 @@ pub struct CatalogEntry {
 /// `Config::default()` lineup (see the recommend module's keystone test).
 ///
 /// ORDERING CONVENTION: within each provider, entries are listed best/newest
-/// first — `top_model(provider)` returns the first one, and `crate::models`
-/// treats any configured model *absent* from this list as superseded. When a
-/// provider ships a newer top model, add it as that provider's first entry (and
-/// drop or demote the one it replaces); everything downstream re-resolves.
+/// first — `top_model(provider)` returns the first one. When a provider ships a
+/// newer top model, add it as that provider's first entry (demoting the one it
+/// replaces) AND add the replaced model to `superseded_models`; everything
+/// downstream then re-resolves to the new top.
 pub fn catalog() -> Vec<CatalogEntry> {
     vec![
         CatalogEntry {
@@ -117,13 +117,23 @@ pub fn top_model(provider: Provider) -> Option<CatalogEntry> {
     entries_for(provider).into_iter().next()
 }
 
-/// Whether `(provider, model)` is an exact, currently-endorsed catalog entry.
-/// A configured model that returns `false` here has been superseded (see
-/// `crate::models::stale_models`).
-pub fn contains_model(provider: Provider, model: &str) -> bool {
-    catalog()
+/// Retired models: a specific `(provider, model)` superseded by a newer version
+/// of the *same* line. This is deliberately an explicit allowlist, NOT "anything
+/// missing from the catalog" — a configured model can be valid yet uncurated
+/// (e.g. a cross-family Antigravity fallback: the `gemini` provider running a
+/// Claude model), and that must never be mistaken for stale. Add a row when a
+/// provider ships a new version; the replacement is always the provider's
+/// current `top_model`. Drives the staleness hint and `consilium models`.
+pub fn superseded_models() -> Vec<(Provider, &'static str)> {
+    vec![(Provider::Codex, "gpt-5.4")]
+}
+
+/// Whether `(provider, model)` has been retired in favor of a newer version
+/// (see `superseded_models`). `crate::models::stale_models` flags these.
+pub fn is_superseded(provider: Provider, model: &str) -> bool {
+    superseded_models()
         .iter()
-        .any(|e| e.provider == provider && e.model == model)
+        .any(|(p, m)| *p == provider && *m == model)
 }
 
 #[cfg(test)]
@@ -196,11 +206,26 @@ mod tests {
     }
 
     #[test]
-    fn contains_model_is_exact_and_provider_scoped() {
-        assert!(contains_model(Provider::Codex, "gpt-5.5"));
-        // superseded / unknown models are not in the catalog
-        assert!(!contains_model(Provider::Codex, "gpt-5.4"));
-        // right model, wrong provider
-        assert!(!contains_model(Provider::Gemini, "gpt-5.5"));
+    fn is_superseded_flags_only_explicitly_retired_models() {
+        // explicitly retired
+        assert!(is_superseded(Provider::Codex, "gpt-5.4"));
+        // the current top is not retired
+        assert!(!is_superseded(Provider::Codex, "gpt-5.5"));
+        // a valid-but-uncurated cross-family fallback must NOT be flagged
+        assert!(!is_superseded(
+            Provider::Gemini,
+            "Claude Opus 4.6 (Thinking)"
+        ));
+    }
+
+    #[test]
+    fn superseded_models_have_a_current_top_replacement() {
+        // every retired model's provider must still have a top model to point to
+        for (provider, _retired) in superseded_models() {
+            assert!(
+                top_model(provider).is_some(),
+                "retired model for {provider:?} has no replacement top_model"
+            );
+        }
     }
 }
