@@ -44,6 +44,12 @@ pub struct CatalogEntry {
 /// The curated catalog. Scores are tuned so that, with every provider authed,
 /// `crate::recommend::recommend_roles(&catalog())` reproduces the curated
 /// `Config::default()` lineup (see the recommend module's keystone test).
+///
+/// ORDERING CONVENTION: within each provider, entries are listed best/newest
+/// first — `top_model(provider)` returns the first one, and `crate::models`
+/// treats any configured model *absent* from this list as superseded. When a
+/// provider ships a newer top model, add it as that provider's first entry (and
+/// drop or demote the one it replaces); everything downstream re-resolves.
 pub fn catalog() -> Vec<CatalogEntry> {
     vec![
         CatalogEntry {
@@ -72,7 +78,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
         },
         CatalogEntry {
             provider: Provider::Codex,
-            model: "gpt-5.4".into(),
+            model: "gpt-5.5".into(),
             auth_method: AuthMethod::CliLogin,
             scores: RoleScores {
                 conductor: 7,
@@ -97,12 +103,27 @@ pub fn catalog() -> Vec<CatalogEntry> {
     ]
 }
 
-/// All catalog entries for one provider, in catalog order.
+/// All catalog entries for one provider, best/newest first (catalog order).
 pub fn entries_for(provider: Provider) -> Vec<CatalogEntry> {
     catalog()
         .into_iter()
         .filter(|e| e.provider == provider)
         .collect()
+}
+
+/// The provider's top (best/newest) catalog model — its first entry — or `None`
+/// if the provider has no catalog entry.
+pub fn top_model(provider: Provider) -> Option<CatalogEntry> {
+    entries_for(provider).into_iter().next()
+}
+
+/// Whether `(provider, model)` is an exact, currently-endorsed catalog entry.
+/// A configured model that returns `false` here has been superseded (see
+/// `crate::models::stale_models`).
+pub fn contains_model(provider: Provider, model: &str) -> bool {
+    catalog()
+        .iter()
+        .any(|e| e.provider == provider && e.model == model)
 }
 
 #[cfg(test)]
@@ -162,5 +183,24 @@ mod tests {
         let claude = entries_for(Provider::Claude);
         assert!(claude.len() >= 2, "Claude has opus + sonnet");
         assert!(claude.iter().all(|e| e.provider == Provider::Claude));
+    }
+
+    #[test]
+    fn top_model_is_the_first_entry_per_provider() {
+        assert_eq!(
+            top_model(Provider::Claude).unwrap().model,
+            "claude-opus-4-8"
+        );
+        assert_eq!(top_model(Provider::Codex).unwrap().model, "gpt-5.5");
+        assert!(top_model(Provider::Gemini).is_some());
+    }
+
+    #[test]
+    fn contains_model_is_exact_and_provider_scoped() {
+        assert!(contains_model(Provider::Codex, "gpt-5.5"));
+        // superseded / unknown models are not in the catalog
+        assert!(!contains_model(Provider::Codex, "gpt-5.4"));
+        // right model, wrong provider
+        assert!(!contains_model(Provider::Gemini, "gpt-5.5"));
     }
 }

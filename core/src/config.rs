@@ -192,10 +192,10 @@ impl Default for Config {
                     ..RoleConfig::new(Provider::Claude, "claude-opus-4-8")
                 },
                 workers: vec![
-                    RoleConfig::new(Provider::Codex, "gpt-5.4"),
+                    RoleConfig::new(Provider::Codex, "gpt-5.5"),
                     RoleConfig::new(Provider::Gemini, "Gemini 3.1 Pro (High)"),
                 ],
-                reviewer: RoleConfig::new(Provider::Codex, "gpt-5.4"),
+                reviewer: RoleConfig::new(Provider::Codex, "gpt-5.5"),
                 supervisor: RoleConfig {
                     intervention_threshold: Some("medium".into()),
                     ..RoleConfig::new(Provider::Gemini, "Gemini 3.1 Pro (High)")
@@ -273,11 +273,11 @@ mod tests {
             "conductor":  { "provider": "claude", "model": "fable-5", "effort": "high", "mode": "attached" },
             "chairman":   { "provider": "claude", "model": "fable-5", "effort": "high" },
             "workers": [
-              { "provider": "codex",  "model": "gpt-5.4" },
+              { "provider": "codex",  "model": "gpt-5.5" },
               { "provider": "gemini", "model": "gemini-3-pro" },
               { "provider": "claude", "model": "sonnet" }
             ],
-            "reviewer":   { "provider": "codex",  "model": "gpt-5.4" },
+            "reviewer":   { "provider": "codex",  "model": "gpt-5.5" },
             "supervisor": { "provider": "gemini", "model": "gemini-3-pro", "interventionThreshold": "medium" }
           },
           "quota": {
@@ -324,7 +324,7 @@ mod tests {
             "provider": "claude", "model": "claude-opus-4-8",
             "fallbacks": [
                 {"provider": "claude", "model": "claude-sonnet-4-6"},
-                {"provider": "codex", "model": "gpt-5.4"}
+                {"provider": "codex", "model": "gpt-5.5"}
             ]
         }))
         .unwrap();
