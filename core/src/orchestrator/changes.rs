@@ -166,6 +166,13 @@ mod tests {
     fn temp_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q"]);
+        // Hermetic identity: bare CI runners have no global user.name/email,
+        // and `git commit` refuses to run without one.
+        git(dir.path(), &["config", "user.name", "consilium-test"]);
+        git(
+            dir.path(),
+            &["config", "user.email", "test@consilium.local"],
+        );
         git(dir.path(), &["commit", "--allow-empty", "-m", "init", "-q"]);
         dir
     }
