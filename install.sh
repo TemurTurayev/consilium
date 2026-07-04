@@ -21,9 +21,24 @@ case "$os" in
   *) echo "consilium: unsupported OS: $os" >&2; exit 1 ;;
 esac
 url="https://github.com/$REPO/releases/latest/download/consilium-$target.tar.gz"
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
 echo "Downloading consilium ($target)…"
+curl -fsSL "$url" -o "$tmpdir/consilium-$target.tar.gz"
+if curl -fsSL "$url.sha256" -o "$tmpdir/consilium-$target.tar.gz.sha256" 2>/dev/null; then
+  echo "Verifying checksum…"
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$tmpdir" && sha256sum -c "consilium-$target.tar.gz.sha256" >/dev/null 2>&1) \
+      || { echo "consilium: checksum verification FAILED — aborting install" >&2; exit 1; }
+  else
+    (cd "$tmpdir" && shasum -a 256 -c "consilium-$target.tar.gz.sha256" >/dev/null 2>&1) \
+      || { echo "consilium: checksum verification FAILED — aborting install" >&2; exit 1; }
+  fi
+else
+  echo "  (no checksum published for this release — skipping verification)"
+fi
 mkdir -p "$BINDIR"
-curl -fsSL "$url" | tar -xz -C "$BINDIR"
+tar -xz -C "$BINDIR" -f "$tmpdir/consilium-$target.tar.gz"
 chmod +x "$BINDIR/consilium"
 echo ""
 echo "✓ Installed consilium to $BINDIR/consilium"

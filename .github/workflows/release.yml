@@ -5,7 +5,12 @@ on:
 permissions:
   contents: write
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
   build:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -25,7 +30,11 @@ jobs:
         run: cargo build --release -p consilium --target ${{ matrix.target }}
       - name: Package
         run: tar -C target/${{ matrix.target }}/release -czf consilium-${{ matrix.target }}.tar.gz consilium
+      - name: Checksum
+        run: shasum -a 256 consilium-${{ matrix.target }}.tar.gz > consilium-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          files: consilium-${{ matrix.target }}.tar.gz
+          files: |
+            consilium-${{ matrix.target }}.tar.gz
+            consilium-${{ matrix.target }}.tar.gz.sha256
