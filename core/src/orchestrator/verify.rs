@@ -14,6 +14,18 @@ pub struct VerifyOutcome {
 
 const TAIL_CAP: usize = 3000;
 
+/// Per-command wall-clock cap (seconds) when `verify.timeoutSecs` is unset.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
+
+/// Resolve the per-command timeout: `verify.timeoutSecs` when set, else the
+/// 600s default. Shared by `run_verify` and auto's `--check` command.
+pub fn command_timeout(cfg: Option<&VerifyConfig>) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        cfg.and_then(|c| c.timeout_secs)
+            .unwrap_or(DEFAULT_TIMEOUT_SECS),
+    )
+}
+
 fn truncate_tail(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -74,6 +86,9 @@ pub fn resolve_commands(cwd: &Path, cfg: Option<&VerifyConfig>) -> Vec<(String, 
 
 /// Runs the resolved commands in `cwd`. Build/test failures set passed=false;
 /// lint is advisory (recorded, never blocks). No commands → ran=false.
+/// Each command is capped at `verify.timeoutSecs` (default 600s): on expiry
+/// the child is SIGKILLed and the command is recorded as TIMEOUT, so a
+/// worker-introduced hanging test/build cannot stall the whole run.
 pub async fn run_verify(cwd: &Path, cfg: Option<&VerifyConfig>) -> VerifyOutcome {
     let cmds = resolve_commands(cwd, cfg);
     if cmds.is_empty() {
@@ -83,19 +98,43 @@ pub async fn run_verify(cwd: &Path, cfg: Option<&VerifyConfig>) -> VerifyOutcome
             summary: "(no build/test/lint command configured or detected)".into(),
         };
     }
+    let timeout = command_timeout(cfg);
     let mut passed = true;
     let mut summary = String::new();
     for (label, cmd) in &cmds {
-        let out = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(cwd)
-            .output()
-            .await;
+        let blocking = label != "lint";
+        let out = tokio::time::timeout(
+            timeout,
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(cwd)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        // On Err(Elapsed) the output() future — and with it the kill_on_drop
+        // child — is dropped at the end of the statement above, so SIGKILL is
+        // issued BEFORE the next command runs (or the caller reuses the cwd).
         match out {
-            Ok(o) => {
+            Err(_elapsed) => {
+                // Timed out. Blocking for build/test; lint stays advisory in
+                // EVERY failure mode (a hanging linter must not trap a run).
+                if blocking {
+                    passed = false;
+                }
+                let marker = if blocking {
+                    "TIMEOUT"
+                } else {
+                    "timeout (advisory)"
+                };
+                summary.push_str(&format!(
+                    "[{label}] {marker}: {cmd} (exceeded {}s; process killed)\n",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(Ok(o)) => {
                 let ok = o.status.success();
-                let blocking = label != "lint";
                 if !ok && blocking {
                     passed = false;
                 }
@@ -117,11 +156,11 @@ pub async fn run_verify(cwd: &Path, cfg: Option<&VerifyConfig>) -> VerifyOutcome
                     summary.push('\n');
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 // Could not even launch the command. Blocking for build/test;
                 // lint stays advisory in EVERY failure mode (a missing linter
                 // must not trap a run).
-                if label != "lint" {
+                if blocking {
                     passed = false;
                 }
                 summary.push_str(&format!("[{label}] LAUNCH-ERROR: {cmd}: {e}\n"));
@@ -179,6 +218,7 @@ mod tests {
             test: Some("echo configured-test".into()),
             build: None,
             lint: None,
+            timeout_secs: None,
         };
         let cmds = resolve_commands(d.path(), Some(&cfg));
         // configured test wins; build/lint fall back to cargo detection
@@ -197,6 +237,7 @@ mod tests {
             test: Some("true".into()),
             build: Some("true".into()),
             lint: None,
+            timeout_secs: None,
         };
         let out = run_verify(d.path(), Some(&cfg)).await;
         assert!(out.ran);
@@ -210,6 +251,7 @@ mod tests {
             test: Some("false".into()),
             build: None,
             lint: None,
+            timeout_secs: None,
         };
         let out = run_verify(d.path(), Some(&cfg)).await;
         assert!(out.ran);
@@ -225,6 +267,7 @@ mod tests {
             test: Some("true".into()),
             build: None,
             lint: Some("false".into()),
+            timeout_secs: None,
         };
         let out = run_verify(d.path(), Some(&cfg)).await;
         assert!(out.ran);
@@ -240,6 +283,7 @@ mod tests {
             test: Some("true".into()),
             build: None,
             lint: Some("consilium-no-such-linter-xyz".into()),
+            timeout_secs: None,
         };
         let out = run_verify(d.path(), Some(&cfg)).await;
         assert!(out.ran);
@@ -252,5 +296,92 @@ mod tests {
         let out = run_verify(d.path(), None).await;
         assert!(!out.ran);
         assert!(!out.passed); // not-run is not a pass
+    }
+
+    #[test]
+    fn command_timeout_resolves_config_or_default() {
+        assert_eq!(
+            command_timeout(None),
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
+        let cfg = VerifyConfig {
+            timeout_secs: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(
+            command_timeout(Some(&cfg)),
+            std::time::Duration::from_secs(5)
+        );
+        let unset = VerifyConfig::default();
+        assert_eq!(
+            command_timeout(Some(&unset)),
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
+    }
+
+    // A hanging verify command must not stall the run forever: it is killed at
+    // the cap and reported as a FAILED (timed-out) verify, and the child is
+    // SIGKILLed so it cannot keep mutating the cwd afterwards.
+    #[tokio::test]
+    async fn run_verify_timeout_kills_hanging_command() {
+        let d = tmp();
+        let marker = d.path().join("late.txt");
+        let cfg = VerifyConfig {
+            test: Some("sleep 2; echo late > late.txt".into()),
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+        let out = run_verify(d.path(), Some(&cfg)).await;
+        assert!(out.ran);
+        assert!(!out.passed, "a timed-out test command must fail verify");
+        assert!(
+            out.summary.contains("TIMEOUT"),
+            "summary must say TIMEOUT, got: {}",
+            out.summary
+        );
+
+        // Well past the child's 2s sleep: an orphaned child would have written
+        // the marker by now; a killed one never will.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        assert!(
+            !marker.exists(),
+            "timed-out verify child must be SIGKILLed before it can write"
+        );
+
+        // Positive control: the SAME script, given time to finish, DOES write
+        // the marker — proving the suppression above is the kill.
+        let d2 = tmp();
+        let cfg2 = VerifyConfig {
+            test: Some("sleep 2; echo late > late.txt".into()),
+            timeout_secs: Some(30),
+            ..Default::default()
+        };
+        let out2 = run_verify(d2.path(), Some(&cfg2)).await;
+        assert!(out2.passed, "un-killed script must pass");
+        assert!(
+            d2.path().join("late.txt").exists(),
+            "an un-killed verify command completes its write (positive control)"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_verify_lint_timeout_is_advisory() {
+        let d = tmp();
+        // lint hangs past the cap but test passes → passed (lint is advisory
+        // in EVERY failure mode, including timeout).
+        let cfg = VerifyConfig {
+            test: Some("true".into()),
+            lint: Some("sleep 2".into()),
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+        let out = run_verify(d.path(), Some(&cfg)).await;
+        assert!(out.ran);
+        assert!(out.passed, "a lint timeout must not block accept");
+        assert!(
+            out.summary.contains("timeout (advisory)"),
+            "summary must record the advisory lint timeout, got: {}",
+            out.summary
+        );
     }
 }

@@ -30,7 +30,9 @@ pub struct AutoOutcome {
 /// 2. Trivial → `run_conduct(task, "", ...)` directly.
 ///    Standard → `run_council` for planning synthesis → `run_conduct(task, &synthesis, ...)`.
 /// 3. If fully completed (no halted, no failed) and `check_command` is Some:
-///    run `sh -c <cmd>` in cwd (std::process), capture exit code + last ~2 KiB of output.
+///    run `sh -c <cmd>` in cwd (async, capped at `verify.timeoutSecs`, default
+///    600s — a hanging check is SIGKILLed and reported as a failed check),
+///    capture exit code + last ~2 KiB of output.
 /// 4. Build a composed transcript.
 ///
 /// ONE `ModelHealth` is created here and threaded into both `run_council` and
@@ -48,6 +50,11 @@ pub async fn run_auto(
 
     // ONE ModelHealth for the entire auto run (planning + execution share it).
     let health = ModelHealth::with_retry(RetryConfig::prod());
+
+    // Per-command cap for the check command — same knob as verify commands
+    // (verify.timeoutSecs, default 600s). Captured before deps.conduct is
+    // moved into run_conduct.
+    let check_timeout = crate::orchestrator::verify::command_timeout(deps.conduct.verify.as_ref());
 
     // ── 1. Triage ────────────────────────────────────────────────────────────
     // Use the conductor's ladder (the same one conduct will use for decompose).
@@ -121,18 +128,37 @@ pub async fn run_auto(
         && !conduct_outcome.completed.is_empty()
     {
         if let Some(cmd) = check_command {
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(&cwd)
-                .output()?;
-
-            let passed = output.status.success();
-            // Combine stdout + stderr and take last ~2 KiB (char-boundary-safe).
-            let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-            combined.push_str(&String::from_utf8_lossy(&output.stderr));
-            let tail = truncate_tail(&combined, 2048);
-            Some((passed, tail))
+            let out = tokio::time::timeout(
+                check_timeout,
+                tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .current_dir(&cwd)
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await;
+            // On Err(Elapsed) the output() future — and with it the
+            // kill_on_drop child — is dropped at the end of the statement
+            // above, so SIGKILL is issued before we move on.
+            match out {
+                Err(_elapsed) => Some((
+                    false,
+                    format!(
+                        "TIMEOUT: check command exceeded {}s and was killed: {cmd}",
+                        check_timeout.as_secs()
+                    ),
+                )),
+                Ok(output) => {
+                    let output = output?;
+                    let passed = output.status.success();
+                    // Combine stdout + stderr and take last ~2 KiB (char-boundary-safe).
+                    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+                    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+                    let tail = truncate_tail(&combined, 2048);
+                    Some((passed, tail))
+                }
+            }
         } else {
             None
         }

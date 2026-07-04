@@ -2202,6 +2202,7 @@ async fn failing_tests_force_rework_even_if_conductor_would_accept() {
         test: Some("grep -q good out.txt".into()),
         build: None,
         lint: None,
+        timeout_secs: None,
     };
 
     let deps = ConductDeps {
@@ -2505,6 +2506,7 @@ async fn grounding_override_recorded_in_history() {
         test: Some("grep -q good out.txt".into()),
         build: None,
         lint: None,
+        timeout_secs: None,
     };
 
     let deps = ConductDeps {

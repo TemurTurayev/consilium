@@ -1,7 +1,7 @@
 mod common;
 
 use common::{ScriptedAdapter, SequencedAdapter};
-use consilium::config::ModelCandidate;
+use consilium::config::{ModelCandidate, VerifyConfig};
 use consilium::event::Provider;
 use consilium::orchestrator::auto::{run_auto, AutoDeps};
 use consilium::orchestrator::conduct::{ConductDeps, RoleHandle};
@@ -417,4 +417,125 @@ async fn check_command_success() {
         .check
         .expect("check should be Some when command given");
     assert!(check.0, "check should report success (exit code 0)");
+}
+
+// ─── Test 5: check_command_timeout_kills_child ────────────────────────────────
+//
+// A hanging --check command must not stall the auto run forever: it is capped
+// by verify.timeoutSecs (same knob as verify commands), reported as a failed
+// check with a TIMEOUT message, and the child is SIGKILLed so it cannot keep
+// writing into the cwd afterwards.
+
+/// Trivial-flow AutoDeps (triage trivial → 1 subtask → accept) whose worker
+/// writes `filename`; `verify` is threaded into ConductDeps.
+fn trivial_deps(filename: &str, verify: Option<VerifyConfig>) -> AutoDeps {
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(Provider::Claude, r#"{"complexity":"trivial"}"#),
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "create file", "create the file")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: format!("echo 'x' > {filename}"),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "created the file")
+    });
+    AutoDeps {
+        conduct: ConductDeps {
+            conductor: solo_role_handle(Provider::Claude, "claude-opus-4-8", conductor),
+            workers: vec![solo_worker(
+                "codex-worker",
+                Provider::Codex,
+                "gpt-4",
+                worker,
+            )],
+            supervisor: None,
+            reviewer: None,
+            arbiter: None,
+            verify,
+            memory: Default::default(),
+            cross_family_review: false,
+            max_replans: 0,
+            budget: None,
+        },
+        council_members: vec![],
+        chairman: solo_role_handle(
+            Provider::Claude,
+            "claude-opus-4-8",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                "chairman not called for trivial",
+            )),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn check_command_timeout_kills_child() {
+    let repo = temp_repo();
+    let quota = store();
+    let marker = repo.path().join("check_late.txt");
+    // verify itself is a fast "true"; timeoutSecs=1 caps the check command too.
+    let verify = VerifyConfig {
+        test: Some("true".into()),
+        timeout_secs: Some(1),
+        ..Default::default()
+    };
+
+    let outcome = run_auto(
+        "create a file then check hangs",
+        trivial_deps("check_to.txt", Some(verify)),
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        Some("sleep 2; echo late > check_late.txt"),
+    )
+    .await
+    .expect("auto run should succeed even when check times out");
+
+    let check = outcome
+        .check
+        .expect("check should be Some when command given");
+    assert!(!check.0, "a timed-out check must report failure");
+    assert!(
+        check.1.contains("TIMEOUT"),
+        "check output must say TIMEOUT, got: {}",
+        check.1
+    );
+
+    // Well past the child's 2s sleep: an orphaned child would have written the
+    // marker by now; a killed one never will.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        !marker.exists(),
+        "timed-out check child must be SIGKILLed before it can write"
+    );
+
+    // Positive control: the SAME check script through run_auto, given time
+    // (default 600s cap), DOES write the marker and passes.
+    let repo2 = temp_repo();
+    let verify2 = VerifyConfig {
+        test: Some("true".into()),
+        ..Default::default()
+    };
+    let outcome2 = run_auto(
+        "create a file then check finishes",
+        trivial_deps("check_to.txt", Some(verify2)),
+        &quota,
+        repo2.path().to_path_buf(),
+        TIMEOUT,
+        Some("sleep 2; echo late > check_late.txt"),
+    )
+    .await
+    .expect("auto run should succeed");
+    let check2 = outcome2.check.expect("check should be Some");
+    assert!(check2.0, "un-killed check must pass (positive control)");
+    assert!(
+        repo2.path().join("check_late.txt").exists(),
+        "an un-killed check completes its write (positive control)"
+    );
 }

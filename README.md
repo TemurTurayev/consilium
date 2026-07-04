@@ -156,6 +156,10 @@ auto-detection (Cargo / npm / pytest / make):
 "verify": { "test": "cargo test", "build": "cargo build" }  // lint is advisory
 ```
 
+Each verify command (and `auto --check`) is capped at `verify.timeoutSecs`
+(default 600): a hanging test or build is killed at the cap and recorded as a
+TIMEOUT-failed verify instead of stalling the run.
+
 Why: research on agent self-correction is clear that a model judging its own work
 *without* an external verifier often degrades — so the build/test signal grounds
 the whole accept/rework loop. Every attempt's verify status (`passed` / `failed`
