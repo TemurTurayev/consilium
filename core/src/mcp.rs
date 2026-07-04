@@ -8,11 +8,16 @@
 //!
 //! Tools: `run_worker` and `quota_status` (M3a), plus `review_diff` (M3c Slice B)
 //! and `council_run` — thin wrappers over existing library functions. Security
-//! invariant: `run_worker` always builds `advisory:false, write:true` (it never
+//! invariants: `run_worker` always builds `advisory:false, write:true` (it never
 //! exposes an `advisory` knob), so the deliberation-grade trust relaxation can
 //! never combine with auto-approved writes at the tool boundary (mirrors
 //! sessions.rs); the `review_diff` and `council_run` paths are always
-//! `advisory:true, write:false`.
+//! `advisory:true, write:false`; and every cwd-taking tool confines the
+//! caller's `cwd` to the directory the server was launched in
+//! ([`crate::confine::cwd_within_root`], mirroring the WS server) — the
+//! conductor is an LLM steered by untrusted repo content, so an unconfined cwd
+//! would let a prompt injection point write-enabled workers (and the auto-run
+//! verifier's build/test commands) at an arbitrary directory.
 
 use crate::adapters::RunRequest;
 use crate::config::{Config, VerifyConfig};
@@ -59,6 +64,10 @@ pub struct McpServer {
     /// Shared quota store (internally `Sync`); reads/writes serialize on its
     /// own mutex, so concurrent tool calls are safe.
     quota: Arc<QuotaStore>,
+    /// The directory the MCP server was launched in. Caller-supplied `cwd`
+    /// values are validated to be within this root before any run is started
+    /// (mirrors the WS server's confinement).
+    launch_root: Arc<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -80,6 +89,7 @@ pub struct RunWorkerParams {
     /// (e.g. "codex-gpt-5.5"); see the workers in consilium.config.json.
     pub worker_label: String,
     /// Absolute path to the repository/working directory the worker edits.
+    /// Must be inside the directory the MCP server was launched in.
     pub cwd: String,
     /// Per-attempt timeout in seconds (default 600).
     pub timeout_secs: Option<u64>,
@@ -113,7 +123,7 @@ pub struct ReviewDiffParams {
     /// The unified diff to review (e.g. `git diff` output).
     pub diff: String,
     /// Absolute path the reviewer process runs in (read-only). Defaults to the
-    /// server's current directory.
+    /// directory the MCP server was launched in and must be inside it.
     pub cwd: Option<String>,
     /// Per-attempt timeout in seconds (default 900).
     pub timeout_secs: Option<u64>,
@@ -151,8 +161,8 @@ pub struct ReviewDiffOutput {
 pub struct CouncilRunParams {
     /// The question to send through the configured worker council.
     pub question: String,
-    /// Absolute path the council runs in (read-only). Defaults to the server's
-    /// current directory.
+    /// Absolute path the council runs in (read-only). Defaults to the
+    /// directory the MCP server was launched in and must be inside it.
     pub cwd: Option<String>,
     /// Per-attempt timeout in seconds (default 900).
     pub timeout_secs: Option<u64>,
@@ -263,7 +273,9 @@ impl McpServer {
     }
 
     /// Construct from already-resolved workers + reviewer ladder (used by tests to
-    /// inject scripted adapters, and by `new` after resolving from config).
+    /// inject scripted adapters, and by `new` after resolving from config). The
+    /// `launch_root` defaults to the process cwd; pass a custom one via
+    /// [`McpServer::with_launch_root`] when a test uses a temp dir as cwd.
     pub fn from_parts(deps: McpServerDeps) -> Self {
         let McpServerDeps {
             workers,
@@ -281,8 +293,15 @@ impl McpServer {
             verify,
             health: ModelHealth::with_retry(RetryConfig::prod()),
             quota: Arc::new(quota),
+            launch_root: Arc::new(std::env::current_dir().unwrap_or_default()),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Override the launch root (used in tests that run agents in a temp dir).
+    pub fn with_launch_root(mut self, root: PathBuf) -> Self {
+        self.launch_root = Arc::new(root);
+        self
     }
 
     #[tool(
@@ -441,9 +460,35 @@ impl McpServer {
         }
     }
 
+    /// Format the refusal for a `cwd` that failed confinement. One message for
+    /// every cwd-taking tool, so the conductor gets consistent feedback.
+    fn cwd_refusal(&self, requested: &std::path::Path) -> String {
+        format!(
+            "cwd '{}' is outside the directory the MCP server was launched in ('{}'); refusing to run",
+            requested.display(),
+            self.launch_root.display(),
+        )
+    }
+
     /// Route a subtask to the named worker, run it, capture changes + verify.
     /// Public for tests (the `run_worker` tool is a thin wrapper over this).
     pub async fn run_worker_inner(&self, p: RunWorkerParams) -> RunWorkerOutput {
+        // SECURITY: the caller is an LLM conductor steered by whatever it reads
+        // (repo content included), so `cwd` is untrusted. Confine it to the
+        // launch root BEFORE anything runs — the worker writes files here and
+        // `run_verify` executes build/test commands here.
+        let cwd = PathBuf::from(&p.cwd);
+        if !crate::confine::cwd_within_root(&cwd, &self.launch_root) {
+            return RunWorkerOutput {
+                ok: false,
+                model_used: None,
+                worker_report: None,
+                changes: None,
+                verify: None,
+                error: Some(self.cwd_refusal(&cwd)),
+            };
+        }
+
         // Resolve the named worker (label = "provider-model").
         let Some(worker) = self.workers.iter().find(|w| w.label == p.worker_label) else {
             let known: Vec<String> = self.workers.iter().map(|w| w.label.clone()).collect();
@@ -462,7 +507,6 @@ impl McpServer {
         };
 
         let ladder = &worker.ladder;
-        let cwd = PathBuf::from(&p.cwd);
         let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_WORKER_TIMEOUT_SECS));
         let prompt = p.prompt.clone();
         let cwd_for_req = cwd.clone();
@@ -535,10 +579,23 @@ impl McpServer {
                 error: Some("empty diff: nothing to review".into()),
             };
         }
+        // SECURITY: `cwd` is untrusted conductor input — confine to the launch
+        // root before the reviewer process runs there (same check as run_worker).
         let cwd = p
             .cwd
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            .unwrap_or_else(|| self.launch_root.as_ref().clone());
+        if !crate::confine::cwd_within_root(&cwd, &self.launch_root) {
+            return ReviewDiffOutput {
+                ok: false,
+                model_used: None,
+                parse_ok: false,
+                has_critical: false,
+                findings: Vec::new(),
+                raw_review: None,
+                error: Some(self.cwd_refusal(&cwd)),
+            };
+        }
         let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_REVIEW_TIMEOUT_SECS));
         let ladder: &[Rung] = &self.reviewer;
 
@@ -603,10 +660,21 @@ impl McpServer {
                 error: Some("empty question: nothing to ask the council".into()),
             };
         }
+        // SECURITY: `cwd` is untrusted conductor input — confine to the launch
+        // root before council members run there (same check as run_worker).
         let cwd = p
             .cwd
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            .unwrap_or_else(|| self.launch_root.as_ref().clone());
+        if !crate::confine::cwd_within_root(&cwd, &self.launch_root) {
+            return CouncilRunOutput {
+                ok: false,
+                synthesis: None,
+                answers: Vec::new(),
+                failed_members: Vec::new(),
+                error: Some(self.cwd_refusal(&cwd)),
+            };
+        }
         let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_COUNCIL_TIMEOUT_SECS));
         let members: Vec<CouncilMember> = self
             .workers
