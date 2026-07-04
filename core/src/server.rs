@@ -10,6 +10,7 @@
 //! engine's collect loop never blocks on socket backpressure.
 
 use crate::config::Config;
+use crate::confine::cwd_within_root;
 use crate::event::{AgentEvent, Provider};
 use crate::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
 use crate::orchestrator::council::CouncilMember;
@@ -121,17 +122,6 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     // strip port
     let host_no_port = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
     matches!(host_no_port, "localhost" | "127.0.0.1" | "::1" | "[::1]")
-}
-
-/// True if `requested` resolves to a path inside `root` (the dir `serve` was
-/// launched in). Both are canonicalized; a path that cannot be canonicalized
-/// (e.g. doesn't exist) is rejected. Prevents a client from pointing
-/// write-enabled agents outside the server's working tree.
-fn cwd_within_root(requested: &std::path::Path, root: &std::path::Path) -> bool {
-    match (requested.canonicalize(), root.canonicalize()) {
-        (Ok(req), Ok(rt)) => req.starts_with(&rt),
-        _ => false,
-    }
 }
 
 async fn ws_session(
@@ -351,42 +341,8 @@ mod tests {
         assert!(!origin_allowed(Some("https://localhost.attacker.com:80")));
     }
 
-    // ── cwd_within_root ───────────────────────────────────────────────────────
-
-    #[test]
-    fn cwd_within_root_root_itself_is_allowed() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(cwd_within_root(root.path(), root.path()));
-    }
-
-    #[test]
-    fn cwd_within_root_subdir_is_allowed() {
-        let root = tempfile::tempdir().unwrap();
-        let sub = root.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        assert!(cwd_within_root(&sub, root.path()));
-    }
-
-    #[test]
-    fn cwd_within_root_parent_is_rejected() {
-        let root = tempfile::tempdir().unwrap();
-        let parent = root.path().parent().unwrap();
-        assert!(!cwd_within_root(parent, root.path()));
-    }
-
-    #[test]
-    fn cwd_within_root_unrelated_temp_dir_is_rejected() {
-        let root = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        assert!(!cwd_within_root(other.path(), root.path()));
-    }
-
-    #[test]
-    fn cwd_within_root_nonexistent_path_is_rejected() {
-        let root = tempfile::tempdir().unwrap();
-        let missing = root.path().join("does_not_exist");
-        assert!(!cwd_within_root(&missing, root.path()));
-    }
+    // NOTE: cwd_within_root unit tests live in crate::confine (the helper is
+    // shared with the MCP server).
 
     // ── existing tests ────────────────────────────────────────────────────────
 

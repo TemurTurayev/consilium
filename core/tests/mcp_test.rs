@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
+/// (prompt, advisory, write) entries recorded per adapter invocation.
+type CallLog = Arc<Mutex<Vec<(String, bool, bool)>>>;
+
 fn git(dir: &std::path::Path, args: &[&str]) {
     let ok = std::process::Command::new("git")
         .args(args)
@@ -98,7 +101,7 @@ fn council_params(question: &str, cwd: &std::path::Path) -> CouncilRunParams {
 #[tokio::test]
 async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
     let repo = temp_repo();
-    let log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let inner = ScriptedAdapter {
         pre_script: "echo hi > out.rs".into(),
         ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
@@ -111,7 +114,8 @@ async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(repo.path().to_path_buf());
 
     let out = server
         .run_worker_inner(params("codex-gpt", repo.path()))
@@ -151,7 +155,8 @@ async fn run_worker_unknown_label_returns_structured_error() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(repo.path().to_path_buf());
 
     let out = server
         .run_worker_inner(params("nope-missing", repo.path()))
@@ -186,7 +191,8 @@ async fn run_worker_runs_the_configured_verifier() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: Some(verify),
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(repo.path().to_path_buf());
 
     let out = server
         .run_worker_inner(params("codex-gpt", repo.path()))
@@ -232,7 +238,8 @@ async fn run_worker_all_rungs_fail_returns_structured_error() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(repo.path().to_path_buf());
 
     let out = server
         .run_worker_inner(params("codex-gpt", repo.path()))
@@ -258,7 +265,8 @@ async fn run_worker_non_git_cwd_degrades_changes_to_none() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(dir.path().to_path_buf());
 
     let out = server
         .run_worker_inner(params("codex-gpt", dir.path()))
@@ -360,7 +368,8 @@ async fn review_diff_parses_verdict_and_flags_critical() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(dir.path().to_path_buf());
 
     let out = server
         .review_diff_inner(review_params("diff --git a b", dir.path()))
@@ -395,7 +404,8 @@ async fn review_diff_important_only_is_not_critical_but_findings_surface() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(dir.path().to_path_buf());
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -424,7 +434,8 @@ async fn review_diff_clean_verdict_has_no_findings() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(dir.path().to_path_buf());
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -450,7 +461,8 @@ async fn review_diff_unparseable_output_fails_closed() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(dir.path().to_path_buf());
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -497,7 +509,8 @@ async fn review_diff_all_rungs_fail_returns_error() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(dir.path().to_path_buf());
 
     let out = server
         .review_diff_inner(review_params("some diff", dir.path()))
@@ -533,7 +546,8 @@ async fn council_run_returns_synthesis_and_answers() {
         transcript_base: std::path::PathBuf::from("/tmp"),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
-    });
+    })
+    .with_launch_root(dir.path().to_path_buf());
 
     let out = server
         .council_run_inner(council_params("which option?", dir.path()))
@@ -559,6 +573,194 @@ async fn council_run_empty_question_returns_error() {
         .await;
     assert!(!out.ok);
     assert!(out.error.unwrap_or_default().contains("empty question"));
+}
+
+// ─── cwd confinement ──────────────────────────────────────────────────────────
+//
+// The MCP caller is an LLM conductor reading untrusted repo content, so a
+// prompt injection can supply any `cwd`. Every cwd-taking tool must confine it
+// to the launch root (mirrors the WS server's cwd_within_root check) — else
+// run_worker points a write-enabled worker at ~/.ssh and run_verify executes
+// `make test` in a model-chosen directory.
+
+fn single_worker_server(log: &CallLog, launch_root: &std::path::Path) -> McpServer {
+    let rec = Arc::new(RecordingAdapter::new(
+        ScriptedAdapter::ok_with_text(Provider::Codex, "should not have run"),
+        log.clone(),
+    ));
+    McpServer::from_parts(McpServerDeps {
+        workers: vec![worker("codex-gpt", rec)],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(launch_root.to_path_buf())
+}
+
+#[tokio::test]
+async fn run_worker_cwd_outside_launch_root_is_rejected() {
+    let root = temp_repo();
+    let outside = temp_repo(); // a perfectly valid repo — but not under the root
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let server = single_worker_server(&log, root.path());
+
+    let out = server
+        .run_worker_inner(params("codex-gpt", outside.path()))
+        .await;
+
+    assert!(!out.ok, "cwd outside the launch root must be refused");
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("outside"), "got: {err}");
+    assert!(out.verify.is_none(), "verify must not run in a rejected cwd");
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the worker must never launch in an unconfined cwd"
+    );
+}
+
+#[tokio::test]
+async fn run_worker_nonexistent_cwd_is_rejected() {
+    let root = temp_repo();
+    let missing = root.path().join("does_not_exist");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let server = single_worker_server(&log, root.path());
+
+    let out = server.run_worker_inner(params("codex-gpt", &missing)).await;
+
+    assert!(!out.ok, "a cwd that cannot be canonicalized must be refused");
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("outside"), "got: {err}");
+    assert!(log.lock().unwrap().is_empty(), "worker must not launch");
+}
+
+#[tokio::test]
+async fn run_worker_path_escape_cwd_is_rejected() {
+    // `root/sub/../..` textually starts inside the root but canonicalizes to the
+    // root's parent — the traversal must be resolved before the containment check.
+    let root = temp_repo();
+    std::fs::create_dir(root.path().join("sub")).unwrap();
+    let escape = root.path().join("sub").join("..").join("..");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let server = single_worker_server(&log, root.path());
+
+    let out = server.run_worker_inner(params("codex-gpt", &escape)).await;
+
+    assert!(!out.ok, "a `..` escape must be refused");
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("outside"), "got: {err}");
+    assert!(log.lock().unwrap().is_empty(), "worker must not launch");
+}
+
+#[tokio::test]
+async fn run_worker_cwd_subdir_of_launch_root_is_allowed() {
+    // Positive control: confinement must not over-restrict legitimate subdirs.
+    let root = temp_repo();
+    let sub = root.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker(
+            "codex-gpt",
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "did it")),
+        )],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(root.path().to_path_buf());
+
+    let out = server.run_worker_inner(params("codex-gpt", &sub)).await;
+
+    assert!(out.ok, "subdir of the root is fine; error={:?}", out.error);
+}
+
+#[tokio::test]
+async fn review_diff_cwd_outside_launch_root_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            r#"{"findings":[]}"#,
+        ))),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(root.path().to_path_buf());
+
+    let out = server
+        .review_diff_inner(review_params("some diff", outside.path()))
+        .await;
+
+    assert!(!out.ok, "cwd outside the launch root must be refused");
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("outside"), "got: {err}");
+    assert!(out.raw_review.is_none(), "the reviewer must never run");
+}
+
+#[tokio::test]
+async fn council_run_cwd_outside_launch_root_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker(
+            "codex-gpt",
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "answer")),
+        )],
+        reviewer: Vec::new(),
+        chairman: chairman_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            "synthesis",
+        ))),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(root.path().to_path_buf());
+
+    let out = server
+        .council_run_inner(council_params("which option?", outside.path()))
+        .await;
+
+    assert!(!out.ok, "cwd outside the launch root must be refused");
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("outside"), "got: {err}");
+    assert!(out.synthesis.is_none(), "the council must never run");
+    assert!(out.answers.is_empty());
+}
+
+#[tokio::test]
+async fn review_diff_default_cwd_is_launch_root_and_allowed() {
+    // Omitted cwd falls back to the launch root itself, which trivially passes.
+    let root = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            r#"{"findings":[]}"#,
+        ))),
+        chairman: Vec::new(),
+        transcript_base: std::path::PathBuf::from("/tmp"),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(root.path().to_path_buf());
+
+    let out = server
+        .review_diff_inner(ReviewDiffParams {
+            diff: "some diff".into(),
+            cwd: None,
+            timeout_secs: Some(30),
+        })
+        .await;
+
+    assert!(out.ok, "default cwd must be usable; error={:?}", out.error);
 }
 
 // ─── search_recall ────────────────────────────────────────────────────────────
