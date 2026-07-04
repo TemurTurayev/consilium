@@ -98,6 +98,12 @@ pub struct VerifyConfig {
     pub test: Option<String>,
     #[serde(default)]
     pub lint: Option<String>,
+    /// Per-command wall-clock cap in seconds for verify commands (and auto's
+    /// `--check` command). Unset → 600. A command that exceeds the cap is
+    /// SIGKILLed and recorded as TIMEOUT — blocking for build/test, advisory
+    /// for lint.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Conductor working memory: a live plan ledger (prior subtasks' status) plus the
@@ -422,5 +428,21 @@ mod tests {
         assert_eq!(v.test.as_deref(), Some("cargo test"));
         assert_eq!(v.build.as_deref(), Some("cargo build"));
         assert!(v.lint.is_none());
+        // omitted → None; run_verify resolves it to the 600s default
+        assert!(v.timeout_secs.is_none());
+    }
+
+    #[test]
+    fn verify_timeout_secs_parses_camelcase_and_round_trips() {
+        let json = r#"{"roles":{"conductor":{"provider":"claude","model":"m"},
+            "chairman":{"provider":"claude","model":"m"},"workers":[],
+            "reviewer":{"provider":"codex","model":"m"},
+            "supervisor":{"provider":"gemini","model":"m"}},
+            "verify":{"test":"cargo test","timeoutSecs":120}}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.verify.as_ref().unwrap().timeout_secs, Some(120));
+        // round-trip
+        let back: Config = serde_json::from_str(&cfg.to_pretty_json().unwrap()).unwrap();
+        assert_eq!(back.verify, cfg.verify);
     }
 }

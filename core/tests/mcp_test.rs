@@ -178,6 +178,7 @@ async fn run_worker_runs_the_configured_verifier() {
         test: Some("grep -q hi out.rs".into()),
         build: None,
         lint: None,
+        timeout_secs: None,
     };
     let server = McpServer::from_parts(McpServerDeps {
         workers: vec![worker("codex-gpt", Arc::new(inner))],
