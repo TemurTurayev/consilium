@@ -614,7 +614,10 @@ async fn run_worker_cwd_outside_launch_root_is_rejected() {
     assert!(!out.ok, "cwd outside the launch root must be refused");
     let err = out.error.unwrap_or_default();
     assert!(err.contains("outside"), "got: {err}");
-    assert!(out.verify.is_none(), "verify must not run in a rejected cwd");
+    assert!(
+        out.verify.is_none(),
+        "verify must not run in a rejected cwd"
+    );
     assert!(
         log.lock().unwrap().is_empty(),
         "the worker must never launch in an unconfined cwd"
@@ -630,7 +633,10 @@ async fn run_worker_nonexistent_cwd_is_rejected() {
 
     let out = server.run_worker_inner(params("codex-gpt", &missing)).await;
 
-    assert!(!out.ok, "a cwd that cannot be canonicalized must be refused");
+    assert!(
+        !out.ok,
+        "a cwd that cannot be canonicalized must be refused"
+    );
     let err = out.error.unwrap_or_default();
     assert!(err.contains("outside"), "got: {err}");
     assert!(log.lock().unwrap().is_empty(), "worker must not launch");

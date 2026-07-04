@@ -1,8 +1,8 @@
 pub mod adapters;
 pub mod auth;
 pub mod catalog;
-mod confine;
 pub mod config;
+mod confine;
 pub mod doctor;
 pub mod event;
 pub mod mcp;
