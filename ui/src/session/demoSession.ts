@@ -10,6 +10,12 @@ export const demoSession: InboundFrame[] = [
   { type: 'session_started', session_id: 'demo-conductor', provider: 'claude', model: 'claude-opus-4-8' },
   { type: 'thinking', text: 'Decomposing the task into subtasks and assigning workers…' },
   { type: 'message', text: 'Plan: (1) add the parser, (2) wire it into the CLI, (3) cover it with tests.' },
+  // A short operator beat: the chief physician pauses the council, leaves a
+  // note for the next decision point, then resumes — showcasing the pause /
+  // interject / resume controls with zero backend.
+  { type: 'paused' },
+  { type: 'operator_note', text: 'Prefer the simpler fix, please' },
+  { type: 'resumed' },
   { type: 'session_started', session_id: 'demo-worker', provider: 'codex', model: 'gpt-5.4' },
   { type: 'tool_call', name: 'edit', detail: 'src/parser.rs (+48 lines)' },
   { type: 'file_changed', path: 'src/parser.rs' },

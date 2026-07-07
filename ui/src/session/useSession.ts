@@ -10,6 +10,9 @@ export interface UseSession {
   start: (req: SessionRequest) => void
   startDemo: () => void
   cancel: () => void
+  pause: () => void
+  resume: () => void
+  interject: (text: string) => void
   reset: () => void
 }
 
@@ -88,6 +91,32 @@ export function useSession(): UseSession {
     }
   }, [])
 
+  /** Sends `{"kind":"pause"}` on the open socket; a no-op otherwise. */
+  const pause = useCallback(() => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ kind: 'pause' } satisfies SessionRequest))
+    }
+  }, [])
+
+  /** Sends `{"kind":"resume"}` on the open socket; a no-op otherwise. */
+  const resume = useCallback(() => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ kind: 'resume' } satisfies SessionRequest))
+    }
+  }, [])
+
+  /** Sends `{"kind":"interject",text}` on the open socket; a no-op otherwise.
+   * Doesn't land mid-agent-call — the conductor reads it at the next
+   * decision point (see `AgentEvent::OperatorNote`). */
+  const interject = useCallback((text: string) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ kind: 'interject', text } satisfies SessionRequest))
+    }
+  }, [])
+
   // Replays a canned session through the same reducer — no backend, no quota.
   const startDemo = useCallback(() => {
     teardown()
@@ -104,5 +133,5 @@ export function useSession(): UseSession {
     dispatch({ type: 'reset' })
   }, [teardown])
 
-  return { state, start, startDemo, cancel, reset }
+  return { state, start, startDemo, cancel, pause, resume, interject, reset }
 }

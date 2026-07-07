@@ -16,13 +16,14 @@ const VERDICT_LABEL: Record<NonNullable<Verdict>, string> = {
 
 /** The centrepiece of the table: the task-as-patient. Shows run phase, files
  * touched so far, and — once the run has a terminal frame — a verdict badge. */
-export function PatientCard({ patient }: { patient: Patient }) {
+export function PatientCard({ patient, paused }: { patient: Patient; paused: boolean }) {
   return (
     <div className="patient">
       <div className="patient__figure" aria-hidden="true" />
       <div className="patient__body">
         <span className="patient__title">{patient.taskKnown ? 'Patient on the table' : 'No patient yet'}</span>
         <span className="patient__phase">{PHASE_LABEL[patient.phase]}</span>
+        {paused && <span className="badge patient__paused-pill">Council paused</span>}
         <span className="patient__files">
           {patient.filesChanged} file{patient.filesChanged === 1 ? '' : 's'} touched
         </span>

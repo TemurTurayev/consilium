@@ -12,6 +12,7 @@ describe('sessionReducer', () => {
     expect(initialState.phase).toBe('idle')
     expect(initialState.events).toHaveLength(0)
     expect(initialState.usage).toEqual({ inputTokens: 0, outputTokens: 0 })
+    expect(initialState.paused).toBe(false)
   })
 
   it('start resets a prior run and enters running/connecting', () => {
@@ -179,5 +180,58 @@ describe('sessionReducer', () => {
     expect(s.usage).toEqual({ inputTokens: 27642, outputTokens: 2950 })
     // last session_started wins (the gemini reviewer)
     expect(s.session?.provider).toBe('gemini')
+    // the mid-demo pause/note/resume beat resolves before the run ends
+    expect(s.paused).toBe(false)
+  })
+
+  it('the demo fixture carries an operator pause/note/resume beat, in order', () => {
+    const s = replay(demoSession)
+    const types = s.events.map((e) => e.type)
+    const pausedIdx = types.indexOf('paused')
+    const noteIdx = types.indexOf('operator_note')
+    const resumedIdx = types.indexOf('resumed')
+    expect(pausedIdx).toBeGreaterThan(-1)
+    expect(noteIdx).toBe(pausedIdx + 1)
+    expect(resumedIdx).toBe(noteIdx + 1)
+    expect(s.events[noteIdx]).toEqual({ type: 'operator_note', text: 'Prefer the simpler fix, please' })
+  })
+
+  describe('paused', () => {
+    it('sets the flag and appends to the stream', () => {
+      const s = replay([{ type: 'paused' }])
+      expect(s.paused).toBe(true)
+      expect(s.events.map((e) => e.type)).toEqual(['paused'])
+    })
+
+    it('resumed clears the flag and appends to the stream', () => {
+      const s = replay([{ type: 'paused' }, { type: 'resumed' }])
+      expect(s.paused).toBe(false)
+      expect(s.events.map((e) => e.type)).toEqual(['paused', 'resumed'])
+    })
+
+    it('operator_note appends to the stream without touching the paused flag', () => {
+      const s = replay([{ type: 'paused' }, { type: 'operator_note', text: 'go simpler' }])
+      expect(s.paused).toBe(true)
+      expect(s.events).toHaveLength(2)
+      expect(s.events[1]).toEqual({ type: 'operator_note', text: 'go simpler' })
+    })
+
+    it('run_complete clears a stale paused flag', () => {
+      const s = replay([{ type: 'paused' }, { type: 'run_complete', completed: [1], halted: null, failed: null }])
+      expect(s.paused).toBe(false)
+      expect(s.phase).toBe('done')
+    })
+
+    it('run_cancelled clears a stale paused flag', () => {
+      const s = replay([{ type: 'paused' }, { type: 'run_cancelled' }])
+      expect(s.paused).toBe(false)
+      expect(s.phase).toBe('done')
+    })
+
+    it('run_error clears a stale paused flag', () => {
+      const s = replay([{ type: 'paused' }, { type: 'run_error', error: 'boom' }])
+      expect(s.paused).toBe(false)
+      expect(s.phase).toBe('errored')
+    })
   })
 })

@@ -75,6 +75,24 @@ export function EventRow({ event }: { event: AgentEvent }) {
           <span className="row__err">{event.error}</span>
         </Row>
       )
+    case 'paused':
+      return (
+        <Row kind="system" badge="PAUSED">
+          <span className="row__dim">Council paused by the chief physician.</span>
+        </Row>
+      )
+    case 'resumed':
+      return (
+        <Row kind="system" badge="RESUMED">
+          <span className="row__dim">Council resumed.</span>
+        </Row>
+      )
+    case 'operator_note':
+      return (
+        <Row kind="operator" badge="OPERATOR">
+          {event.text}
+        </Row>
+      )
     default:
       return (
         <Row kind="unknown" badge="EVENT">

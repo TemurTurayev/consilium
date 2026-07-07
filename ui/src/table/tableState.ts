@@ -40,6 +40,13 @@ export interface Patient {
 export interface TableState {
   seats: Record<SeatId, Seat>
   patient: Patient
+  /** Mirrors `SessionState.paused` — the council is on hold. */
+  paused: boolean
+  /** Text of the most recent `operator_note` event, or null if the chief
+   * physician hasn't said anything this run. Persists across later events
+   * (there's no "note cleared" frame), so it reads as "what was last said"
+   * rather than "what's currently pending". */
+  operatorNote: string | null
 }
 
 const MESSAGE_TRUNCATE_LEN = 140
@@ -119,6 +126,16 @@ function derivePatient(state: SessionState): Patient {
   }
 }
 
+/** Finds the most recent `operator_note` text in the event stream, scanning
+ * from the end — cheap for the handful of events a run produces. */
+function deriveOperatorNote(events: AgentEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event.type === 'operator_note') return event.text
+  }
+  return null
+}
+
 /** Derives per-seat status + the patient summary from the live session state.
  * Replaying `state.events` is cheap (a handful of frames per run) and keeps
  * this a pure function of `SessionState`, so it can be called straight from
@@ -144,5 +161,10 @@ export function deriveSeats(state: SessionState): TableState {
     {} as Record<SeatId, Seat>,
   )
 
-  return { seats, patient: derivePatient(state) }
+  return {
+    seats,
+    patient: derivePatient(state),
+    paused: state.paused,
+    operatorNote: deriveOperatorNote(state.events),
+  }
 }

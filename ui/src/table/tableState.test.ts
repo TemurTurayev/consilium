@@ -13,11 +13,13 @@ function replay(frames: InboundFrame[], from: SessionState = initialState): Sess
 
 describe('deriveSeats', () => {
   it('every seat is absent and the patient is unknown before any run', () => {
-    const { seats, patient } = deriveSeats(initialState)
+    const { seats, patient, paused, operatorNote } = deriveSeats(initialState)
     for (const id of ['claude', 'codex', 'gemini', 'grok'] as const) {
       expect(seats[id]).toEqual({ id, status: 'absent', model: null, lastMessage: null, toolName: null, active: false })
     }
     expect(patient).toEqual({ taskKnown: false, filesChanged: 0, phase: 'idle', verdict: null })
+    expect(paused).toBe(false)
+    expect(operatorNote).toBeNull()
   })
 
   it('a started run marks the patient known even with zero frames yet', () => {
@@ -171,9 +173,27 @@ describe('deriveSeats', () => {
     expect(deriveSeats(s).patient.verdict).toBeNull()
   })
 
+  it('paused mirrors state.paused', () => {
+    const s = replay([{ type: 'paused' }])
+    expect(deriveSeats(s).paused).toBe(true)
+  })
+
+  it('operatorNote exposes the most recent operator_note text', () => {
+    const s = replay([
+      { type: 'operator_note', text: 'first' },
+      { type: 'operator_note', text: 'second' },
+    ])
+    expect(deriveSeats(s).operatorNote).toBe('second')
+  })
+
+  it('operatorNote stays null when none has arrived', () => {
+    const s = replay([{ type: 'paused' }])
+    expect(deriveSeats(s).operatorNote).toBeNull()
+  })
+
   it('replays the full demo fixture to the expected final seat + patient state', () => {
     const s = replay(demoSession)
-    const { seats, patient } = deriveSeats(s)
+    const { seats, patient, paused, operatorNote } = deriveSeats(s)
 
     expect(seats.claude).toMatchObject({
       status: 'speaking',
@@ -196,5 +216,9 @@ describe('deriveSeats', () => {
     expect(seats.grok.status).toBe('absent')
 
     expect(patient).toEqual({ taskKnown: true, filesChanged: 2, phase: 'done', verdict: 'completed' })
+    // the mid-demo pause/note/resume beat resolves before the run ends, but
+    // the note itself persists as "what was last said"
+    expect(paused).toBe(false)
+    expect(operatorNote).toBe('Prefer the simpler fix, please')
   })
 })

@@ -1040,3 +1040,117 @@ body {
     display: none;
   }
 }
+
+/* =========================================================================
+   Operator controls — pause / resume / interject. The chief physician can
+   put the council on hold, leave a note for the next decision point, and
+   resume. Appended after the rest of the sheet; reuses tokens defined above.
+   ========================================================================= */
+
+/* ---- "on hold" treatment: dim the seats while paused ---- */
+.seat--paused {
+  opacity: 0.55;
+  filter: saturate(0.6);
+}
+
+/* ---- "council paused" pill on the patient card ---- */
+.patient__paused-pill {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--warn);
+}
+
+/* ---- bottom-docked operator area: note (if any) above the control strip ---- */
+.scene__operator {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  width: min(480px, 92%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 3;
+}
+
+/* ---- chief-physician note bubble ---- */
+.operator-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  box-shadow: var(--shadow);
+  animation: enter 120ms ease-out;
+}
+.operator-note__badge {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+.operator-note__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.operator-note__hint {
+  flex: 0 0 100%;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* ---- pause / resume / stop / interject strip ---- */
+.operator-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+}
+.operator-strip__controls {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.operator-strip__interject {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 200px;
+  min-width: 180px;
+}
+.operator-strip__interject .field__input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+/* ---- small screens: stack under the (now-static) seats ---- */
+@media (max-width: 700px) {
+  .scene__operator {
+    position: static;
+    transform: none;
+    width: 100%;
+    margin-top: 8px;
+  }
+}
+
+/* ---- Run view: operator_note / paused / resumed rows ---- */
+.row--operator {
+  border-left-color: var(--warn);
+}
+.row--system {
+  border-left-color: var(--text-faint);
+  opacity: 0.85;
+}

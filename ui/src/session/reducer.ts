@@ -24,6 +24,10 @@ export interface SessionState {
    * a terminal state distinct from `terminal`, so `ResultPanel` can show
    * "Run cancelled" instead of the accepted-subtasks summary. */
   cancelled: boolean
+  /** True from a `paused` event until the matching `resumed` event, or until
+   * any terminal frame (`run_complete` / `run_cancelled` / `run_error`)
+   * clears it — a run can't stay "paused" once it's over. */
+  paused: boolean
   error: string | null
 }
 
@@ -36,6 +40,7 @@ export const initialState: SessionState = {
   files: [],
   terminal: null,
   cancelled: false,
+  paused: false,
   error: null,
 }
 
@@ -88,14 +93,19 @@ function foldFrame(state: SessionState, frame: InboundFrame): SessionState {
     case 'run_complete':
       // Clears any stale mid-run `error` (e.g. a transient `error` frame the
       // run recovered from) — otherwise ResultPanel's error-first check would
-      // show "Run error" over a run that actually finished cleanly.
-      return { ...state, phase: 'done', terminal: frame, error: null }
+      // show "Run error" over a run that actually finished cleanly. Also
+      // clears a stale `paused` — a finished run can't still be on hold.
+      return { ...state, phase: 'done', terminal: frame, error: null, paused: false }
     case 'run_cancelled':
-      return { ...state, phase: 'done', cancelled: true, error: null }
+      return { ...state, phase: 'done', cancelled: true, error: null, paused: false }
     case 'run_error':
-      return { ...state, phase: 'errored', error: frame.error }
+      return { ...state, phase: 'errored', error: frame.error, paused: false }
     case 'error':
       return { ...state, phase: 'errored', error: frame.error }
+    case 'paused':
+      return { ...appendEvent(state, frame), paused: true }
+    case 'resumed':
+      return { ...appendEvent(state, frame), paused: false }
     default:
       return appendEvent(state, frame)
   }

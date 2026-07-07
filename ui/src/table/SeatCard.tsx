@@ -9,6 +9,8 @@ interface Props {
   role: string
   /** Positions this seat around the table ellipse (see index.css). */
   slot: 'top' | 'left' | 'right' | 'bottom-right'
+  /** The council is on hold — dims the seat as part of the scene's "on hold" treatment. */
+  paused?: boolean
 }
 
 function statusLine(seat: Seat): ReactNode {
@@ -34,11 +36,11 @@ function statusLine(seat: Seat): ReactNode {
 
 /** One council member's seat: sprite, name/role, a one-line status, and — for
  * the currently active seat only — a speech bubble with its last message. */
-export function SeatCard({ seat, name, role, slot }: Props) {
+export function SeatCard({ seat, name, role, slot, paused = false }: Props) {
   const showBubble = seat.active && seat.lastMessage !== null
   return (
     <div
-      className={`seat seat--${seat.id} seat--${seat.status} seat--slot-${slot}${seat.active ? ' seat--active' : ''}`}
+      className={`seat seat--${seat.id} seat--${seat.status} seat--slot-${slot}${seat.active ? ' seat--active' : ''}${paused ? ' seat--paused' : ''}`}
     >
       {showBubble && <div className="seat__bubble">{seat.lastMessage}</div>}
       <SeatSprite sprite={SPRITES[seat.id]} />

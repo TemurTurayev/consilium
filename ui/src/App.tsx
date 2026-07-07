@@ -13,7 +13,7 @@ import { SettingsView } from './components/SettingsView'
 import { TableView } from './table/TableView'
 
 export function App() {
-  const { state, start, startDemo, cancel, reset } = useSession()
+  const { state, start, startDemo, cancel, pause, resume, interject, reset } = useSession()
   const running = state.phase === 'running'
   const [view, setView] = useState<View>('run')
 
@@ -44,7 +44,17 @@ export function App() {
               />
             </>
           )}
-          {view === 'table' && <TableView state={state} onStart={start} onDemo={startDemo} onCancel={cancel} />}
+          {view === 'table' && (
+            <TableView
+              state={state}
+              onStart={start}
+              onDemo={startDemo}
+              onCancel={cancel}
+              onPause={pause}
+              onResume={resume}
+              onInterject={interject}
+            />
+          )}
           {view === 'usage' && <QuotaDashboard active={view === 'usage'} />}
           {view === 'providers' && <ProvidersView />}
           {view === 'settings' && <SettingsView />}
