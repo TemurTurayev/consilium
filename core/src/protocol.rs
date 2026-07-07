@@ -80,6 +80,7 @@ pub struct QuotaSnapshot {
     pub claude: ProviderUsage,
     pub codex: ProviderUsage,
     pub gemini: ProviderUsage,
+    pub grok: ProviderUsage,
 }
 
 /// Client→server frames on a `/ws/session` socket: the first frame describes

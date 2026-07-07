@@ -100,6 +100,24 @@ pub fn catalog() -> Vec<CatalogEntry> {
             },
             tier: "frontier",
         },
+        // Beta: the Grok Build CLI's headless event schema is unstable (see
+        // adapters::grok's doc comment) and its token accounting is unverified
+        // against real output — scored modestly below every other provider's
+        // corresponding role so it never displaces the curated default lineup
+        // (see recommend::tests::full_catalog_reproduces_the_curated_default_lineup),
+        // but is still available as an explicit choice once authed.
+        CatalogEntry {
+            provider: Provider::Grok,
+            model: "grok-build-0.1".into(),
+            auth_method: AuthMethod::CliLogin,
+            scores: RoleScores {
+                conductor: 5,
+                worker: 6,
+                reviewer: 5,
+                supervisor: 5,
+            },
+            tier: "beta",
+        },
     ]
 }
 
@@ -141,9 +159,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_covers_the_three_v1_providers() {
+    fn catalog_covers_all_four_providers() {
         let c = catalog();
-        for p in [Provider::Claude, Provider::Codex, Provider::Gemini] {
+        for p in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::Gemini,
+            Provider::Grok,
+        ] {
             assert!(
                 c.iter().any(|e| e.provider == p),
                 "catalog must cover {p:?}"
@@ -180,6 +203,26 @@ mod tests {
     }
 
     #[test]
+    fn grok_scores_are_modest_and_never_beat_the_curated_default_lineup() {
+        // Grok is beta — its scores must stay below every other provider's best
+        // per role so it never silently displaces the curated default lineup
+        // (see recommend::tests::full_catalog_reproduces_the_curated_default_lineup).
+        let c = catalog();
+        let grok = c.iter().find(|e| e.provider == Provider::Grok).unwrap();
+        let best_other = |score: fn(&RoleScores) -> u8| -> u8 {
+            c.iter()
+                .filter(|e| e.provider != Provider::Grok)
+                .map(|e| score(&e.scores))
+                .max()
+                .expect("catalog has non-grok entries")
+        };
+        assert!(grok.scores.conductor < best_other(|s| s.conductor));
+        assert!(grok.scores.worker < best_other(|s| s.worker));
+        assert!(grok.scores.reviewer < best_other(|s| s.reviewer));
+        assert!(grok.scores.supervisor < best_other(|s| s.supervisor));
+    }
+
+    #[test]
     fn claude_uses_setup_token_others_cli_login() {
         let c = catalog();
         let claude = c.iter().find(|e| e.provider == Provider::Claude).unwrap();
@@ -203,6 +246,7 @@ mod tests {
         );
         assert_eq!(top_model(Provider::Codex).unwrap().model, "gpt-5.5");
         assert!(top_model(Provider::Gemini).is_some());
+        assert_eq!(top_model(Provider::Grok).unwrap().model, "grok-build-0.1");
     }
 
     #[test]

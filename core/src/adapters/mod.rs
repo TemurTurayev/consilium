@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod grok;
 
 use crate::event::{AgentEvent, Provider};
 use std::path::PathBuf;

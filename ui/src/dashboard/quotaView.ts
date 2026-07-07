@@ -3,7 +3,7 @@
 // `useQuota`).
 import type { ProviderUsage, QuotaSnapshot } from '../protocol'
 
-export type ProviderKey = 'claude' | 'codex' | 'gemini'
+export type ProviderKey = 'claude' | 'codex' | 'gemini' | 'grok'
 
 export interface QuotaRow {
   provider: ProviderKey
@@ -11,15 +11,17 @@ export interface QuotaRow {
   input: number
   output: number
   total: number
-  /** Tokens are heuristic estimates (provider reports no usage, e.g. Gemini via agy). */
+  /** Tokens are heuristic estimates (provider reports no usage, e.g. Gemini via agy,
+   * or — until real fixtures are recorded — the beta Grok Build CLI). */
   estimated: boolean
 }
 
-const PROVIDERS: ProviderKey[] = ['claude', 'codex', 'gemini']
+const PROVIDERS: ProviderKey[] = ['claude', 'codex', 'gemini', 'grok']
 const LABELS: Record<ProviderKey, string> = {
   claude: 'Claude',
   codex: 'Codex',
   gemini: 'Gemini',
+  grok: 'Grok',
 }
 
 /** Flatten a snapshot into one display row per provider (stable order). */

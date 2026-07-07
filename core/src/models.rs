@@ -88,9 +88,14 @@ async fn resolve_one(provider: Provider, quota: &QuotaStore) -> TopModel {
 }
 
 /// Resolve the top live model for every v1 provider concurrently (a cold Claude
-/// probe must not serialize the wait). Stable order: claude, codex, gemini.
+/// probe must not serialize the wait). Stable order: claude, codex, gemini, grok.
 pub async fn resolve_top_models(quota: &QuotaStore) -> Vec<(Provider, TopModel)> {
-    let providers = [Provider::Claude, Provider::Codex, Provider::Gemini];
+    let providers = [
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Gemini,
+        Provider::Grok,
+    ];
     let futs = providers
         .into_iter()
         .map(|p| async move { (p, resolve_one(p, quota).await) });

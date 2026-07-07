@@ -7,17 +7,20 @@ const snap: QuotaSnapshot = {
   claude: { input_tokens: 1000, output_tokens: 500, estimated: false },
   codex: { input_tokens: 200, output_tokens: 0, estimated: false },
   gemini: { input_tokens: 0, output_tokens: 0, estimated: true },
+  grok: { input_tokens: 30, output_tokens: 10, estimated: true },
 }
 
 describe('quotaRows', () => {
   it('maps providers to rows with totals in a stable order', () => {
     const rows = quotaRows(snap)
-    expect(rows.map((r) => r.provider)).toEqual(['claude', 'codex', 'gemini'])
+    expect(rows.map((r) => r.provider)).toEqual(['claude', 'codex', 'gemini', 'grok'])
     expect(rows[0]).toMatchObject({ label: 'Claude', input: 1000, output: 500, total: 1500 })
     expect(rows[1].total).toBe(200)
     expect(rows[2].total).toBe(0)
-    // The estimated flag flows through per provider (Gemini via agy is estimated).
-    expect(rows.map((r) => r.estimated)).toEqual([false, false, true])
+    expect(rows[3]).toMatchObject({ label: 'Grok', input: 30, output: 10, total: 40 })
+    // The estimated flag flows through per provider (Gemini via agy, and Grok
+    // until real fixtures are recorded, are both estimated).
+    expect(rows.map((r) => r.estimated)).toEqual([false, false, true, true])
   })
 })
 
@@ -47,6 +50,7 @@ describe('maxTotal', () => {
       claude: { input_tokens: 0, output_tokens: 0, estimated: false },
       codex: { input_tokens: 0, output_tokens: 0, estimated: false },
       gemini: { input_tokens: 0, output_tokens: 0, estimated: false },
+      grok: { input_tokens: 0, output_tokens: 0, estimated: false },
     }
     expect(maxTotal(quotaRows(idle))).toBe(1)
   })

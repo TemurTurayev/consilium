@@ -44,6 +44,14 @@ pub fn check(binary: &str) -> CliStatus {
     check_with_path(binary, None)
 }
 
+// NOTE: intentionally NOT "claude", "codex", "agy", "grok" — `run_doctor`
+// drives the base `consilium doctor` prerequisite GATE (exits 1 if any listed
+// binary is missing). Grok is a beta, opt-in fourth provider: it must not
+// become a hard requirement for users who never configured it. Its liveness
+// is still fully probeable via the generic per-provider path this module and
+// `crate::auth` expose (`adapter_for`, `probe_model`, `auth::probe_auth`),
+// which `consilium doctor --models`, `consilium auth`, and `consilium models`
+// all drive off the user's actual config/catalog rather than this fixed list.
 pub fn run_doctor() -> Vec<CliStatus> {
     ["claude", "codex", "agy"]
         .iter()
@@ -173,6 +181,7 @@ pub fn adapter_for(provider: Provider) -> std::sync::Arc<dyn crate::adapters::Ad
         Provider::Claude => Arc::new(crate::adapters::claude::ClaudeAdapter),
         Provider::Codex => Arc::new(crate::adapters::codex::CodexAdapter),
         Provider::Gemini => Arc::new(crate::adapters::gemini::GeminiAdapter),
+        Provider::Grok => Arc::new(crate::adapters::grok::GrokAdapter),
     }
 }
 

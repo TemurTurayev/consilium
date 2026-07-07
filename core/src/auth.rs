@@ -21,12 +21,15 @@ pub enum ProviderAuth {
     Down(String),
 }
 
-/// The CLI binary name for a provider (matches `doctor::run_doctor`'s list).
+/// The CLI binary name for a provider. Covers every `Provider` variant, unlike
+/// `doctor::run_doctor`'s fixed list (which deliberately excludes the beta,
+/// opt-in Grok provider — see that function's doc comment).
 pub fn cli_binary(p: Provider) -> &'static str {
     match p {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
         Provider::Gemini => "agy",
+        Provider::Grok => "grok",
     }
 }
 
@@ -74,6 +77,7 @@ pub fn login_command(p: Provider) -> &'static str {
         Provider::Claude => "run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN=<token> (add it to your shell profile so it persists)",
         Provider::Codex => "run `codex login`",
         Provider::Gemini => "run `agy login`",
+        Provider::Grok => "run `grok` once and complete the browser login (X Premium+ / SuperGrok subscription)",
     }
 }
 
@@ -119,9 +123,14 @@ pub async fn probe_auth(p: Provider, quota: &QuotaStore) -> ProviderAuth {
 
 /// Probe all v1 providers concurrently, so a cold-starting Claude (~30s) does not
 /// serialize the wait. Returns one (provider, status) per v1 provider, in a
-/// stable order (claude, codex, gemini).
+/// stable order (claude, codex, gemini, grok).
 pub async fn auth_report(quota: &QuotaStore) -> Vec<(Provider, ProviderAuth)> {
-    let providers = [Provider::Claude, Provider::Codex, Provider::Gemini];
+    let providers = [
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Gemini,
+        Provider::Grok,
+    ];
     let futs = providers
         .into_iter()
         .map(|p| async move { (p, probe_auth(p, quota).await) });
@@ -137,6 +146,7 @@ mod tests {
         assert_eq!(cli_binary(Provider::Claude), "claude");
         assert_eq!(cli_binary(Provider::Codex), "codex");
         assert_eq!(cli_binary(Provider::Gemini), "agy");
+        assert_eq!(cli_binary(Provider::Grok), "grok");
     }
 
     #[test]
@@ -189,6 +199,11 @@ mod tests {
         assert!(g.contains("codex login"), "got: {g}");
         let g = guidance(Provider::Gemini, &ProviderAuth::NeedsLogin("401".into()));
         assert!(g.contains("agy login"), "got: {g}");
+        let g = guidance(Provider::Grok, &ProviderAuth::NeedsLogin("401".into()));
+        assert!(
+            g.contains("grok") && g.contains("browser login"),
+            "got: {g}"
+        );
     }
 
     #[test]
@@ -218,5 +233,9 @@ mod tests {
         );
         assert_eq!(primary_model(Provider::Codex).as_deref(), Some("gpt-5.5"));
         assert!(primary_model(Provider::Gemini).is_some());
+        assert_eq!(
+            primary_model(Provider::Grok).as_deref(),
+            Some("grok-build-0.1")
+        );
     }
 }

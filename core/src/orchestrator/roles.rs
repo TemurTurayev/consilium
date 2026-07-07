@@ -1,5 +1,6 @@
 use crate::adapters::{
-    claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter, Adapter, RunRequest,
+    claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter, grok::GrokAdapter, Adapter,
+    RunRequest,
 };
 use crate::config::RoleConfig;
 use crate::event::Provider;
@@ -13,6 +14,7 @@ fn adapter_for_provider(p: Provider) -> Arc<dyn Adapter> {
         Provider::Claude => Arc::new(ClaudeAdapter),
         Provider::Codex => Arc::new(CodexAdapter),
         Provider::Gemini => Arc::new(GeminiAdapter),
+        Provider::Grok => Arc::new(GrokAdapter),
     }
 }
 
@@ -74,6 +76,10 @@ mod tests {
         assert_eq!(
             adapter_for(&role(Provider::Gemini, "gemini-3-pro")).provider(),
             Provider::Gemini
+        );
+        assert_eq!(
+            adapter_for(&role(Provider::Grok, "grok-build-0.1")).provider(),
+            Provider::Grok
         );
     }
 

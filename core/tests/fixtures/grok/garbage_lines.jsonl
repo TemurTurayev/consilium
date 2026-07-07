@@ -1,0 +1,9 @@
+not json at all
+
+{"unrelated": "no text, tool, or stopReason field"}
+{"text": ""}
+{"tool": ""}
+[1, 2, 3]
+"just a json string"
+12345
+{"type": "tool_call"}

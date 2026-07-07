@@ -29,31 +29,48 @@ export function QuotaDashboard({ active }: { active: boolean }) {
 
       {snapshot && (
         <ul className="dash__rows">
-          {rows.map((row) => (
-            <li key={row.provider} className={`dash__row dash__row--${row.provider}`}>
-              <span className={`dash__dot dot--${row.provider}`} aria-hidden="true" />
-              <span className="dash__name">
-                {row.label}
-                {row.estimated && (
-                  <span
-                    className="dash__est"
-                    title="estimated — this provider's CLI reports no usage (e.g. Gemini via agy)"
-                  >
-                    {' '}(est.)
-                  </span>
-                )}
-              </span>
-              <span className="dash__bar">
-                <span className="dash__fill" style={{ width: `${Math.round((row.total / peak) * 100)}%` }} />
-              </span>
-              <span className="dash__nums">
-                <span className="dash__total">{formatTokens(row.total)}</span>
-                <span className="dash__io">
-                  ↑{formatTokens(row.input)} ↓{formatTokens(row.output)}
+          {rows.map((row) => {
+            // `--grok` exists as a CSS var but has no `dot--grok`/`dash__row--grok
+            // .dash__fill` rule yet (unlike claude/codex/gemini) — fall back to an
+            // inline color for just this provider rather than adding a class the
+            // stylesheet doesn't define.
+            const grokColor = row.provider === 'grok' ? 'var(--grok)' : undefined
+            return (
+              <li key={row.provider} className={`dash__row dash__row--${row.provider}`}>
+                <span
+                  className={`dash__dot dot--${row.provider}`}
+                  aria-hidden="true"
+                  style={grokColor ? { background: grokColor } : undefined}
+                />
+                <span className="dash__name">
+                  {row.label}
+                  {row.estimated && (
+                    <span
+                      className="dash__est"
+                      title="estimated — this provider's CLI reports no usage (e.g. Gemini via agy), or (for the beta Grok CLI) no real fixtures have been recorded yet"
+                    >
+                      {' '}(est.)
+                    </span>
+                  )}
                 </span>
-              </span>
-            </li>
-          ))}
+                <span className="dash__bar">
+                  <span
+                    className="dash__fill"
+                    style={{
+                      width: `${Math.round((row.total / peak) * 100)}%`,
+                      ...(grokColor ? { background: grokColor } : {}),
+                    }}
+                  />
+                </span>
+                <span className="dash__nums">
+                  <span className="dash__total">{formatTokens(row.total)}</span>
+                  <span className="dash__io">
+                    ↑{formatTokens(row.input)} ↓{formatTokens(row.output)}
+                  </span>
+                </span>
+              </li>
+            )
+          })}
         </ul>
       )}
     </section>

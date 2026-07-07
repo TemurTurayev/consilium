@@ -3,8 +3,8 @@
 //! spawning/streaming is exercised end-to-end without spending any quota.
 
 use consilium::adapters::{
-    claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter, Adapter, FailureKind,
-    RunRequest,
+    claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter, grok::GrokAdapter, Adapter,
+    FailureKind, RunRequest,
 };
 use consilium::event::{AgentEvent, Provider};
 use std::sync::{Arc, Mutex};
@@ -88,6 +88,7 @@ impl Adapter for ScriptedAdapter {
             Provider::Claude => ClaudeAdapter.classify_failure(error),
             Provider::Codex => CodexAdapter.classify_failure(error),
             Provider::Gemini => GeminiAdapter.classify_failure(error),
+            Provider::Grok => GrokAdapter.classify_failure(error),
         }
     }
     fn build_command(&self, req: &RunRequest) -> tokio::process::Command {

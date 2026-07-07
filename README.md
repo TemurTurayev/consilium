@@ -2,7 +2,7 @@
 
 > Get a second opinion. And a third.
 
-One orchestrator for the AI coding subscriptions you already pay for. Consilium drives the **official CLI agents** — Claude Code, Codex CLI, and the Antigravity CLI (`agy`, which drives Gemini) — so they can deliberate on hard problems, cross-review each other's work, and split tasks between providers without burning through any single subscription's limits.
+One orchestrator for the AI coding subscriptions you already pay for. Consilium drives the **official CLI agents** — Claude Code, Codex CLI, the Antigravity CLI (`agy`, which drives Gemini), and (experimental/beta) xAI's Grok Build CLI (`grok`) — so they can deliberate on hard problems, cross-review each other's work, and split tasks between providers without burning through any single subscription's limits.
 
 Named after the medical *consilium*: specialists from different fields gathering around one patient.
 
@@ -390,13 +390,14 @@ $ consilium doctor
 
 ### Token semantics actually differ per provider
 
-Claude and Codex are verified against recorded real CLI outputs (`core/tests/fixtures/{claude,codex}/recorded/`); Gemini via `agy` emits plain text, so its tokens are estimated:
+Claude and Codex are verified against recorded real CLI outputs (`core/tests/fixtures/{claude,codex}/recorded/`); Gemini via `agy` emits plain text, so its tokens are estimated; Grok is new and unverified against a real CLI, so its tokens are estimated too, for now:
 
 | Provider | Input side | Output side |
 |---|---|---|
 | Claude | `input + cache_creation + cache_read` — cache tokens are **disjoint** additions | `output` |
 | Codex | `input` only — `cached_input_tokens` is a **subset**, summing would double-count | `output + reasoning_output_tokens` |
 | Gemini (via `agy`) | Antigravity's `agy` reports no usage envelope, so tokens are **estimated** (~4 chars/token, flagged `estimated` in the quota log) | estimated |
+| Grok (via `grok`, **experimental / beta CLI**) | The Grok Build CLI's headless NDJSON schema is unverified against real output (it's brand new and its docs mark the event schema BETA) — the adapter parses defensively and emits `Usage` only when a line clearly carries token counts, so in practice tokens are **estimated** until real fixtures are recorded (`core/tests/fixtures/grok/recorded/`) | estimated |
 
 ## Development
 

@@ -9,4 +9,4 @@ export type QuotaSnapshot = {
 /**
  * The window length the totals cover, in seconds.
  */
-window_secs: number, claude: ProviderUsage, codex: ProviderUsage, gemini: ProviderUsage, };
+window_secs: number, claude: ProviderUsage, codex: ProviderUsage, gemini: ProviderUsage, grok: ProviderUsage, };

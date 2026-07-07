@@ -3,7 +3,7 @@
 # Spends a few real requests — run manually, never in CI.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-mkdir -p core/tests/fixtures/{claude,codex,gemini}/recorded
+mkdir -p core/tests/fixtures/{claude,codex,gemini,grok}/recorded
 
 record() {
   local name="$1" dest="$2"; shift 2
@@ -25,5 +25,10 @@ record codex core/tests/fixtures/codex/recorded/basic.jsonl \
   codex exec --json 'Reply with exactly: ok'
 record gemini core/tests/fixtures/gemini/recorded/basic.txt \
   agy -p 'Reply with exactly: ok'
+# Grok Build CLI is BETA — its headless NDJSON schema is unverified (adapters/grok.rs
+# was written from docs.x.ai/build facts, not a recording). Requires an X Premium+/
+# SuperGrok subscription with `grok` already logged in (browser OAuth, cached token).
+record grok core/tests/fixtures/grok/recorded/basic.jsonl \
+  grok -p 'Reply with exactly: ok' --output-format streaming-json --no-auto-update
 
 echo "Now diff recorded vs synthetic fixtures; update parsers if formats drifted."

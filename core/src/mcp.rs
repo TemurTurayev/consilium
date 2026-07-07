@@ -242,6 +242,7 @@ pub struct QuotaStatusOutput {
     pub claude: ProviderQuota,
     pub codex: ProviderQuota,
     pub gemini: ProviderQuota,
+    pub grok: ProviderQuota,
 }
 
 #[tool_router(router = tool_router)]
@@ -306,7 +307,7 @@ impl McpServer {
 
     #[tool(
         name = "run_worker",
-        description = "Route a self-contained subtask to a configured worker (Codex/Gemini/Claude), \
+        description = "Route a self-contained subtask to a configured worker (Codex/Gemini/Claude/Grok), \
                        which edits files in `cwd`, then return the captured diff and build/test \
                        result. The worker runs with auto-approved writes; you (the conductor) decide \
                        what to delegate and whether to accept."
@@ -320,7 +321,7 @@ impl McpServer {
 
     #[tool(
         name = "quota_status",
-        description = "Report tokens used per provider (Claude / Codex / Gemini) in the last 5 hours, \
+        description = "Report tokens used per provider (Claude / Codex / Gemini / Grok) in the last 5 hours, \
                        so you can route work to the freest subscription."
     )]
     pub async fn quota_status(&self) -> Json<QuotaStatusOutput> {
@@ -457,6 +458,7 @@ impl McpServer {
             claude: totals(Provider::Claude),
             codex: totals(Provider::Codex),
             gemini: totals(Provider::Gemini),
+            grok: totals(Provider::Grok),
         }
     }
 

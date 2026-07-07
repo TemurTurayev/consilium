@@ -242,6 +242,7 @@ pub fn quota_snapshot(quota: &QuotaStore) -> QuotaSnapshot {
         claude: usage(Provider::Claude),
         codex: usage(Provider::Codex),
         gemini: usage(Provider::Gemini),
+        grok: usage(Provider::Grok),
     }
 }
 
@@ -542,6 +543,8 @@ mod tests {
         assert_eq!(snap.codex.input_tokens, 7);
         assert_eq!(snap.claude.input_tokens, 0);
         assert_eq!(snap.claude.output_tokens, 0);
+        assert_eq!(snap.grok.input_tokens, 0);
+        assert_eq!(snap.grok.output_tokens, 0);
         // Measured-only providers are not flagged estimated.
         assert!(!snap.gemini.estimated && !snap.codex.estimated);
 

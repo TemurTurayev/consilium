@@ -23,7 +23,7 @@ enum Command {
     /// Report each provider's auth state and the exact next step to authenticate
     /// it (probes liveness — spends ~1 token per provider).
     Auth {
-        /// Probe just one provider (claude|codex|gemini) instead of all.
+        /// Probe just one provider (claude|codex|gemini|grok) instead of all.
         #[arg(long)]
         provider: Option<String>,
     },
@@ -342,8 +342,8 @@ async fn main() -> anyhow::Result<()> {
             prompt,
         } => {
             use consilium::adapters::{
-                claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter, Adapter,
-                RunRequest,
+                claude::ClaudeAdapter, codex::CodexAdapter, gemini::GeminiAdapter,
+                grok::GrokAdapter, Adapter, RunRequest,
             };
             use consilium::event::{AgentEvent, Provider};
             use std::sync::Arc;
@@ -353,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 Provider::Claude => Arc::new(ClaudeAdapter),
                 Provider::Codex => Arc::new(CodexAdapter),
                 Provider::Gemini => Arc::new(GeminiAdapter),
+                Provider::Grok => Arc::new(GrokAdapter),
             };
             let req = RunRequest {
                 prompt,
@@ -398,12 +399,18 @@ async fn main() -> anyhow::Result<()> {
             let since = consilium::quota::unix_now() - 5 * 3600;
             println!("usage in the last 5h window:");
             let mut any_estimated = false;
-            for p in [Provider::Claude, Provider::Codex, Provider::Gemini] {
+            for p in [
+                Provider::Claude,
+                Provider::Codex,
+                Provider::Gemini,
+                Provider::Grok,
+            ] {
                 let (input, output) = store.totals_since(p, since)?;
                 let (est_in, est_out) = store.estimated_totals_since(p, since)?;
-                // Tokens with no CLI usage report (e.g. Gemini via agy) are
-                // heuristic estimates, not measured — flag them so the accounting
-                // stays honest (the headline feature).
+                // Tokens with no CLI usage report (e.g. Gemini via agy, or — until
+                // real fixtures are recorded — the beta Grok CLI) are heuristic
+                // estimates, not measured — flag them so the accounting stays
+                // honest (the headline feature).
                 let estimated = est_in + est_out > 0;
                 any_estimated |= estimated;
                 let marker = if estimated { "  (est.)" } else { "" };
@@ -411,7 +418,7 @@ async fn main() -> anyhow::Result<()> {
             }
             if any_estimated {
                 println!(
-                    "\n  (est.) = estimated (the CLI reports no usage, e.g. Gemini via agy) — not measured"
+                    "\n  (est.) = estimated (the CLI reports no usage, e.g. Gemini via agy, or the beta Grok CLI) — not measured"
                 );
             }
         }

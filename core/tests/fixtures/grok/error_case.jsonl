@@ -1,0 +1,2 @@
+Error: authentication failed — run `grok` again to complete browser login
+grok: fatal: no cached OAuth token found, exiting before any structured output

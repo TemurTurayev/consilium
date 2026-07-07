@@ -7,6 +7,10 @@ pub enum Provider {
     Claude,
     Codex,
     Gemini,
+    /// xAI's Grok Build CLI (`grok`) — added as a beta provider. Its headless
+    /// NDJSON event schema is unstable (see `adapters::grok`), so treat this
+    /// provider's token accounting as estimated until real fixtures land.
+    Grok,
 }
 
 impl Provider {
@@ -15,6 +19,7 @@ impl Provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
             Provider::Gemini => "gemini",
+            Provider::Grok => "grok",
         }
     }
 }
@@ -26,6 +31,7 @@ impl std::str::FromStr for Provider {
             "claude" => Ok(Provider::Claude),
             "codex" => Ok(Provider::Codex),
             "gemini" => Ok(Provider::Gemini),
+            "grok" => Ok(Provider::Grok),
             other => Err(format!("unknown provider: {other}")),
         }
     }
@@ -77,6 +83,7 @@ mod tests {
         assert_eq!("claude".parse::<Provider>().unwrap(), Provider::Claude);
         assert_eq!("codex".parse::<Provider>().unwrap(), Provider::Codex);
         assert_eq!("gemini".parse::<Provider>().unwrap(), Provider::Gemini);
+        assert_eq!("grok".parse::<Provider>().unwrap(), Provider::Grok);
         assert!("warp".parse::<Provider>().is_err());
     }
 

@@ -229,6 +229,7 @@ async fn quota_status_reports_recorded_totals() {
     assert_eq!(s.gemini.output_tokens, 30);
     assert_eq!(s.codex.input_tokens, 7);
     assert_eq!(s.claude.input_tokens, 0);
+    assert_eq!(s.grok.input_tokens, 0);
     assert_eq!(s.window_secs, 5 * 3600);
 }
 
