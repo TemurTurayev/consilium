@@ -10,6 +10,7 @@ import { ResultPanel } from './components/ResultPanel'
 import { QuotaDashboard } from './components/QuotaDashboard'
 import { ProvidersView } from './components/ProvidersView'
 import { SettingsView } from './components/SettingsView'
+import { TableView } from './table/TableView'
 
 export function App() {
   const { state, start, startDemo, cancel, reset } = useSession()
@@ -43,6 +44,7 @@ export function App() {
               />
             </>
           )}
+          {view === 'table' && <TableView state={state} onStart={start} onDemo={startDemo} onCancel={cancel} />}
           {view === 'usage' && <QuotaDashboard active={view === 'usage'} />}
           {view === 'providers' && <ProvidersView />}
           {view === 'settings' && <SettingsView />}
@@ -54,6 +56,7 @@ export function App() {
 
 const VIEW_TITLE: Record<View, string> = {
   run: 'Run',
+  table: 'Table',
   usage: 'Usage',
   providers: 'Providers',
   settings: 'Settings',

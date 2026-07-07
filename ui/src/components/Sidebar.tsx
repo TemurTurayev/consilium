@@ -1,7 +1,8 @@
-export type View = 'run' | 'usage' | 'providers' | 'settings'
+export type View = 'run' | 'table' | 'usage' | 'providers' | 'settings'
 
 const ITEMS: { id: View; label: string }[] = [
   { id: 'run', label: 'Run' },
+  { id: 'table', label: 'Table' },
   { id: 'usage', label: 'Usage' },
   { id: 'providers', label: 'Providers' },
   { id: 'settings', label: 'Settings' },
