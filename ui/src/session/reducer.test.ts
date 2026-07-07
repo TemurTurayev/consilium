@@ -140,6 +140,37 @@ describe('sessionReducer', () => {
     expect(sessionReducer(dirty, { type: 'reset' })).toEqual(initialState)
   })
 
+  it('run_cancelled sets a terminal cancelled state distinct from run_complete', () => {
+    const s = replay([{ type: 'run_cancelled' }])
+    expect(s.phase).toBe('done')
+    expect(s.cancelled).toBe(true)
+    expect(s.terminal).toBeNull()
+  })
+
+  it('run_complete clears a stale mid-run error', () => {
+    const dirty = replay([{ type: 'error', error: 'transient' }])
+    expect(dirty.error).toBe('transient')
+    const s = replay([{ type: 'run_complete', completed: [1], halted: null, failed: null }], dirty)
+    expect(s.error).toBeNull()
+    expect(s.phase).toBe('done')
+    expect(s.terminal?.completed).toEqual([1])
+  })
+
+  it('run_cancelled clears a stale mid-run error', () => {
+    const dirty = replay([{ type: 'error', error: 'transient' }])
+    const s = replay([{ type: 'run_cancelled' }], dirty)
+    expect(s.error).toBeNull()
+    expect(s.phase).toBe('done')
+    expect(s.cancelled).toBe(true)
+  })
+
+  it('a clean close after run_cancelled stays done', () => {
+    const cancelled = replay([{ type: 'run_cancelled' }])
+    const closed = sessionReducer(cancelled, { type: 'socket_closed' })
+    expect(closed.phase).toBe('done')
+    expect(closed.cancelled).toBe(true)
+  })
+
   it('the demo fixture replays to a clean completed run', () => {
     const s = replay(demoSession)
     expect(s.phase).toBe('done')

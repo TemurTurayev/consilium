@@ -3,7 +3,8 @@
 /**
  * Server→client run-lifecycle frames. The tags are disjoint from every
  * [`AgentEvent`](crate::event::AgentEvent) tag, so a client can discriminate
- * the whole inbound stream on the single `type` field.
+ * the whole inbound stream on the single `type` field (pinned by the
+ * `server_frame_tags_disjoint_from_agent_event_tags` test below).
  */
 export type ServerFrame = { "type": "run_complete", 
 /**
@@ -17,4 +18,4 @@ halted: string | null,
 /**
  * Set if the conductor failed the run or rework was exhausted.
  */
-failed: string | null, } | { "type": "run_error", error: string, } | { "type": "error", error: string, };
+failed: string | null, } | { "type": "run_error", error: string, } | { "type": "run_cancelled", } | { "type": "error", error: string, };

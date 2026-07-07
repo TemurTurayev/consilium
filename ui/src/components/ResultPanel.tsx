@@ -3,12 +3,13 @@ import type { Phase } from '../session/reducer'
 
 interface Props {
   terminal: RunComplete | null
+  cancelled: boolean
   error: string | null
   phase: Phase
   onReset: () => void
 }
 
-export function ResultPanel({ terminal, error, phase, onReset }: Props) {
+export function ResultPanel({ terminal, cancelled, error, phase, onReset }: Props) {
   if (phase !== 'done' && phase !== 'errored') return null
 
   if (error) {
@@ -17,6 +18,19 @@ export function ResultPanel({ terminal, error, phase, onReset }: Props) {
         <div className="banner__text">
           <strong>Run error</strong>
           <span>{error}</span>
+        </div>
+        <button className="btn btn--ghost" onClick={onReset}>
+          New run
+        </button>
+      </div>
+    )
+  }
+
+  if (cancelled) {
+    return (
+      <div className="banner banner--warn">
+        <div className="banner__text">
+          <strong>Run cancelled</strong>
         </div>
         <button className="btn btn--ghost" onClick={onReset}>
           New run

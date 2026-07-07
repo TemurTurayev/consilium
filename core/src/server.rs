@@ -17,7 +17,10 @@ use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::progress::{ProgressSink, PROGRESS_SINK};
 use crate::orchestrator::resilience::ModelHealth;
 use crate::orchestrator::roles;
-use crate::protocol::{ProviderUsage, QuotaSnapshot, ServerFrame, SessionRequest};
+use crate::protocol::{
+    AuthState, ConfigSummary, DoctorReport, ProviderStatus, ProviderUsage, QuotaSnapshot,
+    ServerFrame, SessionRequest, VersionInfo,
+};
 use crate::quota::QuotaStore;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -44,18 +47,26 @@ pub struct ServerState {
     /// The directory `consilium serve` was launched in. Client-supplied `cwd`
     /// values are validated to be within this root before any run is started.
     launch_root: Arc<PathBuf>,
+    /// Read-only council summary served at `GET /api/config`.
+    config_summary: Arc<ConfigSummary>,
+    /// One run at a time per server: concurrent conducts in one launch root
+    /// would attribute each other's git diffs to the wrong run.
+    active_run: Arc<tokio::sync::Semaphore>,
 }
 
 impl ServerState {
     /// Production: resolve `ConductDeps` from config on each run. The
     /// `launch_root` is captured once at startup from the process working dir.
     pub fn from_config(config: Config, quota: QuotaStore, timeout: Duration) -> Self {
+        let summary = ConfigSummary::from_config(&config, None);
         let config = Arc::new(config);
         Self {
             deps_fn: Arc::new(move || build_conduct_deps(&config)),
             quota: Arc::new(quota),
             timeout,
             launch_root: Arc::new(std::env::current_dir().unwrap_or_default()),
+            config_summary: Arc::new(summary),
+            active_run: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -68,12 +79,23 @@ impl ServerState {
             quota: Arc::new(quota),
             timeout,
             launch_root: Arc::new(std::env::current_dir().unwrap_or_default()),
+            config_summary: Arc::new(ConfigSummary::default()),
+            active_run: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
-    /// Override the launch root (used in tests that run agents in a temp dir).
+    /// Override the launch root (used in tests that run agents in a temp dir,
+    /// and by the desktop app where the root is the user-chosen workspace).
     pub fn with_launch_root(mut self, root: PathBuf) -> Self {
         self.launch_root = Arc::new(root);
+        self
+    }
+
+    /// Record where the config was loaded from, for `GET /api/config`.
+    pub fn with_config_path(mut self, path: Option<String>) -> Self {
+        let mut summary = (*self.config_summary).clone();
+        summary.config_path = path;
+        self.config_summary = Arc::new(summary);
         self
     }
 }
@@ -83,6 +105,9 @@ pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/ws/session", get(ws_session))
         .route("/api/quota", get(quota_handler))
+        .route("/api/doctor", get(doctor_handler))
+        .route("/api/config", get(config_handler))
+        .route("/api/version", get(version_handler))
         .with_state(state)
 }
 
@@ -92,10 +117,17 @@ pub async fn serve(
     config: Config,
     quota: QuotaStore,
     timeout: Duration,
+    config_path: Option<String>,
 ) -> anyhow::Result<()> {
-    let state = ServerState::from_config(config, quota, timeout);
+    let state = ServerState::from_config(config, quota, timeout).with_config_path(config_path);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "consilium server listening (ws: /ws/session)");
+    serve_on(listener, state).await
+}
+
+/// Serve on a pre-bound listener. The desktop app binds `127.0.0.1:0` itself
+/// (to learn the assigned port from `local_addr()`) and passes the listener in.
+pub async fn serve_on(listener: tokio::net::TcpListener, state: ServerState) -> anyhow::Result<()> {
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
@@ -121,7 +153,12 @@ fn origin_allowed(origin: Option<&str>) -> bool {
         .unwrap_or("");
     // strip port
     let host_no_port = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
-    matches!(host_no_port, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+    // `tauri.localhost` is the Tauri webview origin host on Linux/Windows
+    // (macOS uses `tauri://localhost`, whose host is plain `localhost`).
+    matches!(
+        host_no_port,
+        "localhost" | "127.0.0.1" | "::1" | "[::1]" | "tauri.localhost"
+    )
 }
 
 async fn ws_session(
@@ -145,6 +182,44 @@ async fn ws_session(
 /// `GET /api/quota` → current per-provider usage over the rolling window.
 async fn quota_handler(State(state): State<ServerState>) -> Json<QuotaSnapshot> {
     Json(quota_snapshot(state.quota.as_ref()))
+}
+
+/// `GET /api/doctor` → live auth/liveness probe of every provider. Spawns real
+/// CLIs (seconds, ~1 token each) — fetched on demand, never polled.
+async fn doctor_handler(State(state): State<ServerState>) -> Json<DoctorReport> {
+    let rows = crate::auth::auth_report(state.quota.as_ref()).await;
+    Json(DoctorReport {
+        providers: rows.iter().map(|(p, a)| provider_status(*p, a)).collect(),
+    })
+}
+
+/// Map a probe result to its wire shape. Pure — unit-tested below.
+fn provider_status(p: Provider, auth: &crate::auth::ProviderAuth) -> ProviderStatus {
+    use crate::auth::ProviderAuth;
+    let (state, detail) = match auth {
+        ProviderAuth::Ready => (AuthState::Ready, String::new()),
+        ProviderAuth::NeedsLogin(d) => (AuthState::NeedsLogin, d.clone()),
+        ProviderAuth::CliMissing => (AuthState::CliMissing, String::new()),
+        ProviderAuth::Down(d) => (AuthState::Down, d.clone()),
+    };
+    ProviderStatus {
+        provider: p,
+        state,
+        detail,
+        hint: crate::auth::guidance(p, auth),
+    }
+}
+
+/// `GET /api/config` → read-only council summary.
+async fn config_handler(State(state): State<ServerState>) -> Json<ConfigSummary> {
+    Json((*state.config_summary).clone())
+}
+
+/// `GET /api/version` → the server's crate version.
+async fn version_handler() -> Json<VersionInfo> {
+    Json(VersionInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
 }
 
 /// Build a usage snapshot over the rolling window. Extracted from the handler so
@@ -210,9 +285,12 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
     };
 
     // sink (sync on_event) → channel → writer task (async socket sends).
+    // `tx` becomes the run's sink only if a run actually spawns; every path
+    // that skips the run MUST drop it before awaiting the writer — a live
+    // sender keeps `rx.recv()` pending and deadlocks handle_session against
+    // its own writer task.
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let term_tx = tx.clone();
-    let sink: Arc<dyn ProgressSink> = Arc::new(WsSink { tx });
 
     let writer = tokio::spawn(async move {
         while let Some(json) = rx.recv().await {
@@ -223,42 +301,91 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
         let _ = sender.send(Message::Close(None)).await;
     });
 
+    let send_terminal = |frame: &ServerFrame| {
+        let _ = term_tx.send(serde_json::to_string(frame).unwrap_or_default());
+    };
+
     match req {
+        SessionRequest::Cancel => {
+            drop(tx);
+            send_terminal(&ServerFrame::Error {
+                error: "nothing to cancel: the first frame must describe a run".into(),
+            });
+        }
         SessionRequest::Conduct { task, context, cwd } => {
             let root = state.launch_root.as_ref();
             let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
             if !cwd_within_root(&cwd, root) {
-                let frame = ServerFrame::Error {
+                send_terminal(&ServerFrame::Error {
                     error: "cwd is outside the server's working directory; refusing to run".into(),
-                };
-                let _ = term_tx.send(serde_json::to_string(&frame).unwrap_or_default());
+                });
+                drop(tx);
                 drop(term_tx);
                 let _ = writer.await;
                 return;
             }
+            // One run at a time: a second session while a run is active would
+            // interleave git diffs in the same launch root.
+            let Ok(_permit) = state.active_run.clone().try_acquire_owned() else {
+                send_terminal(&ServerFrame::Error {
+                    error: "a run is already active on this server".into(),
+                });
+                drop(tx);
+                drop(term_tx);
+                let _ = writer.await;
+                return;
+            };
+
+            // The run executes in its own task so this loop can keep polling
+            // the client socket: `{"kind":"cancel"}` or the socket closing
+            // aborts the run — dropped futures SIGKILL agent children via
+            // kill_on_drop, so a closed browser tab cannot keep burning quota.
             let deps = (state.deps_fn)();
-            let health = ModelHealth::new();
-            let result = PROGRESS_SINK
-                .scope(sink, async {
-                    run_conduct(
-                        &task,
-                        &context,
-                        deps,
-                        state.quota.as_ref(),
-                        cwd,
-                        state.timeout,
-                        &health,
-                    )
-                    .await
-                })
-                .await;
-            let frame = match &result {
-                Ok(o) => ServerFrame::from(o),
-                Err(e) => ServerFrame::RunError {
+            let quota = state.quota.clone();
+            let timeout = state.timeout;
+            let sink: Arc<dyn ProgressSink> = Arc::new(WsSink { tx });
+            let mut run = tokio::spawn(PROGRESS_SINK.scope(sink, async move {
+                let health = ModelHealth::new();
+                run_conduct(&task, &context, deps, quota.as_ref(), cwd, timeout, &health).await
+            }));
+
+            let outcome = loop {
+                tokio::select! {
+                    joined = &mut run => break Some(joined),
+                    msg = receiver.next() => match msg {
+                        Some(Ok(Message::Text(t)))
+                            if matches!(
+                                serde_json::from_str(t.as_str()),
+                                Ok(SessionRequest::Cancel)
+                            ) =>
+                        {
+                            run.abort();
+                            let _ = (&mut run).await; // ensure children are killed
+                            break None;
+                        }
+                        // Unknown text frames are ignored (forward compat).
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                            run.abort();
+                            let _ = (&mut run).await;
+                            break None;
+                        }
+                        Some(Ok(_)) => {} // ping/pong/binary
+                    }
+                }
+            };
+
+            let frame = match outcome {
+                None => ServerFrame::RunCancelled {},
+                Some(Ok(Ok(o))) => ServerFrame::from(&o),
+                Some(Ok(Err(e))) => ServerFrame::RunError {
                     error: e.to_string(),
                 },
+                // The spawned run panicked or was aborted out from under us.
+                Some(Err(join_err)) => ServerFrame::RunError {
+                    error: format!("run task failed: {join_err}"),
+                },
             };
-            let _ = term_tx.send(serde_json::to_string(&frame).unwrap_or_default());
+            send_terminal(&frame);
         }
     }
 
@@ -339,6 +466,49 @@ mod tests {
     #[test]
     fn origin_allowed_rejects_attacker_subdomain_of_localhost() {
         assert!(!origin_allowed(Some("https://localhost.attacker.com:80")));
+    }
+
+    #[test]
+    fn origin_allowed_tauri_macos_scheme() {
+        // macOS Tauri webview origin: host parses as plain `localhost`.
+        assert!(origin_allowed(Some("tauri://localhost")));
+    }
+
+    #[test]
+    fn origin_allowed_tauri_linux_host() {
+        // Linux/Windows Tauri webview origin.
+        assert!(origin_allowed(Some("http://tauri.localhost")));
+    }
+
+    #[test]
+    fn origin_allowed_rejects_tauri_localhost_suffix_attack() {
+        assert!(!origin_allowed(Some("http://eviltauri.localhost.evil.com")));
+        assert!(!origin_allowed(Some("http://x.tauri.localhost.evil.com")));
+    }
+
+    #[test]
+    fn provider_status_maps_auth_states() {
+        use crate::auth::ProviderAuth;
+        let s = provider_status(Provider::Claude, &ProviderAuth::Ready);
+        assert_eq!(s.state, AuthState::Ready);
+        assert!(s.detail.is_empty());
+        assert!(s.hint.contains("ready"), "got: {}", s.hint);
+
+        let s = provider_status(
+            Provider::Codex,
+            &ProviderAuth::NeedsLogin("401 unauthorized".into()),
+        );
+        assert_eq!(s.state, AuthState::NeedsLogin);
+        assert_eq!(s.detail, "401 unauthorized");
+        assert!(s.hint.contains("codex login"), "got: {}", s.hint);
+
+        let s = provider_status(Provider::Gemini, &ProviderAuth::CliMissing);
+        assert_eq!(s.state, AuthState::CliMissing);
+        assert!(s.hint.contains("install"), "got: {}", s.hint);
+
+        let s = provider_status(Provider::Claude, &ProviderAuth::Down("rate limit".into()));
+        assert_eq!(s.state, AuthState::Down);
+        assert_eq!(s.detail, "rate limit");
     }
 
     // NOTE: cwd_within_root unit tests live in crate::confine (the helper is

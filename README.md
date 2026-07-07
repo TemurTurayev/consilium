@@ -58,6 +58,20 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 
 You need at least one agent CLI installed and authenticated (`claude`, `codex`, or `agy`). Pick the install path that suits you:
 
+### 0. Desktop app — macOS / Linux (beta)
+
+A Tauri desktop app with the full web UI built in: pick a project folder in a
+native dialog, run and cancel conducts live, check provider auth, and watch
+per-provider quota — no terminal needed after setup. Grab the `.dmg`
+(macOS arm64/Intel) or `.AppImage`/`.deb` (Linux) from
+[releases](https://github.com/TemurTurayev/consilium/releases/latest);
+SHA256 sidecar files ship next to every artifact.
+
+_Unsigned beta builds: on first launch macOS requires right-click → Open.
+The app embeds the same `consilium` engine — agent CLIs still need to be
+installed and authenticated. Native Windows is not supported yet (the engine
+drives Unix CLIs); use WSL with the CLI install below._
+
 ### 1. Prebuilt binary — macOS / Linux (no Rust needed)
 
 ```sh

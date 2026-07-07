@@ -148,7 +148,10 @@ async fn drain(
     >,
 ) -> Vec<String> {
     let mut texts = Vec::new();
-    while let Some(Ok(msg)) = ws.next().await {
+    // Deadline so a server that never closes the socket fails the test
+    // instead of hanging the whole suite.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(deadline, ws.next()).await {
         match msg {
             Message::Text(t) => texts.push(t.to_string()),
             Message::Close(_) => break,
@@ -245,5 +248,154 @@ async fn ws_run_error_terminal_frame_on_failed_run() {
     assert!(
         texts.iter().any(|t| t.contains("\"type\":\"run_error\"")),
         "expected a run_error terminal frame; got {texts:?}"
+    );
+}
+
+/// Deps where the worker sleeps before writing a marker file — a run that a
+/// cancel must be able to interrupt (the marker doubles as the kill probe).
+fn slow_worker_deps(marker: &std::path::Path) -> Arc<dyn Fn() -> ConductDeps + Send + Sync> {
+    let marker = marker.to_string_lossy().into_owned();
+    Arc::new(move || {
+        let plan = r#"{"subtasks":[{"id":1,"title":"x","prompt":"slow work","depends_note":""}]}"#;
+        let conductor = Arc::new(SequencedAdapter::new(
+            Provider::Claude,
+            vec![
+                ScriptedAdapter::ok_with_text(Provider::Claude, plan),
+                ScriptedAdapter::ok_with_text(
+                    Provider::Claude,
+                    r#"{"decision":"accept","feedback":""}"#,
+                ),
+            ],
+        ));
+        let worker = Arc::new(ScriptedAdapter {
+            // Killed during the sleep ⇒ the marker is never written. The
+            // streaming test above is the positive control: its pre_script
+            // (`echo hi > out.txt`) demonstrably runs to completion.
+            pre_script: format!("sleep 2; echo late > '{marker}'"),
+            ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+        });
+        ConductDeps {
+            conductor: RoleHandle {
+                ladder: vec![rung(Provider::Claude, "m", conductor)],
+            },
+            workers: vec![CouncilMember {
+                label: "codex-gpt".into(),
+                ladder: vec![rung(Provider::Codex, "gpt", worker)],
+            }],
+            supervisor: None,
+            reviewer: None,
+            arbiter: None,
+            verify: None,
+            memory: Default::default(),
+            cross_family_review: false,
+            max_replans: 0,
+            budget: None,
+        }
+    })
+}
+
+/// Read text frames until one satisfies `pred` (or the socket closes / 10s pass).
+async fn next_frame_matching(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    pred: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let msg = tokio::time::timeout_at(deadline, ws.next()).await.ok()??;
+        if let Ok(Message::Text(t)) = msg {
+            if pred(t.as_ref()) {
+                return Some(t.to_string());
+            }
+        }
+    }
+}
+
+// A `{"kind":"cancel"}` frame mid-run yields a `run_cancelled` terminal frame
+// and SIGKILLs the worker child before it can write its marker file.
+#[tokio::test]
+async fn ws_cancel_frame_yields_run_cancelled_and_kills_worker() {
+    let repo = temp_repo();
+    let marker = repo.path().join("marker.txt");
+    let state = ServerState::from_parts(
+        slow_worker_deps(&marker),
+        QuotaStore::open_in_memory().unwrap(),
+        Duration::from_secs(30),
+    )
+    .with_launch_root(repo.path().to_path_buf());
+    let addr = spawn_server(state).await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/session"))
+        .await
+        .unwrap();
+    let frame = serde_json::json!({
+        "kind": "conduct", "task": "t", "cwd": repo.path().to_string_lossy(),
+    })
+    .to_string();
+    ws.send(Message::Text(frame.into())).await.unwrap();
+
+    // The conductor's `completed` frame means planning is done and the worker
+    // is being spawned into its 2s pre-script sleep; cancel lands mid-sleep.
+    next_frame_matching(&mut ws, |t| t.contains("\"type\":\"completed\""))
+        .await
+        .expect("conductor never finished planning");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    ws.send(Message::Text(r#"{"kind":"cancel"}"#.into()))
+        .await
+        .unwrap();
+
+    let term = next_frame_matching(&mut ws, |t| t.contains("\"type\":\"run_cancelled\""))
+        .await
+        .expect("no run_cancelled terminal frame");
+    assert!(term.contains("run_cancelled"));
+
+    // Past the worker's sleep: a survivor would have written the marker by now.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        !marker.exists(),
+        "worker child survived cancellation and wrote its marker"
+    );
+}
+
+// A second /ws/session while a run is active is refused with a structured
+// error frame and never starts a run.
+#[tokio::test]
+async fn ws_second_concurrent_session_is_refused() {
+    let repo = temp_repo();
+    let marker = repo.path().join("marker.txt");
+    let state = ServerState::from_parts(
+        slow_worker_deps(&marker),
+        QuotaStore::open_in_memory().unwrap(),
+        Duration::from_secs(30),
+    )
+    .with_launch_root(repo.path().to_path_buf());
+    let addr = spawn_server(state).await;
+
+    let (mut first, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/session"))
+        .await
+        .unwrap();
+    let frame = serde_json::json!({
+        "kind": "conduct", "task": "t", "cwd": repo.path().to_string_lossy(),
+    })
+    .to_string();
+    first
+        .send(Message::Text(frame.clone().into()))
+        .await
+        .unwrap();
+    next_frame_matching(&mut first, |t| t.contains("\"type\":\"completed\""))
+        .await
+        .expect("first run never started");
+
+    let (mut second, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/session"))
+        .await
+        .unwrap();
+    second.send(Message::Text(frame.into())).await.unwrap();
+    let texts = drain(&mut second).await;
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("\"type\":\"error\"") && t.contains("already active")),
+        "expected an already-active error frame; got {texts:?}"
     );
 }

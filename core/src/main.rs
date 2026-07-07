@@ -849,6 +849,7 @@ async fn main() -> anyhow::Result<()> {
                 config,
                 store,
                 std::time::Duration::from_secs(timeout),
+                Some("consilium.config.json".to_string()),
             )
             .await?;
         }

@@ -1,0 +1,28 @@
+[package]
+name = "consilium-desktop"
+version = "0.1.0"
+description = "Consilium desktop app"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/TemurTurayev/consilium"
+
+[lib]
+name = "consilium_desktop_lib"
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+consilium = { path = "../../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dependencies.dirs]
+version = "5"
