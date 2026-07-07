@@ -44,7 +44,7 @@ pub async fn run_to_completion(
     let sessions::SessionHandle {
         id: session_id,
         events: mut event_rx,
-        task,
+        mut task,
     } = sessions::spawn(adapter, req)?;
 
     // Collect returns (events, terminal_status, final_text) to avoid
@@ -101,7 +101,7 @@ pub async fn run_to_completion(
             // hung/slow write worker is terminated, not left mutating the shared
             // cwd while conduct starts the next attempt in the same directory.
             task.abort();
-            let _ = task.await;
+            let _ = (&mut task.0).await;
             return Ok(RunOutcome {
                 session_id,
                 final_text: String::new(),

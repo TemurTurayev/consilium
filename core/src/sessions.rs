@@ -11,8 +11,28 @@ pub struct SessionHandle {
     pub events: mpsc::Receiver<AgentEvent>,
     /// The stream-reader task. Aborting it drops the child process — spawned with
     /// `kill_on_drop(true)` — so a timed-out or cancelled run is SIGKILLed, not
-    /// left orphaned. On the normal path the JoinHandle is simply detached.
-    pub task: tokio::task::JoinHandle<()>,
+    /// left orphaned.
+    pub task: ReaderTask,
+}
+
+/// Owns the stream-reader `JoinHandle` and aborts it on drop. The reader task
+/// owns the child process, so any path that drops a live session — an explicit
+/// timeout, a cancelled run whose future is dropped mid-await, a panic unwind —
+/// kills the agent child instead of leaving it running detached. Abort on an
+/// already-finished task is a no-op, so the normal path is unaffected.
+#[derive(Debug)]
+pub struct ReaderTask(pub tokio::task::JoinHandle<()>);
+
+impl ReaderTask {
+    pub fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for ReaderTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn next_session_id(provider: &str) -> String {
@@ -134,6 +154,6 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
     Ok(SessionHandle {
         id,
         events: rx,
-        task,
+        task: ReaderTask(task),
     })
 }
