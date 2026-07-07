@@ -1,9 +1,9 @@
-// Matches `consilium serve --addr 127.0.0.1:7878` out of the box.
-const DEFAULT_WS_URL = 'ws://localhost:7878/ws/session'
+import { resolveServerBase } from '../runtime'
 
-/** The backend WebSocket endpoint, overridable via `VITE_WS_URL`. */
-export function resolveWsUrl(): string {
-  // Treat an empty/whitespace VITE_WS_URL (a common `.env` mistake) as unset.
-  const override = import.meta.env.VITE_WS_URL?.trim()
-  return override ? override : DEFAULT_WS_URL
+/** The backend WebSocket endpoint. Resolved via `resolveServerBase` — Tauri
+ * IPC in the desktop shell, `VITE_WS_URL`/`VITE_API_URL` in a plain web
+ * build, same-origin defaults otherwise. */
+export async function resolveWsUrl(): Promise<string> {
+  const { ws } = await resolveServerBase()
+  return ws
 }

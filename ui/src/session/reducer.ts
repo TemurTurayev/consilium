@@ -20,6 +20,10 @@ export interface SessionState {
   /** Distinct `file_changed` paths. */
   files: string[]
   terminal: RunComplete | null
+  /** Set when the run ended via `{"kind":"cancel"}` rather than completing —
+   * a terminal state distinct from `terminal`, so `ResultPanel` can show
+   * "Run cancelled" instead of the accepted-subtasks summary. */
+  cancelled: boolean
   error: string | null
 }
 
@@ -31,6 +35,7 @@ export const initialState: SessionState = {
   usage: { inputTokens: 0, outputTokens: 0 },
   files: [],
   terminal: null,
+  cancelled: false,
   error: null,
 }
 
@@ -81,7 +86,12 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
 function foldFrame(state: SessionState, frame: InboundFrame): SessionState {
   switch (frame.type) {
     case 'run_complete':
-      return { ...state, phase: 'done', terminal: frame }
+      // Clears any stale mid-run `error` (e.g. a transient `error` frame the
+      // run recovered from) — otherwise ResultPanel's error-first check would
+      // show "Run error" over a run that actually finished cleanly.
+      return { ...state, phase: 'done', terminal: frame, error: null }
+    case 'run_cancelled':
+      return { ...state, phase: 'done', cancelled: true, error: null }
     case 'run_error':
       return { ...state, phase: 'errored', error: frame.error }
     case 'error':
