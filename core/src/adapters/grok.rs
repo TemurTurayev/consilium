@@ -10,7 +10,7 @@ use tokio::process::Command;
 /// adapter takes).
 ///
 /// Headless usage: `grok -p "<prompt>" --output-format streaming-json
-/// --no-auto-update [--always-approve]`, which emits one JSON object per
+/// [--permission-mode acceptEdits]`, which emits one JSON object per
 /// line (NDJSON). **The exact event schema is BETA per xAI's own docs and may
 /// churn** — `parse_line`/`parse_final` below are deliberately defensive:
 /// they key off plausible field shapes (`text`/`content`, a tool name, a
@@ -20,15 +20,14 @@ use tokio::process::Command;
 /// CLI is actually installed somewhere — see the synthetic fixtures under
 /// `tests/fixtures/grok/` for exactly what shape is currently assumed.
 ///
-/// Unlike codex (`--skip-git-repo-check`) or claude (no such gap at all),
-/// Grok Build has **no documented read-only/sandbox flag** — the only
-/// approval-related flag xAI documents is `--always-approve`, which we only
-/// pass for write (worker) runs. Advisory (read-only deliberation) runs pass
-/// no approval flag at all and rely on the prompt contract (the caller never
-/// asks Grok to edit files in an advisory run) — this mirrors how
-/// `gemini.rs`/`agy` handles the same "CLI has no dedicated read-only mode"
-/// gap: `--dangerously-skip-permissions` there is *also* gated on `write`
-/// only, not on `advisory`.
+/// Permission gating (verified against grok 0.2.87): write (worker) runs get
+/// `--permission-mode acceptEdits` — auto-approve file edits only, the same
+/// mode name claude uses — never `--always-approve` (approve-everything).
+/// Advisory (read-only deliberation) runs pass no permission flag at all and
+/// rely on the headless default plus the prompt contract, mirroring how
+/// `gemini.rs`/`agy` gates `--dangerously-skip-permissions` on `write` only.
+/// The CLI also exposes `--sandbox <PROFILE>` — worth adopting for advisory
+/// runs once its profile values are documented.
 pub struct GrokAdapter;
 
 /// True when `obj` looks like a terminal/turn-ending event: a non-empty
@@ -119,20 +118,24 @@ impl Adapter for GrokAdapter {
     }
 
     fn build_command(&self, req: &RunRequest) -> Command {
+        // Flags verified against the real CLI (grok 0.2.87, 2026-07-08):
+        // `-p/--single`, `--output-format streaming-json`, `-m/--model`,
+        // `--permission-mode <default|acceptEdits|auto|dontAsk|bypassPermissions|plan>`.
+        // NOTE: `--no-auto-update` (assumed from pre-release research) does NOT
+        // exist in 0.2.87 — passing it fails argument parsing on every run.
         let mut cmd = Command::new(self.cli_binary());
         cmd.arg("-p")
             .arg(&req.prompt)
             .arg("--output-format")
-            .arg("streaming-json")
-            .arg("--no-auto-update");
+            .arg("streaming-json");
         if let Some(model) = &req.model {
             cmd.arg("--model").arg(model);
         }
-        // Worker (write:true) runs auto-approve so Grok applies file edits
-        // unattended, same shape as gemini/agy's `--dangerously-skip-permissions`
-        // gate. Advisory runs pass no approval flag at all (see module doc).
+        // Worker (write:true) auto-approves file edits only — least privilege,
+        // same mode name claude uses. Advisory runs pass no permission flag at
+        // all (headless default denies mutating tools; see module doc).
         if req.write {
-            cmd.arg("--always-approve");
+            cmd.arg("--permission-mode").arg("acceptEdits");
         }
         cmd.current_dir(&req.cwd);
         cmd
@@ -149,6 +152,22 @@ impl Adapter for GrokAdapter {
         let Some(obj) = value.as_object() else {
             return Vec::new();
         };
+
+        // Real observed event (grok 0.2.87, recorded 2026-07-08): an error is
+        // `{"type":"error","message":"..."}` — e.g. the 402 subscription-
+        // required refusal. Map to Failed so the orchestrator sees the actual
+        // message instead of only a bare non-zero exit + stderr tail.
+        if obj.get("type").and_then(Value::as_str) == Some("error") {
+            if let Some(message) = obj
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                return vec![AgentEvent::Failed {
+                    error: message.to_string(),
+                }];
+            }
+        }
 
         if is_terminal_marker(obj) {
             let mut events = Vec::new();
@@ -253,7 +272,7 @@ mod tests {
     fn command_args(advisory: bool, write: bool) -> Vec<String> {
         let req = RunRequest {
             prompt: "hi".into(),
-            model: Some("grok-build-0.1".into()),
+            model: Some("grok-build".into()),
             cwd: std::env::temp_dir(),
             advisory,
             write,
@@ -273,23 +292,29 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w == ["--output-format", "streaming-json"]));
-        assert!(args.contains(&"--no-auto-update".to_string()));
-        assert!(args.windows(2).any(|w| w == ["--model", "grok-build-0.1"]));
-        // Advisory: no approval flag at all — no read-only sandbox flag exists.
+        // `--no-auto-update` must NOT be passed: it does not exist in the
+        // real CLI (verified against grok 0.2.87) and fails arg parsing.
+        assert!(!args.contains(&"--no-auto-update".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--model", "grok-build"]));
+        // Advisory: no permission flag at all.
+        assert!(!args.contains(&"--permission-mode".to_string()));
+    }
+
+    #[test]
+    fn write_run_auto_approves_edits_only() {
+        let args = command_args(false, true);
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "acceptEdits"]));
+        // Never the approve-everything hammer.
         assert!(!args.contains(&"--always-approve".to_string()));
     }
 
     #[test]
-    fn write_run_auto_approves_edits() {
-        let args = command_args(false, true);
-        assert!(args.contains(&"--always-approve".to_string()));
-    }
-
-    #[test]
-    fn advisory_run_never_passes_approve_flag() {
-        // advisory:true, write:false — mirrors gemini's advisory path: the gate
-        // is on `write` alone, since the CLI has no dedicated read-only flag.
+    fn advisory_run_never_passes_permission_flag() {
+        // advisory:true, write:false — the gate is on `write` alone.
         let args = command_args(true, false);
+        assert!(!args.contains(&"--permission-mode".to_string()));
         assert!(!args.contains(&"--always-approve".to_string()));
     }
 
@@ -424,6 +449,25 @@ mod tests {
         assert_eq!(
             GrokAdapter.classify_failure("connection reset by peer"),
             FailureKind::Transient
+        );
+    }
+
+    /// Pinned on REAL recorded output (grok 0.2.87): the 402 subscription-
+    /// required refusal streams as `{"type":"error","message":"..."}` and must
+    /// surface as Failed with the message, and classify as auth-shaped
+    /// (Transient — prompts re-login/upgrade), never ModelUnavailable.
+    #[test]
+    fn recorded_subscription_error_maps_to_failed_and_transient() {
+        let raw = include_str!("../../tests/fixtures/grok/recorded/error_subscription.jsonl");
+        let events = parse_all(raw);
+        let Some(AgentEvent::Failed { error }) = events.first() else {
+            panic!("expected Failed from recorded error event, got {events:?}");
+        };
+        assert!(error.contains("402"), "got: {error}");
+        assert_eq!(
+            GrokAdapter.classify_failure(error),
+            FailureKind::Transient,
+            "subscription refusal must not kill the model in ModelHealth"
         );
     }
 

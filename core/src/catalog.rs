@@ -108,7 +108,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
         // but is still available as an explicit choice once authed.
         CatalogEntry {
             provider: Provider::Grok,
-            model: "grok-build-0.1".into(),
+            model: "grok-build".into(),
             auth_method: AuthMethod::CliLogin,
             scores: RoleScores {
                 conductor: 5,
@@ -246,7 +246,7 @@ mod tests {
         );
         assert_eq!(top_model(Provider::Codex).unwrap().model, "gpt-5.5");
         assert!(top_model(Provider::Gemini).is_some());
-        assert_eq!(top_model(Provider::Grok).unwrap().model, "grok-build-0.1");
+        assert_eq!(top_model(Provider::Grok).unwrap().model, "grok-build");
     }
 
     #[test]

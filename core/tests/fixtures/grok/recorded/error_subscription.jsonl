@@ -1,0 +1,1 @@
+{"type":"error","message":"Internal error: {\n  \"message\": \"API error (status 402 Payment Required): personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok.\\n\\nRequest URL: https://cli-chat-proxy.grok.com/v1/responses\",\n  \"http_status\": 402\n}"}

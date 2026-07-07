@@ -78,7 +78,7 @@ mod tests {
             Provider::Gemini
         );
         assert_eq!(
-            adapter_for(&role(Provider::Grok, "grok-build-0.1")).provider(),
+            adapter_for(&role(Provider::Grok, "grok-build")).provider(),
             Provider::Grok
         );
     }

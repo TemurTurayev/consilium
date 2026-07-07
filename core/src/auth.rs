@@ -233,9 +233,6 @@ mod tests {
         );
         assert_eq!(primary_model(Provider::Codex).as_deref(), Some("gpt-5.5"));
         assert!(primary_model(Provider::Gemini).is_some());
-        assert_eq!(
-            primary_model(Provider::Grok).as_deref(),
-            Some("grok-build-0.1")
-        );
+        assert_eq!(primary_model(Provider::Grok).as_deref(), Some("grok-build"));
     }
 }

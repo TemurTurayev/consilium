@@ -329,14 +329,14 @@ mod tests {
         // consilium.config.json roles accept "grok" as a provider — the fourth,
         // beta CLI (xAI's Grok Build CLI).
         let r: RoleConfig = serde_json::from_value(serde_json::json!({
-            "provider": "grok", "model": "grok-build-0.1"
+            "provider": "grok", "model": "grok-build"
         }))
         .unwrap();
         assert_eq!(r.provider, Provider::Grok);
         let ladder = r.ladder();
         assert_eq!(ladder.len(), 1);
         assert_eq!(ladder[0].provider, Provider::Grok);
-        assert_eq!(ladder[0].model, "grok-build-0.1");
+        assert_eq!(ladder[0].model, "grok-build");
     }
 
     #[test]
