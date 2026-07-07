@@ -4,6 +4,7 @@ pub mod conduct;
 pub mod council;
 pub mod eval;
 pub(crate) mod json_extract;
+pub mod operator;
 pub mod progress;
 pub mod prompts;
 pub mod resilience;

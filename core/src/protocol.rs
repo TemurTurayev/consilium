@@ -99,6 +99,16 @@ pub enum SessionRequest {
     },
     /// Abort the active run (server replies with a terminal `run_cancelled`).
     Cancel,
+    /// Operator (chief physician) control: park the active run at its next
+    /// boundary (top of the next subtask dispatch) until `Resume` or `Cancel`.
+    /// As the FIRST frame on a socket (no run active yet) this is invalid,
+    /// same as `Cancel`, and gets the same structured `error` reply.
+    Pause,
+    /// Release a paused run so it continues past its parked boundary.
+    Resume,
+    /// Queue an operator note; it reaches the conductor's next decision
+    /// (evaluation/replan) and is echoed back as an `operator_note` event.
+    Interject { text: String },
 }
 
 /// One provider's auth/liveness state — the wire shape of
@@ -266,6 +276,25 @@ mod tests {
             serde_json::from_str::<SessionRequest>(r#"{"kind":"cancel"}"#).unwrap(),
             SessionRequest::Cancel
         ));
+    }
+
+    #[test]
+    fn pause_resume_interject_requests_parse() {
+        assert!(matches!(
+            serde_json::from_str::<SessionRequest>(r#"{"kind":"pause"}"#).unwrap(),
+            SessionRequest::Pause
+        ));
+        assert!(matches!(
+            serde_json::from_str::<SessionRequest>(r#"{"kind":"resume"}"#).unwrap(),
+            SessionRequest::Resume
+        ));
+        let SessionRequest::Interject { text } =
+            serde_json::from_str::<SessionRequest>(r#"{"kind":"interject","text":"slow down"}"#)
+                .unwrap()
+        else {
+            panic!("expected Interject");
+        };
+        assert_eq!(text, "slow down");
     }
 
     /// Every tag value in a TS decl of a `#[serde(tag = "type")]` enum, e.g.

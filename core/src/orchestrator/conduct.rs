@@ -2,8 +2,11 @@
 
 use crate::adapters::RunRequest;
 use crate::config::{ConductorMemoryConfig, VerifyConfig};
+use crate::event::AgentEvent;
 use crate::orchestrator::changes::{capture_changed_files, capture_changes};
 use crate::orchestrator::council::CouncilMember;
+use crate::orchestrator::operator;
+use crate::orchestrator::progress;
 use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
 use crate::orchestrator::routing::pick_worker_by_provider;
 use crate::orchestrator::stagnation;
@@ -256,8 +259,19 @@ pub async fn run_conduct(
     // case. On Ok, the outcome is always Completed (failover only returns on
     // success). So we propagate the Err directly via `?` and then check for an
     // unparseable (but technically Completed) plan separately.
+    // Operator notes (pause/resume/interject controls): accumulates across the
+    // whole run, drained at each subtask-dispatch boundary by
+    // `operator::checkpoint`. Always empty here — decompose is the very first
+    // conductor call, before the run's first boundary — but rendered via the
+    // same `mem_operator_notes` gate as the ledger for symmetry with the other
+    // two conductor-facing call sites below.
+    let mut operator_notes: Vec<String> = Vec::new();
     let decompose_fo = {
-        let prompt = prompts::conduct_decompose(task, context);
+        let prompt = prompts::conduct_decompose(
+            task,
+            context,
+            mem_operator_notes(mem_on, &operator_notes, ledger_cap).as_deref(),
+        );
         let cwd2 = cwd.clone();
         run_with_failover(
             &conductor_ladder,
@@ -339,6 +353,19 @@ pub async fn run_conduct(
         };
         'plan: for wave in &waves {
             'next_subtask: for &subtask_idx in wave {
+                // ── operator boundary (pause/resume/interject) ──────────────
+                // The TOP of the per-subtask dispatch loop, before this
+                // subtask's first worker attempt is launched — never mid-call
+                // (see `orchestrator::operator`'s doc comment). No-op when no
+                // operator handle is installed for this run (CLI/MCP/eval/every
+                // test that doesn't opt in): `checkpoint` returns immediately
+                // with an empty Vec, so `operator_notes` never grows and every
+                // conductor-facing prompt below stays byte-identical.
+                for note in operator::checkpoint().await {
+                    progress::emit(&AgentEvent::OperatorNote { text: note.clone() });
+                    operator_notes.push(note);
+                }
+
                 let subtask = &plan.subtasks[subtask_idx];
                 if let Some(b) = budget {
                     let elapsed = run_start.elapsed();
@@ -605,6 +632,7 @@ pub async fn run_conduct(
                             supervisor_note.as_deref(),
                             ledger_str.as_deref(),
                             prior_history.as_deref(),
+                            mem_operator_notes(mem_on, &operator_notes, ledger_cap).as_deref(),
                         );
                         let cwd2 = cwd.clone();
                         run_with_failover(
@@ -844,7 +872,13 @@ pub async fn run_conduct(
         let replan_fo = {
             let reason = reason.clone();
             let completed_summary = completed_summary.clone();
-            let prompt = prompts::conduct_replan(task, context, &completed_summary, &reason);
+            let prompt = prompts::conduct_replan(
+                task,
+                context,
+                &completed_summary,
+                &reason,
+                mem_operator_notes(mem_on, &operator_notes, ledger_cap).as_deref(),
+            );
             let cwd2 = cwd.clone();
             run_with_failover(
                 &conductor_ladder,
@@ -1368,6 +1402,38 @@ fn mem_history(on: bool, attempts: &[serde_json::Value], cap: usize) -> Option<S
     }
 }
 
+const OPERATOR_NOTES_ELIDED: &str = "(… earlier operator notes elided)";
+
+/// Folded operator notes (chief-physician interjections queued via
+/// `SessionRequest::Interject` and drained at subtask-dispatch boundaries by
+/// `orchestrator::operator::checkpoint`), most-recent-first-dropped like the
+/// ledger. `None` when none were queued — the common case, and the ONLY case
+/// for every run with no operator attached (CLI/MCP/eval/existing tests),
+/// which keeps every conductor-facing prompt byte-identical to before this
+/// feature existed.
+fn render_operator_notes(notes: &[String], cap: usize) -> Option<String> {
+    if notes.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("- note {}: {n}", i + 1))
+        .collect();
+    Some(fold_lines(&lines, cap, OPERATOR_NOTES_ELIDED))
+}
+
+/// Memory-gated operator-notes render: `None` when memory is off. Reuses the
+/// ConductorMemory `ledger_char_cap` (the caller passes it in) rather than
+/// introducing a dedicated cap — same bounded-block discipline as the ledger.
+fn mem_operator_notes(on: bool, notes: &[String], cap: usize) -> Option<String> {
+    if on {
+        render_operator_notes(notes, cap)
+    } else {
+        None
+    }
+}
+
 const BLACKBOARD_ELIDED: &str = "(… earlier subtasks elided)";
 
 /// Worker-facing blackboard: a mechanical roster of prior FINISHED subtasks
@@ -1846,7 +1912,7 @@ mod tests {
         // The few-shot example must teach the edge: subtask 2 depends on subtask 1.
         // We extract the FIRST fenced ```json block (the example) since parse_plan
         // picks the last block (the output-shape template which has only one subtask).
-        let p = crate::orchestrator::prompts::conduct_decompose("t", "ctx");
+        let p = crate::orchestrator::prompts::conduct_decompose("t", "ctx", None);
         let example_json = p
             .split("```json")
             .nth(1)
@@ -1868,7 +1934,7 @@ mod tests {
 
     #[test]
     fn decompose_template_example_parses_as_plan() {
-        let p = crate::orchestrator::prompts::conduct_decompose("t", "ctx");
+        let p = crate::orchestrator::prompts::conduct_decompose("t", "ctx", None);
         assert!(parse_plan(&p).is_some());
     }
 
@@ -1879,6 +1945,7 @@ mod tests {
             "diff",
             "report",
             "(not run)",
+            None,
             None,
             None,
             None,

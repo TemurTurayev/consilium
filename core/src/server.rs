@@ -14,6 +14,7 @@ use crate::confine::cwd_within_root;
 use crate::event::{AgentEvent, Provider};
 use crate::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
 use crate::orchestrator::council::CouncilMember;
+use crate::orchestrator::operator::{OperatorHandle, OPERATOR_CONTROLS};
 use crate::orchestrator::progress::{ProgressSink, PROGRESS_SINK};
 use crate::orchestrator::resilience::ModelHealth;
 use crate::orchestrator::roles;
@@ -313,6 +314,24 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
                 error: "nothing to cancel: the first frame must describe a run".into(),
             });
         }
+        SessionRequest::Pause => {
+            drop(tx);
+            send_terminal(&ServerFrame::Error {
+                error: "nothing to pause: the first frame must describe a run".into(),
+            });
+        }
+        SessionRequest::Resume => {
+            drop(tx);
+            send_terminal(&ServerFrame::Error {
+                error: "nothing to resume: the first frame must describe a run".into(),
+            });
+        }
+        SessionRequest::Interject { .. } => {
+            drop(tx);
+            send_terminal(&ServerFrame::Error {
+                error: "nothing to interject into: the first frame must describe a run".into(),
+            });
+        }
         SessionRequest::Conduct { task, context, cwd } => {
             let root = state.launch_root.as_ref();
             let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
@@ -345,26 +364,42 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
             let quota = state.quota.clone();
             let timeout = state.timeout;
             let sink: Arc<dyn ProgressSink> = Arc::new(WsSink { tx });
-            let mut run = tokio::spawn(PROGRESS_SINK.scope(sink, async move {
-                let health = ModelHealth::new();
-                run_conduct(&task, &context, deps, quota.as_ref(), cwd, timeout, &health).await
-            }));
+            // Per-run operator handle: pause/resume/interject frames arriving
+            // later on this same socket are routed into it below. Installed
+            // as a task-local alongside PROGRESS_SINK so `conduct::run_conduct`
+            // can reach it via `orchestrator::operator::checkpoint()` without
+            // threading it through every call.
+            let operator = OperatorHandle::new();
+            let operator_for_run = operator.clone();
+            let mut run = tokio::spawn(OPERATOR_CONTROLS.scope(
+                operator_for_run,
+                PROGRESS_SINK.scope(sink, async move {
+                    let health = ModelHealth::new();
+                    run_conduct(&task, &context, deps, quota.as_ref(), cwd, timeout, &health).await
+                }),
+            ));
 
             let outcome = loop {
                 tokio::select! {
                     joined = &mut run => break Some(joined),
                     msg = receiver.next() => match msg {
-                        Some(Ok(Message::Text(t)))
-                            if matches!(
-                                serde_json::from_str(t.as_str()),
-                                Ok(SessionRequest::Cancel)
-                            ) =>
-                        {
-                            run.abort();
-                            let _ = (&mut run).await; // ensure children are killed
-                            break None;
+                        Some(Ok(Message::Text(t))) => {
+                            match serde_json::from_str::<SessionRequest>(t.as_str()) {
+                                Ok(SessionRequest::Cancel) => {
+                                    run.abort();
+                                    let _ = (&mut run).await; // ensure children are killed
+                                    break None;
+                                }
+                                Ok(SessionRequest::Pause) => operator.pause(),
+                                Ok(SessionRequest::Resume) => operator.resume(),
+                                Ok(SessionRequest::Interject { text }) => operator.interject(text),
+                                // A duplicate `conduct` frame or an unparseable
+                                // frame on an already-active run: ignored
+                                // (forward compat).
+                                Ok(SessionRequest::Conduct { .. }) | Err(_) => {}
+                            }
                         }
-                        // Unknown text frames are ignored (forward compat).
+                        // Unknown/non-text frames are ignored (forward compat).
                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
                             run.abort();
                             let _ = (&mut run).await;

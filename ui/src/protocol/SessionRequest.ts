@@ -8,4 +8,4 @@ export type SessionRequest = { "kind": "conduct", task: string, context: string,
 /**
  * Working directory the run edits; defaults to the server's cwd.
  */
-cwd: string | null, } | { "kind": "cancel" };
+cwd: string | null, } | { "kind": "cancel" } | { "kind": "pause" } | { "kind": "resume" } | { "kind": "interject", text: string, };

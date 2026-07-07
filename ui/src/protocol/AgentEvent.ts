@@ -4,4 +4,4 @@ import type { Provider } from "./Provider";
 /**
  * Normalized event stream — the contract every adapter maps its CLI output into.
  */
-export type AgentEvent = { "type": "session_started", session_id: string, provider: Provider, model: string | null, } | { "type": "thinking", text: string, } | { "type": "message", text: string, } | { "type": "tool_call", name: string, detail: string, } | { "type": "file_changed", path: string, } | { "type": "usage", input_tokens: number, output_tokens: number, } | { "type": "completed", result: string | null, } | { "type": "failed", error: string, };
+export type AgentEvent = { "type": "session_started", session_id: string, provider: Provider, model: string | null, } | { "type": "thinking", text: string, } | { "type": "message", text: string, } | { "type": "tool_call", name: string, detail: string, } | { "type": "file_changed", path: string, } | { "type": "usage", input_tokens: number, output_tokens: number, } | { "type": "completed", result: string | null, } | { "type": "failed", error: string, } | { "type": "paused", } | { "type": "resumed", } | { "type": "operator_note", text: string, };

@@ -72,6 +72,18 @@ pub enum AgentEvent {
     Failed {
         error: String,
     },
+    /// Operator (chief physician) paused the run; emitted once when a
+    /// `conduct` boundary parks. See `orchestrator::operator`.
+    Paused {},
+    /// Operator resumed a paused run; emitted once when a parked boundary
+    /// releases.
+    Resumed {},
+    /// An operator note (queued via `SessionRequest::Interject`) was drained
+    /// at a boundary and folded into the conductor's next decision. Echoed
+    /// here so the UI can render it in the run's timeline.
+    OperatorNote {
+        text: String,
+    },
 }
 
 #[cfg(test)]

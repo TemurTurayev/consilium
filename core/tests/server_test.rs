@@ -399,3 +399,210 @@ async fn ws_second_concurrent_session_is_refused() {
         "expected an already-active error frame; got {texts:?}"
     );
 }
+
+// ─── Operator controls: pause / resume / interject ─────────────────────────
+
+/// Deps for a 2-independent-subtask plan: decompose → accept → accept. The
+/// worker's pre-script sleeps briefly, so there's a real wall-clock window
+/// between subtask 1's dispatch and subtask 2's own checkpoint — the tests
+/// below send their pause/interject frame right after decompose finishes,
+/// comfortably before that second checkpoint is ever reached.
+fn two_subtask_deps() -> Arc<dyn Fn() -> ConductDeps + Send + Sync> {
+    Arc::new(|| {
+        let plan = r#"{"subtasks":[{"id":1,"title":"a","prompt":"do a","depends_note":""},{"id":2,"title":"b","prompt":"do b","depends_note":""}]}"#;
+        let conductor = Arc::new(SequencedAdapter::new(
+            Provider::Claude,
+            vec![
+                ScriptedAdapter::ok_with_text(Provider::Claude, plan),
+                ScriptedAdapter::ok_with_text(
+                    Provider::Claude,
+                    r#"{"decision":"accept","feedback":""}"#,
+                ),
+                ScriptedAdapter::ok_with_text(
+                    Provider::Claude,
+                    r#"{"decision":"accept","feedback":""}"#,
+                ),
+            ],
+        ));
+        let worker = Arc::new(ScriptedAdapter {
+            pre_script: "sleep 0.3; echo x >> f.txt".into(),
+            ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+        });
+        ConductDeps {
+            conductor: RoleHandle {
+                ladder: vec![rung(Provider::Claude, "m", conductor)],
+            },
+            workers: vec![CouncilMember {
+                label: "codex-gpt".into(),
+                ladder: vec![rung(Provider::Codex, "gpt", worker)],
+            }],
+            supervisor: None,
+            reviewer: None,
+            arbiter: None,
+            verify: None,
+            memory: Default::default(),
+            cross_family_review: false,
+            max_replans: 0,
+            budget: None,
+        }
+    })
+}
+
+async fn start_two_subtask_run(
+    repo: &std::path::Path,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let state = ServerState::from_parts(
+        two_subtask_deps(),
+        QuotaStore::open_in_memory().unwrap(),
+        Duration::from_secs(30),
+    )
+    .with_launch_root(repo.to_path_buf());
+    let addr = spawn_server(state).await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/session"))
+        .await
+        .unwrap();
+    let frame = serde_json::json!({
+        "kind": "conduct", "task": "t", "cwd": repo.to_string_lossy(),
+    })
+    .to_string();
+    ws.send(Message::Text(frame.into())).await.unwrap();
+
+    // Decompose finished (subtask 1's own checkpoint has already run by the
+    // time this arrives): everything sent right after this targets subtask
+    // 2's checkpoint, which subtask 1's worker sleep keeps comfortably out of
+    // reach until we let it proceed.
+    next_frame_matching(&mut ws, |t| t.contains("\"type\":\"completed\""))
+        .await
+        .expect("decompose never finished");
+    ws
+}
+
+// An interject sent mid-run is echoed as an `operator_note` event frame, and
+// the run still completes normally afterward.
+#[tokio::test]
+async fn ws_interject_frame_yields_operator_note_event_mid_run() {
+    let repo = temp_repo();
+    let mut ws = start_two_subtask_run(repo.path()).await;
+
+    ws.send(Message::Text(
+        r#"{"kind":"interject","text":"note from the chief physician"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let note_frame = next_frame_matching(&mut ws, |t| t.contains("\"type\":\"operator_note\""))
+        .await
+        .expect("no operator_note event frame");
+    assert!(
+        note_frame.contains("note from the chief physician"),
+        "got: {note_frame}"
+    );
+
+    let texts = drain(&mut ws).await;
+    let term = texts
+        .iter()
+        .find(|t| t.contains("\"type\":\"run_complete\""))
+        .unwrap_or_else(|| panic!("no run_complete frame; got {texts:?}"));
+    assert!(
+        term.contains("\"completed\":[1,2]"),
+        "terminal frame: {term}"
+    );
+}
+
+// A pause frame parks the run at the next checkpoint (emitting `paused`
+// exactly once); resume releases it (emitting `resumed` exactly once) and the
+// run completes normally.
+#[tokio::test]
+async fn ws_pause_frame_parks_run_then_resume_completes_it() {
+    let repo = temp_repo();
+    let mut ws = start_two_subtask_run(repo.path()).await;
+
+    ws.send(Message::Text(r#"{"kind":"pause"}"#.into()))
+        .await
+        .unwrap();
+    let paused_frame = next_frame_matching(&mut ws, |t| t.contains("\"type\":\"paused\""))
+        .await
+        .expect("no paused event frame");
+    assert!(paused_frame.contains("\"type\":\"paused\""));
+
+    ws.send(Message::Text(r#"{"kind":"resume"}"#.into()))
+        .await
+        .unwrap();
+    let resumed_frame = next_frame_matching(&mut ws, |t| t.contains("\"type\":\"resumed\""))
+        .await
+        .expect("no resumed event frame");
+    assert!(resumed_frame.contains("\"type\":\"resumed\""));
+
+    let texts = drain(&mut ws).await;
+    let term = texts
+        .iter()
+        .find(|t| t.contains("\"type\":\"run_complete\""))
+        .unwrap_or_else(|| panic!("no run_complete frame; got {texts:?}"));
+    assert!(
+        term.contains("\"completed\":[1,2]"),
+        "terminal frame: {term}"
+    );
+}
+
+// A cancel frame while parked must still terminate the run promptly — pausing
+// must never block cancellation.
+#[tokio::test]
+async fn ws_cancel_while_paused_terminates_promptly() {
+    let repo = temp_repo();
+    let mut ws = start_two_subtask_run(repo.path()).await;
+
+    ws.send(Message::Text(r#"{"kind":"pause"}"#.into()))
+        .await
+        .unwrap();
+    next_frame_matching(&mut ws, |t| t.contains("\"type\":\"paused\""))
+        .await
+        .expect("no paused event frame");
+
+    let cancel_sent_at = tokio::time::Instant::now();
+    ws.send(Message::Text(r#"{"kind":"cancel"}"#.into()))
+        .await
+        .unwrap();
+
+    let term = next_frame_matching(&mut ws, |t| t.contains("\"type\":\"run_cancelled\""))
+        .await
+        .expect("no run_cancelled terminal frame");
+    assert!(term.contains("run_cancelled"));
+    assert!(
+        cancel_sent_at.elapsed() < Duration::from_secs(2),
+        "cancel while paused must terminate promptly; took {:?}",
+        cancel_sent_at.elapsed()
+    );
+}
+
+// Pause/resume/interject as the FIRST frame (no run has been described yet)
+// are invalid, same as cancel, and get the same structured `error` reply —
+// the deps closure must never even be called.
+#[tokio::test]
+async fn ws_pause_resume_interject_as_first_frame_are_errors() {
+    let deps_fn: Arc<dyn Fn() -> ConductDeps + Send + Sync> =
+        Arc::new(|| panic!("deps_fn must not be called for a pause/resume/interject-only frame"));
+    let state = ServerState::from_parts(
+        deps_fn,
+        QuotaStore::open_in_memory().unwrap(),
+        Duration::from_secs(30),
+    );
+
+    for frame in [
+        r#"{"kind":"pause"}"#,
+        r#"{"kind":"resume"}"#,
+        r#"{"kind":"interject","text":"x"}"#,
+    ] {
+        let addr = spawn_server(state.clone()).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/session"))
+            .await
+            .unwrap();
+        ws.send(Message::Text(frame.into())).await.unwrap();
+
+        let texts = drain(&mut ws).await;
+        assert!(
+            texts.iter().any(|t| t.contains("\"type\":\"error\"")),
+            "frame {frame}: expected an error frame; got {texts:?}"
+        );
+    }
+}

@@ -15,6 +15,16 @@
 //! own feedback. Both are XML-isolated like the trusted blocks above, so they do
 //! not reintroduce the bare-interpolation hole.
 //!
+//! `operator_notes` (present on `conduct_decompose`/`conduct_evaluation`/
+//! `conduct_replan` — the CONDUCTOR-facing prompts only) carries live
+//! interjections from the human operator (the "chief physician" in the UI),
+//! queued via `SessionRequest::Interject` and drained at subtask-dispatch
+//! boundaries by `orchestrator::operator::checkpoint`. `None` (no
+//! interjection queued, or no operator attached to the run at all) renders as
+//! the empty string, so every prompt stays byte-identical to a run with no
+//! operator controls — see `operator_notes_block` below. Workers, the
+//! supervisor, the reviewer, and the arbiter never see this block.
+//!
 //! The worker blackboard (`prior_work`, on the INITIAL worker prompt) is a strict
 //! subset shown to WORKERS: a mechanical roster of prior finished subtasks
 //! (id/title/status) + files modified this run. Workers never see the conductor's
@@ -25,6 +35,21 @@
 /// prompt carrying no extra context stays byte-identical to its bare form.
 fn memory_block(tag: &str, body: Option<&str>) -> String {
     body.map(|b| format!("\n<{tag}>\n{b}\n</{tag}>\n"))
+        .unwrap_or_default()
+}
+
+/// Render the operator's live interjections as a clearly labeled,
+/// XML-isolated block for conductor-facing prompts. `None` → empty string
+/// (see the module doc comment above) — a run with no interjection queued
+/// produces a byte-identical prompt to one with no operator attached at all.
+fn operator_notes_block(notes: Option<&str>) -> String {
+    notes
+        .map(|n| {
+            format!(
+                "\nOperator notes (chief physician — live guidance from the human \
+                 overseeing this run; weigh it seriously):\n<operator_notes>\n{n}\n</operator_notes>\n"
+            )
+        })
         .unwrap_or_default()
 }
 
@@ -68,7 +93,8 @@ pub fn council_synthesis(question: &str, answers: &[(&str, &str)], reviews: &[&s
     )
 }
 
-pub fn conduct_decompose(task: &str, context: &str) -> String {
+pub fn conduct_decompose(task: &str, context: &str, operator_notes: Option<&str>) -> String {
+    let notes = operator_notes_block(operator_notes);
     format!(
         "You are the conductor of a team of AI coding agents working in this \
          repository. Decompose the task below into the SMALLEST number of \
@@ -87,7 +113,7 @@ pub fn conduct_decompose(task: &str, context: &str) -> String {
          finish first (empty for independent subtasks). Independent subtasks may run \
          together; a subtask whose dependency fails is skipped, so only add an edge \
          when the work genuinely needs the earlier result.\n\n\
-         Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
+         Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n{notes}\n\
          Example of well-specified subtasks — note how each names exact signatures, \
          paths, and tests (this example is Rust; mirror the same precision in the \
          task's actual language/stack):\n\
@@ -101,7 +127,9 @@ pub fn conduct_replan(
     context: &str,
     completed_summary: &str,
     failure_reason: &str,
+    operator_notes: Option<&str>,
 ) -> String {
+    let notes = operator_notes_block(operator_notes);
     format!(
         "You are the conductor of a team of AI coding agents working in this \
          repository. Produce a REVISED plan for the task below covering ONLY \
@@ -120,7 +148,7 @@ pub fn conduct_replan(
          finished work; empty for independent subtasks).\n\n\
          Task:\n{task}\n\nAdditional context:\n<context>\n{context}\n</context>\n\n\
          Already completed work:\n<completed_summary>\n{completed_summary}\n</completed_summary>\n\n\
-         Failure that requires replanning:\n<failure_reason>\n{failure_reason}\n</failure_reason>\n\n\
+         Failure that requires replanning:\n<failure_reason>\n{failure_reason}\n</failure_reason>\n{notes}\n\
          Output EXACTLY one JSON code block:\n```json\n{{\"subtasks\":[{{\"id\":1,\"title\":\"short name\",\"prompt\":\"full self-contained instructions\",\"depends_note\":\"\",\"depends_on\":[]}}]}}\n```"
     )
 }
@@ -149,6 +177,7 @@ pub fn conduct_initial(subtask_prompt: &str, prior_work: Option<&str>) -> String
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn conduct_evaluation(
     subtask_prompt: &str,
     changes: &str,
@@ -157,12 +186,14 @@ pub fn conduct_evaluation(
     supervisor_note: Option<&str>,
     plan_ledger: Option<&str>,
     attempt_history: Option<&str>,
+    operator_notes: Option<&str>,
 ) -> String {
     let supervisor = supervisor_note
         .map(|n| format!("\nSupervisor's note (weigh it seriously):\n{n}\n"))
         .unwrap_or_default();
     let ledger = memory_block("plan_ledger", plan_ledger);
     let history = memory_block("attempt_history", attempt_history);
+    let notes = operator_notes_block(operator_notes);
     format!(
         "You are the conductor reviewing a worker's completed subtask. Judge \
          whether the changes fulfil the subtask. Build/test results are AUTHORITATIVE: \
@@ -172,7 +203,7 @@ pub fn conduct_evaluation(
          Subtask given to the worker:\n{subtask_prompt}\n\n\
          Changes made (diff + new files):\n<changes>\n{changes}\n</changes>\n\n\
          Build/test/lint result:\n<verify>\n{verify}\n</verify>\n\n\
-         Worker's report:\n<worker_report>\n{worker_report}\n</worker_report>\n{supervisor}{ledger}{history}\n\
+         Worker's report:\n<worker_report>\n{worker_report}\n</worker_report>\n{supervisor}{ledger}{history}{notes}\n\
          Output EXACTLY one JSON code block — decision is accept | rework | fail \
          (rework requires concrete, actionable feedback):\n```json\n{{\"decision\":\"accept\",\"feedback\":\"\"}}\n```"
     )
@@ -294,7 +325,7 @@ mod tests {
     // delta in the Conductor paper); the reviewer must actively hunt edge cases.
     #[test]
     fn decompose_demands_concrete_constraints_with_exemplar() {
-        let p = conduct_decompose("build a thing", "ctx");
+        let p = conduct_decompose("build a thing", "ctx", None);
         assert!(p.contains("RESTATE every concrete constraint"));
         assert!(p.contains("with_backoff"), "few-shot exemplar present");
         assert!(
@@ -316,7 +347,7 @@ mod tests {
     // its replan-specific invariants (id continuation, failure context).
     #[test]
     fn replan_demands_concrete_constraints_and_keeps_invariants() {
-        let p = conduct_replan("task", "ctx", "done: subtask 1", "subtask 2 failed");
+        let p = conduct_replan("task", "ctx", "done: subtask 1", "subtask 2 failed", None);
         assert!(p.contains("RESTATE every concrete constraint"));
         assert!(p.contains("subtask 2 failed")); // failure_reason interpolated
         assert!(p.contains("never reuse a completed or skipped id")); // replan invariant preserved
@@ -324,9 +355,10 @@ mod tests {
 
     #[test]
     fn evaluation_omits_memory_blocks_when_none() {
-        let p = conduct_evaluation("st", "ch", "wr", "v", None, None, None);
+        let p = conduct_evaluation("st", "ch", "wr", "v", None, None, None, None);
         assert!(!p.contains("<plan_ledger>"));
         assert!(!p.contains("<attempt_history>"));
+        assert!(!p.contains("<operator_notes>"));
     }
 
     #[test]
@@ -339,9 +371,79 @@ mod tests {
             None,
             Some("subtask 1 done"),
             Some("attempt 0: rework"),
+            None,
         );
         assert!(p.contains("<plan_ledger>\nsubtask 1 done\n</plan_ledger>"));
         assert!(p.contains("<attempt_history>\nattempt 0: rework\n</attempt_history>"));
+    }
+
+    // ── operator notes (pause/resume/interject controls) ───────────────────
+
+    #[test]
+    fn operator_notes_block_is_empty_string_when_none() {
+        // Not merely "omitted content" — the appended block must be the exact
+        // empty string, so conductor-facing prompts stay byte-identical to a
+        // run with no operator controls attached at all.
+        assert_eq!(operator_notes_block(None), "");
+    }
+
+    #[test]
+    fn decompose_evaluation_replan_are_byte_identical_with_no_operator_notes() {
+        // Pin the exact pre-operator-controls behavior: calling each
+        // conductor-facing prompt builder with `operator_notes: None` must
+        // produce the identical string to calling it with the notes
+        // parameter omitted entirely would have (there is no other way to
+        // call it now, so this asserts equality against a second identical
+        // call — the real guard is `operator_notes_block(None) == ""` above
+        // plus the `!contains("<operator_notes>")` checks here).
+        let d = conduct_decompose("t", "c", None);
+        let d2 = conduct_decompose("t", "c", None);
+        assert_eq!(d, d2);
+        assert!(!d.contains("<operator_notes>"));
+        assert!(!d.contains("chief physician"));
+
+        let e = conduct_evaluation("st", "ch", "wr", "v", None, None, None, None);
+        assert!(!e.contains("<operator_notes>"));
+        assert!(!e.contains("chief physician"));
+
+        let r = conduct_replan("t", "c", "done", "why", None);
+        assert!(!r.contains("<operator_notes>"));
+        assert!(!r.contains("chief physician"));
+    }
+
+    #[test]
+    fn decompose_evaluation_replan_include_operator_notes_when_some() {
+        let note = "hold off on touching the auth module";
+        let d = conduct_decompose("t", "c", Some(note));
+        assert!(d.contains("<operator_notes>"));
+        assert!(d.contains(note));
+        assert!(d.contains("chief physician"));
+
+        let e = conduct_evaluation("st", "ch", "wr", "v", None, None, None, Some(note));
+        assert!(e.contains("<operator_notes>"));
+        assert!(e.contains(note));
+
+        let r = conduct_replan("t", "c", "done", "why", Some(note));
+        assert!(r.contains("<operator_notes>"));
+        assert!(r.contains(note));
+    }
+
+    #[test]
+    fn operator_notes_never_reach_worker_or_supervisor_or_arbiter_prompts() {
+        // Operator notes are conductor-facing ONLY. Worker (`conduct_initial`/
+        // `conduct_rework`), supervisor, and arbiter prompt builders don't even
+        // take an `operator_notes` parameter — this test pins that by
+        // asserting the label never leaks in via some other interpolated
+        // field (e.g. if a note's text were mistakenly threaded into
+        // `feedback` or `progress`).
+        let initial = conduct_initial("do the thing", None);
+        assert!(!initial.contains("chief physician"));
+        let rework = conduct_rework("op", "pc", "fb", None);
+        assert!(!rework.contains("chief physician"));
+        let sup = supervisor_gate("t", "p", None, None);
+        assert!(!sup.contains("chief physician"));
+        let arb = arbiter_decide("s", "c", "f", None, None);
+        assert!(!arb.contains("chief physician"));
     }
 
     #[test]

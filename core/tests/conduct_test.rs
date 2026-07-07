@@ -3,9 +3,11 @@ mod common;
 #[allow(unused_imports)]
 use common::{RecordingAdapter, RecordingSequenced, ScriptedAdapter, SequencedAdapter};
 use consilium::config::{ConductorMemoryConfig, ModelCandidate, VerifyConfig};
-use consilium::event::Provider;
+use consilium::event::{AgentEvent, Provider};
 use consilium::orchestrator::conduct::{run_conduct, ConductDeps, ConductOutcome, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
+use consilium::orchestrator::operator::{OperatorHandle, OPERATOR_CONTROLS};
+use consilium::orchestrator::progress::{ProgressSink, PROGRESS_SINK};
 use consilium::orchestrator::resilience::{ModelHealth, Rung};
 use consilium::quota::QuotaStore;
 use std::sync::{Arc, Mutex};
@@ -3567,4 +3569,385 @@ async fn cross_family_off_emits_no_marker() {
         att.get("cross_family").is_none(),
         "flag off → no cross_family marker; attempt: {att}"
     );
+}
+
+// ─── Operator controls: pause / resume / interject ─────────────────────────
+//
+// `run_conduct` has zero API change for operator controls — the handle is
+// ambient task-local context, installed (or not) around the call exactly like
+// `PROGRESS_SINK`. These tests exercise that task-local directly (no server /
+// WS layer needed); `core/tests/server_test.rs` covers the WS-frame plumbing.
+
+// No `OPERATOR_CONTROLS.scope` installed at all — the exact condition every
+// one of the other ~40 conduct tests in this file runs under. Proves the
+// no-op path: conductor-facing prompts never carry an operator_notes block.
+#[tokio::test]
+async fn no_operator_handle_installed_is_byte_identical() {
+    let repo = temp_repo();
+    let quota = store();
+    let log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "x", "write out.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &rework_json("more please")),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        log.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", writing_worker())],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 0,
+        budget: None,
+    };
+
+    let outcome = run_conduct(
+        "t",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.completed, vec![1]);
+
+    let calls = log.lock().unwrap();
+    assert!(calls.len() >= 3, "decompose + rework-eval + accept-eval");
+    for (prompt, _, _) in calls.iter() {
+        assert!(
+            !prompt.contains("<operator_notes>"),
+            "no operator attached -> never an operator_notes block: {prompt}"
+        );
+        assert!(!prompt.contains("chief physician"), "got: {prompt}");
+    }
+}
+
+// An interjection queued BEFORE the run starts is drained at subtask 1's
+// checkpoint (top of its dispatch, before decompose has a chance to see it,
+// since decompose is called before any checkpoint runs) — so it must reach
+// subtask 1's conductor evaluation and every later conductor-facing prompt in
+// this run, but NEVER the decompose prompt and NEVER a worker prompt.
+#[tokio::test]
+async fn operator_interject_reaches_evaluation_not_decompose_or_worker() {
+    let repo = temp_repo();
+    let quota = store();
+    let cond_log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let worker_log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "alpha_subtask", "do a"), (2, "beta_subtask", "do b")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        cond_log.clone(),
+    ));
+    let worker = Arc::new(RecordingSequenced::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo a >> f.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did a")
+            },
+            ScriptedAdapter {
+                pre_script: "echo b >> f.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "did b")
+            },
+        ],
+        worker_log.clone(),
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 0,
+        budget: None,
+    };
+
+    let operator = OperatorHandle::new();
+    let note_text = "hold off on touching auth.rs";
+    operator.interject(note_text.to_string());
+
+    let outcome = OPERATOR_CONTROLS
+        .scope(
+            operator.clone(),
+            run_conduct(
+                "t",
+                "",
+                deps,
+                &quota,
+                repo.path().to_path_buf(),
+                TIMEOUT,
+                &health(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.completed, vec![1, 2]);
+
+    let cond_calls = cond_log.lock().unwrap();
+    assert_eq!(
+        cond_calls.len(),
+        3,
+        "decompose + 2 evaluations; got {}",
+        cond_calls.len()
+    );
+    assert!(
+        !cond_calls[0].0.contains("<operator_notes>"),
+        "decompose predates the run's first checkpoint, so it must never see \
+         a note queued after the run started: {}",
+        cond_calls[0].0
+    );
+    assert!(
+        cond_calls[1].0.contains("<operator_notes>") && cond_calls[1].0.contains(note_text),
+        "subtask 1 evaluation must carry the note (drained at subtask 1's own \
+         checkpoint, before its worker was dispatched): {}",
+        cond_calls[1].0
+    );
+    assert!(
+        cond_calls[2].0.contains(note_text),
+        "subtask 2 evaluation must still carry the note: {}",
+        cond_calls[2].0
+    );
+
+    let worker_calls = worker_log.lock().unwrap();
+    assert_eq!(worker_calls.len(), 2);
+    for (prompt, _, _) in worker_calls.iter() {
+        assert!(
+            !prompt.contains(note_text) && !prompt.contains("<operator_notes>"),
+            "operator notes are conductor-facing only — must never reach a \
+             worker prompt: {prompt}"
+        );
+    }
+}
+
+// A note queued before the run also survives into the REPLAN prompt (a
+// decompose-shaped conductor call): subtask 1 fails, forcing a replan; the
+// note must appear in both the failed subtask's evaluation AND the replan.
+#[tokio::test]
+async fn operator_interject_reaches_replan_prompt() {
+    let repo = temp_repo();
+    let quota = store();
+    let cond_log: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let conductor = Arc::new(RecordingSequenced::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "first try", "write failed.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &fail_json("needs a new plan")),
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(2, "replanned", "write recovered.txt")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+        cond_log.clone(),
+    ));
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo failed > failed.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote failed.txt")
+            },
+            ScriptedAdapter {
+                pre_script: "echo recovered > recovered.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote recovered.txt")
+            },
+        ],
+    ));
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 1,
+        budget: None,
+    };
+
+    let operator = OperatorHandle::new();
+    let note_text = "prioritize recovery over speed";
+    operator.interject(note_text.to_string());
+
+    let outcome = OPERATOR_CONTROLS
+        .scope(
+            operator.clone(),
+            run_conduct(
+                "write a file",
+                "",
+                deps,
+                &quota,
+                repo.path().to_path_buf(),
+                TIMEOUT,
+                &health(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert!(outcome.failed.is_none(), "replan should rescue the run");
+    assert_eq!(outcome.completed, vec![2]);
+
+    let calls = cond_log.lock().unwrap();
+    assert_eq!(calls.len(), 4, "decompose, fail-eval, replan, accept-eval");
+    assert!(
+        !calls[0].0.contains("<operator_notes>"),
+        "decompose predates the run's first checkpoint: {}",
+        calls[0].0
+    );
+    assert!(
+        calls[1].0.contains(note_text),
+        "subtask 1's evaluation must carry the note: {}",
+        calls[1].0
+    );
+    assert!(
+        calls[2].0.contains("<operator_notes>") && calls[2].0.contains(note_text),
+        "the replan prompt (a decompose-shaped conductor call) must carry the \
+         note: {}",
+        calls[2].0
+    );
+    assert!(
+        calls[3].0.contains(note_text),
+        "post-replan subtask evaluation must still carry the note: {}",
+        calls[3].0
+    );
+}
+
+/// A `ProgressSink` that records every event into a shared `Vec`, for
+/// asserting `Paused`/`Resumed` fire exactly once each around a pause/resume
+/// cycle.
+struct VecSink(Arc<Mutex<Vec<AgentEvent>>>);
+impl ProgressSink for VecSink {
+    fn on_event(&self, ev: &AgentEvent) {
+        self.0.lock().unwrap().push(ev.clone());
+    }
+}
+
+// A run paused before it starts parks at subtask 1's checkpoint (before that
+// subtask's worker is ever dispatched) and stays parked — proven by the join
+// handle not finishing — until `resume()`, after which it runs both subtasks
+// to completion. Paused/Resumed events fire exactly once each.
+#[tokio::test]
+async fn operator_pause_parks_between_subtasks_then_resume_completes_run() {
+    let repo = temp_repo();
+    let quota = store();
+
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "alpha_subtask", "do a"), (2, "beta_subtask", "do b")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo x >> f.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+    });
+
+    let deps = ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "m", conductor),
+        workers: vec![solo_worker("codex", Provider::Codex, "m", worker)],
+        supervisor: None,
+        reviewer: None,
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        max_replans: 0,
+        budget: None,
+    };
+
+    let operator = OperatorHandle::new();
+    operator.pause(); // paused before the run even starts
+
+    let events: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink: Arc<dyn ProgressSink> = Arc::new(VecSink(events.clone()));
+
+    let operator_for_run = operator.clone();
+    let cwd = repo.path().to_path_buf();
+    let run = tokio::spawn(OPERATOR_CONTROLS.scope(
+        operator_for_run,
+        PROGRESS_SINK.scope(sink, async move {
+            let health = health();
+            run_conduct("t", "", deps, &quota, cwd, TIMEOUT, &health).await
+        }),
+    ));
+
+    // Give the spawned task time to reach the checkpoint and start waiting,
+    // then confirm it has NOT completed — the pause parked it before subtask
+    // 1's worker was ever dispatched.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !run.is_finished(),
+        "run must park at subtask 1's checkpoint while paused"
+    );
+
+    operator.resume();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("run must complete promptly after resume")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(outcome.completed, vec![1, 2]);
+
+    let recorded = events.lock().unwrap();
+    let paused_count = recorded
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Paused {}))
+        .count();
+    let resumed_count = recorded
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Resumed {}))
+        .count();
+    assert_eq!(paused_count, 1, "got: {recorded:?}");
+    assert_eq!(resumed_count, 1, "got: {recorded:?}");
 }
