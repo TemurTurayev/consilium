@@ -51,8 +51,13 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 | **Onboarding wizard** | `consilium init` — interactive: preview the recommended council → auth providers (detect + guide, degrade to what's ready) → write `consilium.config.json`; `--yes` writes the recommended lineup non-interactively | ✅ Done — completes the pick-your-council onboarding |
 | **M3d — MCP tools & memory** | `council_run` MCP tool, `search_recall` + `page_in` memory/recitation tools | ✅ Done — shipped in M3a server |
 | **Web UI — Usage dashboard** | per-provider token-usage panel (`GET /api/quota` + React, with `(est.)` markers for estimated tokens) | ✅ Done |
-| **Web UI — Council view** | a live council-deliberation view (the next web-UI slice) | 🚧 Next |
-| v1.1+ | Warp terminal integration (OSC 777), Tauri desktop app | Planned |
+| **Desktop app (Tauri 2)** | embedded server (port 0), native folder picker, run/cancel from the window; dmg/AppImage/deb built on release tags | ✅ Done — E2E-verified on macOS |
+| **Table view — the council as a scene** | pixel-art creatures per provider around the "patient" (the task), live statuses from the event stream, start/stop from the scene | ✅ Done — demo run works with zero backend |
+| **Operator controls** | pause / resume / interject: the run parks at the next subtask boundary; your note lands in the conductor's memory (`operator_note` on the wire) | ✅ Done — 413 core tests |
+| **Grok provider (experimental)** | `grok` CLI adapter audited against the real binary (0.2.87); flags, model id, and the 402 error shape pinned from recorded output | ✅ Code-ready — needs a SuperGrok subscription for live runs |
+| **Web UI — Council view** | a live view for `council` deliberations (the Table scene covers `conduct`; anonymized peer-review runs still render as raw events) | 🚧 Next |
+| v0.3+ | Kimi + GLM seats (kimi-cli adapter; claude-CLI env-override path), run history + scene replay, eval v2 with hard tasks | Planned |
+| v1.1+ | Warp terminal integration (OSC 777), Godot standalone client | Planned |
 
 ## Install
 
