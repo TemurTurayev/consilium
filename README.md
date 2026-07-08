@@ -63,6 +63,8 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 
 You need at least one agent CLI installed and authenticated (`claude`, `codex`, or `agy`). Pick the install path that suits you:
 
+> **Using Claude Code?** The fastest path is the [Claude Code plugin](#claude-code-plugin-one-line-install) — two lines, and your live session becomes the conductor (bundled MCP server + slash commands + skill). You still install the `consilium` CLI below; the plugin drives it.
+
 ### 0. Desktop app — macOS / Linux (beta)
 
 A Tauri desktop app with the full web UI built in: pick a project folder in a
@@ -247,7 +249,7 @@ Then ask your session to delegate: it decides *what* to hand off and whether to
 accept; the engine executes. Logs go to stderr so they never corrupt the stdio
 protocol.
 
-### Or install the Claude Code plugin (one line)
+### Claude Code plugin (one-line install)
 
 The plugin bundles that MCP server plus slash commands and a skill, so your live
 session knows how to conduct without any config:
