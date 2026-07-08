@@ -31,7 +31,7 @@ Fugu proves the approach pays off. Consilium runs the same idea on the models a 
 
 ## Status
 
-**v0.1.0 — beta.** One-line install on macOS (Apple Silicon + Intel) and Linux (see [Install](#install)). The orchestration engine, resilience/failover, grounded execution, onboarding (`init` / `auth`), and the MCP + live-streaming + web-UI surfaces are all shipped and verified on live providers; `conduct` was benchmarked at solo's pass-rate on ~⅓ the Claude tokens.
+**v0.2.0 — beta.** One-line install on macOS (Apple Silicon + Intel) and Linux (see [Install](#install)). The orchestration engine, resilience/failover, grounded execution, onboarding (`init` / `auth`), and the MCP + live-streaming + web-UI surfaces are all shipped and verified on live providers; `conduct` was benchmarked at solo's pass-rate on ~⅓ the Claude tokens.
 
 | Milestone | Scope | State |
 |---|---|---|
@@ -83,7 +83,7 @@ drives Unix CLIs); use WSL with the CLI install below._
 curl -fsSL https://raw.githubusercontent.com/TemurTurayev/consilium/main/install.sh | sh
 ```
 
-_(macOS arm64 + Intel and Linux x86_64 binaries ship with every release — currently [v0.1.0](https://github.com/TemurTurayev/consilium/releases/latest).)_
+_(macOS arm64 + Intel and Linux x86_64 binaries ship with every release — currently [v0.2.0](https://github.com/TemurTurayev/consilium/releases/latest).)_
 
 The script auto-detects your platform (macOS arm64/x86\_64, Linux x86\_64), installs the binary to `~/.local/bin/consilium`, and tells you if you need to add it to `$PATH`.
 
