@@ -247,6 +247,29 @@ Then ask your session to delegate: it decides *what* to hand off and whether to
 accept; the engine executes. Logs go to stderr so they never corrupt the stdio
 protocol.
 
+### Or install the Claude Code plugin (one line)
+
+The plugin bundles that MCP server plus slash commands and a skill, so your live
+session knows how to conduct without any config:
+
+```
+/plugin marketplace add TemurTurayev/consilium
+/plugin install consilium@consilium
+```
+
+You get:
+
+- **`/consilium:conduct <task>`** — your session conducts: decompose → delegate to
+  worker models → review their diffs.
+- **`/consilium:council <question>`** — an anonymized multi-model second opinion.
+- **`/consilium:review [path|staged]`** — a cross-family audit of your changes.
+- a **skill** so Claude reaches for the council on its own when you ask for a
+  second opinion or have build work worth offloading.
+
+Prerequisite: the `consilium` CLI must be installed (see [Install](#install)) — the
+plugin's MCP server runs `consilium mcp`. The commands detect a missing binary and
+point you here.
+
 ## Live run streaming (`consilium serve`)
 
 `consilium serve` starts a localhost server with a WebSocket at `/ws/session`.

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "consilium": {
+      "type": "stdio",
+      "command": "consilium",
+      "args": ["mcp"]
+    }
+  }
+}

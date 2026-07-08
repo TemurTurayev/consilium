@@ -1,0 +1,17 @@
+{
+  "name": "consilium",
+  "owner": {
+    "name": "Temur Turaev",
+    "url": "https://github.com/TemurTurayev"
+  },
+  "metadata": {
+    "description": "Consilium — turn your live Claude Code session into the conductor of a multi-model council, on the AI subscriptions you already pay for."
+  },
+  "plugins": [
+    {
+      "name": "consilium",
+      "source": "./plugin",
+      "description": "Conduct Codex, Gemini, and Grok from your live Claude session — offload build work to cheaper subscriptions, get second opinions, and review diffs across model families."
+    }
+  ]
+}
