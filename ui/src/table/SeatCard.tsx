@@ -8,7 +8,7 @@ interface Props {
   name: string
   role: string
   /** Positions this seat around the table ellipse (see index.css). */
-  slot: 'top' | 'left' | 'right' | 'bottom-right'
+  slot: 'top' | 'left' | 'right' | 'bottom-left'
   /** The council is on hold — dims the seat as part of the scene's "on hold" treatment. */
   paused?: boolean
 }

@@ -875,9 +875,12 @@ body {
   top: 50%;
   transform: translateY(-50%);
 }
-.seat--slot-bottom-right {
-  bottom: 12px;
-  right: 8%;
+.seat--slot-bottom-left {
+  /* Bottom-left corner is the only uncrowded quadrant: the operator strip
+     and the chief-physician note own the bottom-center, Gemini owns the
+     right edge. */
+  bottom: 24px;
+  left: 4%;
 }
 
 .seat--absent {

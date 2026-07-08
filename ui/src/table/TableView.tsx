@@ -19,11 +19,11 @@ interface Props {
   onInterject: (text: string) => void
 }
 
-const SEATS: { id: SeatId; name: string; role: string; slot: 'top' | 'left' | 'right' | 'bottom-right' }[] = [
+const SEATS: { id: SeatId; name: string; role: string; slot: 'top' | 'left' | 'right' | 'bottom-left' }[] = [
   { id: 'claude', name: 'Claude', role: 'attending · conductor', slot: 'top' },
   { id: 'codex', name: 'Codex', role: 'surgeon · worker', slot: 'left' },
   { id: 'gemini', name: 'Gemini', role: 'radiologist · review', slot: 'right' },
-  { id: 'grok', name: 'Grok', role: 'resident · worker', slot: 'bottom-right' },
+  { id: 'grok', name: 'Grok', role: 'resident · worker', slot: 'bottom-left' },
 ]
 
 /** The flagship view: the run rendered as a medical council around an
