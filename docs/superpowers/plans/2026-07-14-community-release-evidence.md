@@ -22,7 +22,7 @@
 - cargo-dist is pinned to `0.32.0`, packages only the `consilium` CLI, targets `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`, and preserves `.tar.gz` asset compatibility.
 - Do not configure crates.io publishing, a Homebrew tap token, release signing credentials, macOS notarization claims, or a desktop Cask.
 - Do not push a tag, create a GitHub Release, or publish packages as part of this plan.
-- Repository topics are the only remote metadata mutation in scope; verify the exact repository before applying them.
+- Repository topics and the three specified `good first issue` tickets are the only remote metadata mutations in scope; verify the exact repository before applying them.
 - Preserve the user's untracked `.claude/` directory and never stage it.
 
 ---

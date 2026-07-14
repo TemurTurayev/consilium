@@ -32,7 +32,7 @@
 
 - `core/src/protocol.rs`: shared HTTP/WS DTOs and generated TypeScript bindings.
 - `core/src/server/safety_service.rs`: prepared-preflight/result registry, per-repository lock, and one-way result transitions.
-- `core/src/server.rs`: HTTP routes, token/origin middleware, and WebSocket lifecycle mapping.
+- `core/src/server.rs`: owns the `server` module, declares `mod safety_service`, and contains HTTP routes, token/origin middleware, and WebSocket lifecycle mapping.
 - `desktop/src-tauri/src/commands.rs`: authoritative native workspace picker/restart command.
 - `ui/src/runtime.ts`: web/Tauri runtime adapter and session token bootstrap.
 - `ui/src/runFlow/`: reducer, API client, action model, and controller hook.
@@ -169,8 +169,7 @@ git commit -m "feat: define trust-first run protocol"
 
 **Files:**
 - Create: `core/src/server/safety_service.rs`
-- Create: `core/src/server/mod.rs`
-- Modify: `core/src/server.rs` or move its contents to `core/src/server/mod.rs`
+- Modify: `core/src/server.rs`
 - Modify: `core/src/lib.rs`
 - Modify: `core/tests/server_test.rs`
 
@@ -263,7 +262,7 @@ git commit -m "feat: expose prepared safety resources"
 ### Task 3: Prepared WebSocket execution and result-ready lifecycle
 
 **Files:**
-- Modify: `core/src/server.rs` or `core/src/server/mod.rs`
+- Modify: `core/src/server.rs`
 - Modify: `core/src/orchestrator/council.rs`
 - Modify: `core/src/orchestrator/review.rs`
 - Modify: `core/tests/server_test.rs`

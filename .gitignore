@@ -19,6 +19,9 @@ dist/
 # Local isolated implementation worktrees
 .worktrees/
 
+# Local subagent-development progress ledger and review packages
+.superpowers/
+
 # M-eval live results (operator-produced, not committed)
 eval/results/
 
