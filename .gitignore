@@ -16,6 +16,9 @@ dist/
 # Consilium local runtime state (usage.db)
 .consilium/
 
+# Local isolated implementation worktrees
+.worktrees/
+
 # M-eval live results (operator-produced, not committed)
 eval/results/
 
