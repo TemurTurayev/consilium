@@ -24,11 +24,7 @@ pub fn committed_repo() -> tempfile::TempDir {
 
 #[allow(dead_code)]
 pub fn git(cwd: &std::path::Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .unwrap();
+    let output = deterministic_git(cwd, args).output().unwrap();
     assert!(
         output.status.success(),
         "git {:?} failed: {}",
@@ -39,11 +35,7 @@ pub fn git(cwd: &std::path::Path, args: &[&str]) {
 
 #[allow(dead_code)]
 pub fn git_output(cwd: &std::path::Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .unwrap();
+    let output = deterministic_git(cwd, args).output().unwrap();
     assert!(
         output.status.success(),
         "git {:?} failed: {}",
@@ -51,6 +43,32 @@ pub fn git_output(cwd: &std::path::Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[allow(dead_code)]
+fn deterministic_git(cwd: &std::path::Path, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_COUNT", "4")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgSign")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "tag.gpgSign")
+        .env("GIT_CONFIG_VALUE_1", "false")
+        .env("GIT_CONFIG_KEY_2", "core.hooksPath")
+        .env(
+            "GIT_CONFIG_VALUE_2",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_KEY_3", "init.templateDir")
+        .env("GIT_CONFIG_VALUE_3", "");
+    command
 }
 
 #[allow(dead_code)]
