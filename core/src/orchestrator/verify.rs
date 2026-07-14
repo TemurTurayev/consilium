@@ -169,6 +169,7 @@ pub async fn run_resolved_verify(cwd: &Path, commands: &[VerificationCommand]) -
 mod tests {
     use super::*;
     use crate::config::VerifyConfig;
+    use crate::safety::CommandSource;
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -373,6 +374,51 @@ mod tests {
             out.summary.contains("timeout (advisory)"),
             "summary must record the advisory lint timeout, got: {}",
             out.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn run_resolved_verify_executes_disclosed_command_and_recorded_timeout() {
+        let d = tmp();
+        std::fs::write(
+            d.path().join("package.json"),
+            r#"{"scripts":{"test":"false"}}"#,
+        )
+        .unwrap();
+        let commands = vec![
+            VerificationCommand {
+                label: "build".into(),
+                command: "printf disclosed > disclosed.txt".into(),
+                source: CommandSource::UserProvided,
+                timeout_secs: 5,
+            },
+            VerificationCommand {
+                label: "test".into(),
+                command: "sleep 2; printf late > late.txt".into(),
+                source: CommandSource::UserProvided,
+                timeout_secs: 1,
+            },
+        ];
+
+        let out = run_resolved_verify(d.path(), &commands).await;
+
+        assert!(out.ran);
+        assert!(!out.passed, "the disclosed test command must time out");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("disclosed.txt")).unwrap(),
+            "disclosed"
+        );
+        assert!(out.summary.contains("exceeded 1s"), "{}", out.summary);
+        assert!(
+            out.summary.contains(&commands[0].command),
+            "{}",
+            out.summary
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(
+            !d.path().join("late.txt").exists(),
+            "the timed-out disclosed command must be killed"
         );
     }
 }

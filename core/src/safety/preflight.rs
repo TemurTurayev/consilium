@@ -1,5 +1,6 @@
 use super::{digest_commands, resolve_commands_with_provenance, VerificationCommand};
 use crate::config::{Config, RoleConfig};
+use crate::confine::cwd_within_root;
 use crate::orchestrator::verify::command_timeout;
 use crate::protocol::ConfigSummary;
 use anyhow::{Context, Result};
@@ -11,7 +12,7 @@ use ts_rs::TS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum ExecutionMode {
     SafeWorktree,
     InPlace,
@@ -20,14 +21,14 @@ pub enum ExecutionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum RepositoryKind {
     Git,
     NonGit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct RepositoryState {
     pub canonical_path: String,
     pub git_root: Option<String>,
@@ -40,7 +41,7 @@ pub struct RepositoryState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct RoleAssignment {
     pub role: String,
     pub primary: String,
@@ -49,7 +50,7 @@ pub struct RoleAssignment {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum ReadinessState {
     UnknownNotProbed,
     Ready,
@@ -59,7 +60,7 @@ pub enum ReadinessState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct ProviderReadiness {
     pub provider: String,
     pub state: ReadinessState,
@@ -73,7 +74,8 @@ pub struct PreflightInput {
     pub cwd: PathBuf,
     pub config: Option<Config>,
     pub provider_readiness: Vec<ProviderReadiness>,
-    pub attached: bool,
+    attached: bool,
+    confinement_root: Option<PathBuf>,
 }
 
 impl PreflightInput {
@@ -83,12 +85,28 @@ impl PreflightInput {
             config,
             provider_readiness: Vec::new(),
             attached: false,
+            confinement_root: None,
+        }
+    }
+
+    pub fn attached(
+        cwd: PathBuf,
+        launch_root: PathBuf,
+        config: Option<Config>,
+        provider_readiness: Vec<ProviderReadiness>,
+    ) -> Self {
+        Self {
+            cwd,
+            config,
+            provider_readiness,
+            attached: true,
+            confinement_root: Some(launch_root),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct SafetyPreflightReport {
     pub repository: RepositoryState,
     pub default_mode: ExecutionMode,
@@ -97,13 +115,24 @@ pub struct SafetyPreflightReport {
     pub command_digest: String,
     pub roles: Vec<RoleAssignment>,
     pub provider_readiness: Vec<ProviderReadiness>,
+    #[ts(type = "number")]
     pub timeout_secs: u64,
+    #[ts(type = "number | null")]
     pub budget_secs: Option<u64>,
     pub provider_probe_performed: bool,
     pub warnings: Vec<String>,
 }
 
 pub fn inspect(input: PreflightInput) -> Result<SafetyPreflightReport> {
+    if let Some(root) = input.confinement_root.as_deref() {
+        if !cwd_within_root(&input.cwd, root) {
+            anyhow::bail!(
+                "attached inspection path {} is outside launch root {}",
+                input.cwd.display(),
+                root.display()
+            );
+        }
+    }
     let canonical_cwd = input
         .cwd
         .canonicalize()
@@ -116,28 +145,39 @@ pub fn inspect(input: PreflightInput) -> Result<SafetyPreflightReport> {
     let roles = role_assignments(&config);
     let provider_probe_performed = input.provider_readiness.iter().any(|item| item.probed);
 
-    let (default_mode, available_modes) = match (repository.kind, input.attached) {
-        (_, true) => (
-            ExecutionMode::InPlace,
-            vec![ExecutionMode::InPlace, ExecutionMode::ReadOnly],
-        ),
-        (RepositoryKind::Git, false) => (
-            ExecutionMode::SafeWorktree,
-            vec![
-                ExecutionMode::SafeWorktree,
+    let (default_mode, available_modes) =
+        match (repository.kind, repository.head.is_some(), input.attached) {
+            (_, _, true) => (
                 ExecutionMode::InPlace,
+                vec![ExecutionMode::InPlace, ExecutionMode::ReadOnly],
+            ),
+            (RepositoryKind::Git, true, false) => (
+                ExecutionMode::SafeWorktree,
+                vec![
+                    ExecutionMode::SafeWorktree,
+                    ExecutionMode::InPlace,
+                    ExecutionMode::ReadOnly,
+                ],
+            ),
+            (_, _, false) => (
                 ExecutionMode::ReadOnly,
-            ],
-        ),
-        (RepositoryKind::NonGit, false) => (
-            ExecutionMode::ReadOnly,
-            vec![ExecutionMode::InPlace, ExecutionMode::ReadOnly],
-        ),
-    };
+                vec![ExecutionMode::InPlace, ExecutionMode::ReadOnly],
+            ),
+        };
 
     let mut warnings = Vec::new();
+    warnings.push("in-place execution requires explicit acknowledgement before execution.".into());
     if repository.kind == RepositoryKind::NonGit {
-        warnings.push("Safe worktree isolation is unavailable outside a Git repository.".into());
+        warnings.push(
+            "Safe worktree isolation is unavailable outside a Git repository; choose a read-only action, initialize Git, or use explicit in-place execution."
+                .into(),
+        );
+    }
+    if repository.kind == RepositoryKind::Git && repository.head.is_none() {
+        warnings.push(
+            "Create the first commit before choosing safe worktree isolation; until then use a read-only action or explicit in-place execution."
+                .into(),
+        );
     }
     if !repository.clean {
         warnings.push(
@@ -147,7 +187,7 @@ pub fn inspect(input: PreflightInput) -> Result<SafetyPreflightReport> {
     }
     if input.attached {
         warnings.push(
-            "Attached mode inherits the host permission model and executes writes in place.".into(),
+            "Attached mode inherits the host permission model and executes writes in-place.".into(),
         );
     }
 
@@ -177,7 +217,7 @@ fn inspect_repository(cwd: &Path) -> Result<RepositoryState> {
     }
 
     let root_text = output_text(&root_output);
-    let root = PathBuf::from(root_text.trim());
+    let root = PathBuf::from(root_text.trim_end_matches(['\r', '\n']));
     let canonical_root = root
         .canonicalize()
         .with_context(|| format!("canonicalize Git root {}", root.display()))?;

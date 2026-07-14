@@ -7,7 +7,7 @@ use ts_rs::TS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum CommandSource {
     AutoDetected,
     RepositoryConfig,
@@ -15,11 +15,12 @@ pub enum CommandSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct VerificationCommand {
     pub label: String,
     pub command: String,
     pub source: CommandSource,
+    #[ts(type = "number")]
     pub timeout_secs: u64,
 }
 
