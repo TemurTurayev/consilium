@@ -271,6 +271,8 @@ git commit -m "feat: add deterministic safety preflight"
 ### Task 2: Owner-only trust store with digest invalidation
 
 **Files:**
+- Modify: `core/Cargo.toml`
+- Modify: `Cargo.lock`
 - Create: `core/src/safety/fs.rs`
 - Create: `core/src/safety/trust.rs`
 - Modify: `core/src/safety/mod.rs`
@@ -345,18 +347,18 @@ impl TrustStore {
 }
 ```
 
-`write_owner_only_json` must create a sibling tempfile, set mode `0600`, `sync_all`, and persist atomically; `ensure_owner_only_dir` sets mode `0700` on Unix and remains a no-op permission shim on non-Unix.
+On Unix, `TrustStore` must retain an opened state-directory descriptor created with no-follow directory semantics. Reads and writes are descriptor-relative: open the trust file without following links, validate and tighten the same opened inode to `0600`, create an exclusive `0600` sibling temporary file, `sync_all` it, rename it within the retained directory, and sync the directory. Only a missing destination is treated as absence; all other inspection errors propagate before serialization. The retained descriptor must keep a store bound to the original directory even if its pathname is later replaced. `ensure_owner_only_dir` tightens the opened directory to `0700`. Keep a cfg-separated non-Unix pathname fallback, and add `rustix` as a Unix-only direct dependency for the descriptor-relative operations.
 
 - [ ] **Step 4: Run trust tests twice to cover reload**
 
 Run: `cargo test -p consilium --test trust_test && cargo test -p consilium --test trust_test`
 
-Expected: PASS both times; trust survives reopening and changed digests are untrusted.
+Expected: PASS both times; trust survives reopening, changed digests are untrusted, permissive existing files are tightened, final-component symlinks are never followed, a replaced parent pathname cannot redirect an opened store, and non-`NotFound` inspection failures occur before serialization.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/src/safety/fs.rs core/src/safety/trust.rs core/src/safety/mod.rs core/tests/trust_test.rs
+git add Cargo.lock core/Cargo.toml core/src/safety/fs.rs core/src/safety/trust.rs core/src/safety/mod.rs core/tests/trust_test.rs
 git commit -m "feat: persist trusted verification commands"
 ```
 
