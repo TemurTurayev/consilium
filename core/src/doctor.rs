@@ -186,11 +186,11 @@ pub fn adapter_for(provider: Provider) -> std::sync::Arc<dyn crate::adapters::Ad
 }
 
 #[derive(Debug)]
-pub struct PreflightReport {
+pub struct ModelProbeReport {
     pub probes: Vec<(ModelCandidate, ModelProbe)>,
 }
 
-impl PreflightReport {
+impl ModelProbeReport {
     pub fn all_ok(&self) -> bool {
         self.probes.iter().all(|(_, probe)| probe.ok)
     }
@@ -206,14 +206,17 @@ impl PreflightReport {
     }
 }
 
-pub async fn preflight(config: &Config, quota: &QuotaStore) -> PreflightReport {
+#[deprecated(note = "use ModelProbeReport; this alias will be removed after v0.3")]
+pub type PreflightReport = ModelProbeReport;
+
+pub async fn preflight(config: &Config, quota: &QuotaStore) -> ModelProbeReport {
     let mut probes = Vec::new();
     for candidate in collect_distinct_model_pairs(config) {
         let adapter = adapter_for(candidate.provider);
         let probe = probe_model(adapter, &candidate.model, quota).await;
         probes.push((candidate, probe));
     }
-    PreflightReport { probes }
+    ModelProbeReport { probes }
 }
 
 /// A short, actionable remediation hint for a failed probe, matched on the error
@@ -238,7 +241,7 @@ pub(crate) fn remediation_hint(detail: &str) -> &'static str {
     }
 }
 
-pub fn print_preflight(report: &PreflightReport) {
+pub fn print_preflight(report: &ModelProbeReport) {
     println!("── session preflight ──");
     for (candidate, probe) in &report.probes {
         if probe.ok {
@@ -411,7 +414,7 @@ mod tests {
 
     #[test]
     fn preflight_report_marks_only_conductor_candidate_dead() {
-        let report = PreflightReport {
+        let report = ModelProbeReport {
             probes: vec![(
                 candidate(Provider::Claude, "claude-opus-4-8"),
                 probe(Provider::Claude, "claude-opus-4-8", false, "unavailable"),
@@ -423,7 +426,7 @@ mod tests {
 
     #[test]
     fn preflight_report_keeps_conductor_alive_when_other_model_is_dead() {
-        let report = PreflightReport {
+        let report = ModelProbeReport {
             probes: vec![
                 (
                     candidate(Provider::Claude, "claude-opus-4-8"),
@@ -442,7 +445,7 @@ mod tests {
 
     #[test]
     fn preflight_report_is_alive_and_dead_filter_by_exact_pair() {
-        let report = PreflightReport {
+        let report = ModelProbeReport {
             probes: vec![
                 (
                     candidate(Provider::Claude, "claude-opus-4-8"),

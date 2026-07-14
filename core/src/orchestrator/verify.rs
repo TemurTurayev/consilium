@@ -1,4 +1,5 @@
 use crate::config::VerifyConfig;
+use crate::safety::{resolve_commands_with_provenance, VerificationCommand};
 use std::path::Path;
 
 /// Structured result of running the worktree's build/test/lint commands.
@@ -60,27 +61,9 @@ pub fn detect_commands(cwd: &Path) -> Vec<(String, String)> {
 
 /// Config commands win per-field; unspecified fields fall back to detection.
 pub fn resolve_commands(cwd: &Path, cfg: Option<&VerifyConfig>) -> Vec<(String, String)> {
-    let detected = detect_commands(cwd);
-    let pick = |label: &str, configured: &Option<String>| -> Option<(String, String)> {
-        if let Some(c) = configured {
-            return Some((label.to_string(), c.clone()));
-        }
-        detected
-            .iter()
-            .find(|(l, _)| l == label)
-            .map(|(l, c)| (l.clone(), c.clone()))
-    };
-    let cfg = cfg.cloned().unwrap_or_default();
-    ["build", "test", "lint"]
-        .iter()
-        .filter_map(|label| {
-            let configured = match *label {
-                "build" => &cfg.build,
-                "test" => &cfg.test,
-                _ => &cfg.lint,
-            };
-            pick(label, configured)
-        })
+    resolve_commands_with_provenance(cwd, cfg)
+        .into_iter()
+        .map(|item| (item.label, item.command))
         .collect()
 }
 
@@ -90,18 +73,26 @@ pub fn resolve_commands(cwd: &Path, cfg: Option<&VerifyConfig>) -> Vec<(String, 
 /// the child is SIGKILLed and the command is recorded as TIMEOUT, so a
 /// worker-introduced hanging test/build cannot stall the whole run.
 pub async fn run_verify(cwd: &Path, cfg: Option<&VerifyConfig>) -> VerifyOutcome {
-    let cmds = resolve_commands(cwd, cfg);
-    if cmds.is_empty() {
+    let commands = resolve_commands_with_provenance(cwd, cfg);
+    run_resolved_verify(cwd, &commands).await
+}
+
+/// Runs commands that were already resolved and disclosed by the safety
+/// preflight, preserving their provenance and per-command timeout.
+pub async fn run_resolved_verify(cwd: &Path, commands: &[VerificationCommand]) -> VerifyOutcome {
+    if commands.is_empty() {
         return VerifyOutcome {
             ran: false,
             passed: false,
             summary: "(no build/test/lint command configured or detected)".into(),
         };
     }
-    let timeout = command_timeout(cfg);
     let mut passed = true;
     let mut summary = String::new();
-    for (label, cmd) in &cmds {
+    for item in commands {
+        let label = &item.label;
+        let cmd = &item.command;
+        let timeout = std::time::Duration::from_secs(item.timeout_secs);
         let blocking = label != "lint";
         let out = tokio::time::timeout(
             timeout,

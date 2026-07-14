@@ -1,0 +1,297 @@
+use super::{digest_commands, resolve_commands_with_provenance, VerificationCommand};
+use crate::config::{Config, RoleConfig};
+use crate::orchestrator::verify::command_timeout;
+use crate::protocol::ConfigSummary;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use ts_rs::TS;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../ui/src/protocol/")]
+pub enum ExecutionMode {
+    SafeWorktree,
+    InPlace,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../ui/src/protocol/")]
+pub enum RepositoryKind {
+    Git,
+    NonGit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/protocol/")]
+pub struct RepositoryState {
+    pub canonical_path: String,
+    pub git_root: Option<String>,
+    pub kind: RepositoryKind,
+    pub head: Option<String>,
+    pub clean: bool,
+    pub tracked_dirty: Vec<String>,
+    pub untracked: Vec<String>,
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/protocol/")]
+pub struct RoleAssignment {
+    pub role: String,
+    pub primary: String,
+    pub fallbacks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../ui/src/protocol/")]
+pub enum ReadinessState {
+    UnknownNotProbed,
+    Ready,
+    NeedsLogin,
+    CliMissing,
+    Down,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/protocol/")]
+pub struct ProviderReadiness {
+    pub provider: String,
+    pub state: ReadinessState,
+    pub detail: String,
+    pub hint: String,
+    pub probed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreflightInput {
+    pub cwd: PathBuf,
+    pub config: Option<Config>,
+    pub provider_readiness: Vec<ProviderReadiness>,
+    pub attached: bool,
+}
+
+impl PreflightInput {
+    pub fn standalone(cwd: PathBuf, config: Option<Config>) -> Self {
+        Self {
+            cwd,
+            config,
+            provider_readiness: Vec::new(),
+            attached: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../ui/src/protocol/")]
+pub struct SafetyPreflightReport {
+    pub repository: RepositoryState,
+    pub default_mode: ExecutionMode,
+    pub available_modes: Vec<ExecutionMode>,
+    pub commands: Vec<VerificationCommand>,
+    pub command_digest: String,
+    pub roles: Vec<RoleAssignment>,
+    pub provider_readiness: Vec<ProviderReadiness>,
+    pub timeout_secs: u64,
+    pub budget_secs: Option<u64>,
+    pub provider_probe_performed: bool,
+    pub warnings: Vec<String>,
+}
+
+pub fn inspect(input: PreflightInput) -> Result<SafetyPreflightReport> {
+    let canonical_cwd = input
+        .cwd
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", input.cwd.display()))?;
+    let repository = inspect_repository(&canonical_cwd)?;
+    let config = input.config.unwrap_or_default();
+    let commands = resolve_commands_with_provenance(&canonical_cwd, config.verify.as_ref());
+    let command_digest = digest_commands(&commands);
+    let timeout_secs = command_timeout(config.verify.as_ref()).as_secs();
+    let roles = role_assignments(&config);
+    let provider_probe_performed = input.provider_readiness.iter().any(|item| item.probed);
+
+    let (default_mode, available_modes) = match (repository.kind, input.attached) {
+        (_, true) => (
+            ExecutionMode::InPlace,
+            vec![ExecutionMode::InPlace, ExecutionMode::ReadOnly],
+        ),
+        (RepositoryKind::Git, false) => (
+            ExecutionMode::SafeWorktree,
+            vec![
+                ExecutionMode::SafeWorktree,
+                ExecutionMode::InPlace,
+                ExecutionMode::ReadOnly,
+            ],
+        ),
+        (RepositoryKind::NonGit, false) => (
+            ExecutionMode::ReadOnly,
+            vec![ExecutionMode::InPlace, ExecutionMode::ReadOnly],
+        ),
+    };
+
+    let mut warnings = Vec::new();
+    if repository.kind == RepositoryKind::NonGit {
+        warnings.push("Safe worktree isolation is unavailable outside a Git repository.".into());
+    }
+    if !repository.clean {
+        warnings.push(
+            "The source checkout is dirty; safe worktree runs use committed HEAD and apply remains disabled until it is clean."
+                .into(),
+        );
+    }
+    if input.attached {
+        warnings.push(
+            "Attached mode inherits the host permission model and executes writes in place.".into(),
+        );
+    }
+
+    Ok(SafetyPreflightReport {
+        repository,
+        default_mode,
+        available_modes,
+        commands,
+        command_digest,
+        roles,
+        provider_readiness: input.provider_readiness,
+        timeout_secs,
+        budget_secs: config.budget_secs,
+        provider_probe_performed,
+        warnings,
+    })
+}
+
+fn inspect_repository(cwd: &Path) -> Result<RepositoryState> {
+    let canonical_path = cwd.display().to_string();
+    let root_output = git_output(cwd, &["rev-parse", "--show-toplevel"]);
+    let Ok(root_output) = root_output else {
+        return Ok(non_git_repository(canonical_path));
+    };
+    if !root_output.status.success() {
+        return Ok(non_git_repository(canonical_path));
+    }
+
+    let root_text = output_text(&root_output);
+    let root = PathBuf::from(root_text.trim());
+    let canonical_root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalize Git root {}", root.display()))?;
+
+    let mut tracked_dirty = nul_paths(&required_git_output(
+        &canonical_root,
+        &["diff", "--name-only", "-z"],
+    )?);
+    tracked_dirty.extend(nul_paths(&required_git_output(
+        &canonical_root,
+        &["diff", "--cached", "--name-only", "-z"],
+    )?));
+    let tracked_dirty = tracked_dirty.into_iter().collect::<Vec<_>>();
+    let untracked = nul_paths(&required_git_output(
+        &canonical_root,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?)
+    .into_iter()
+    .collect::<Vec<_>>();
+
+    Ok(RepositoryState {
+        canonical_path,
+        git_root: Some(canonical_root.display().to_string()),
+        kind: RepositoryKind::Git,
+        head: optional_git_text(&canonical_root, &["rev-parse", "HEAD"]),
+        clean: tracked_dirty.is_empty() && untracked.is_empty(),
+        tracked_dirty,
+        untracked,
+        branch: optional_git_text(
+            &canonical_root,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        ),
+    })
+}
+
+fn non_git_repository(canonical_path: String) -> RepositoryState {
+    RepositoryState {
+        canonical_path,
+        git_root: None,
+        kind: RepositoryKind::NonGit,
+        head: None,
+        clean: true,
+        tracked_dirty: Vec::new(),
+        untracked: Vec::new(),
+        branch: None,
+    }
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> std::io::Result<Output> {
+    Command::new("git").args(args).current_dir(cwd).output()
+}
+
+fn required_git_output(cwd: &Path, args: &[&str]) -> Result<Output> {
+    let output = git_output(cwd, args).with_context(|| format!("run git {}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+}
+
+fn optional_git_text(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = git_output(cwd, args).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = output_text(&output).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn output_text(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn nul_paths(output: &Output) -> BTreeSet<String> {
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect()
+}
+
+fn role_assignments(config: &Config) -> Vec<RoleAssignment> {
+    let summary = ConfigSummary::from_config(config, None);
+    let roles = &config.roles;
+    let mut assignments = vec![assignment("conductor", summary.conductor, &roles.conductor)];
+    assignments.extend(roles.workers.iter().enumerate().map(|(index, role)| {
+        assignment(
+            &format!("worker_{}", index + 1),
+            summary.workers[index].clone(),
+            role,
+        )
+    }));
+    assignments.extend([
+        assignment("reviewer", summary.reviewer, &roles.reviewer),
+        assignment("chairman", summary.chairman, &roles.chairman),
+        assignment("supervisor", summary.supervisor, &roles.supervisor),
+    ]);
+    assignments
+}
+
+fn assignment(role: &str, primary: String, config: &RoleConfig) -> RoleAssignment {
+    RoleAssignment {
+        role: role.into(),
+        primary,
+        fallbacks: config
+            .fallbacks
+            .iter()
+            .map(|item| format!("{}/{}", item.provider.as_str(), item.model))
+            .collect(),
+    }
+}
