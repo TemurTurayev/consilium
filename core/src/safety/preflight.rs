@@ -1,13 +1,14 @@
-use super::{digest_commands, resolve_commands_with_provenance, VerificationCommand};
+use super::{
+    digest_commands, inspect_repository, resolve_commands_with_provenance, RepositoryKind,
+    RepositoryState, VerificationCommand,
+};
 use crate::config::{Config, RoleConfig};
 use crate::confine::cwd_within_root;
 use crate::orchestrator::verify::command_timeout;
 use crate::protocol::ConfigSummary;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::PathBuf;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -17,27 +18,6 @@ pub enum ExecutionMode {
     SafeWorktree,
     InPlace,
     ReadOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../ui/src/protocol/")]
-pub enum RepositoryKind {
-    Git,
-    NonGit,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../ui/src/protocol/")]
-pub struct RepositoryState {
-    pub canonical_path: String,
-    pub git_root: Option<String>,
-    pub kind: RepositoryKind,
-    pub head: Option<String>,
-    pub clean: bool,
-    pub tracked_dirty: Vec<String>,
-    pub untracked: Vec<String>,
-    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -204,105 +184,6 @@ pub fn inspect(input: PreflightInput) -> Result<SafetyPreflightReport> {
         provider_probe_performed,
         warnings,
     })
-}
-
-fn inspect_repository(cwd: &Path) -> Result<RepositoryState> {
-    let canonical_path = cwd.display().to_string();
-    let root_output = git_output(cwd, &["rev-parse", "--show-toplevel"]);
-    let Ok(root_output) = root_output else {
-        return Ok(non_git_repository(canonical_path));
-    };
-    if !root_output.status.success() {
-        return Ok(non_git_repository(canonical_path));
-    }
-
-    let root_text = output_text(&root_output);
-    let root = PathBuf::from(root_text.trim_end_matches(['\r', '\n']));
-    let canonical_root = root
-        .canonicalize()
-        .with_context(|| format!("canonicalize Git root {}", root.display()))?;
-
-    let mut tracked_dirty = nul_paths(&required_git_output(
-        &canonical_root,
-        &["diff", "--name-only", "-z"],
-    )?);
-    tracked_dirty.extend(nul_paths(&required_git_output(
-        &canonical_root,
-        &["diff", "--cached", "--name-only", "-z"],
-    )?));
-    let tracked_dirty = tracked_dirty.into_iter().collect::<Vec<_>>();
-    let untracked = nul_paths(&required_git_output(
-        &canonical_root,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?)
-    .into_iter()
-    .collect::<Vec<_>>();
-
-    Ok(RepositoryState {
-        canonical_path,
-        git_root: Some(canonical_root.display().to_string()),
-        kind: RepositoryKind::Git,
-        head: optional_git_text(&canonical_root, &["rev-parse", "HEAD"]),
-        clean: tracked_dirty.is_empty() && untracked.is_empty(),
-        tracked_dirty,
-        untracked,
-        branch: optional_git_text(
-            &canonical_root,
-            &["symbolic-ref", "--quiet", "--short", "HEAD"],
-        ),
-    })
-}
-
-fn non_git_repository(canonical_path: String) -> RepositoryState {
-    RepositoryState {
-        canonical_path,
-        git_root: None,
-        kind: RepositoryKind::NonGit,
-        head: None,
-        clean: true,
-        tracked_dirty: Vec::new(),
-        untracked: Vec::new(),
-        branch: None,
-    }
-}
-
-fn git_output(cwd: &Path, args: &[&str]) -> std::io::Result<Output> {
-    Command::new("git").args(args).current_dir(cwd).output()
-}
-
-fn required_git_output(cwd: &Path, args: &[&str]) -> Result<Output> {
-    let output = git_output(cwd, args).with_context(|| format!("run git {}", args.join(" ")))?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        anyhow::bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-    }
-}
-
-fn optional_git_text(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = git_output(cwd, args).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = output_text(&output).trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
-fn output_text(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn nul_paths(output: &Output) -> BTreeSet<String> {
-    output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect()
 }
 
 fn role_assignments(config: &Config) -> Vec<RoleAssignment> {

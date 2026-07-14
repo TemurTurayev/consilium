@@ -9,6 +9,66 @@ use consilium::adapters::{
 use consilium::event::{AgentEvent, Provider};
 use std::sync::{Arc, Mutex};
 
+/// Creates a real, local Git repository with one committed `base.txt` file.
+/// Identity is supplied per command so the fixture never reads global Git
+/// configuration and never performs network access.
+#[allow(dead_code)]
+pub fn committed_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+    git(dir.path(), &["add", "--", "base.txt"]);
+    commit(dir.path(), "base");
+    dir
+}
+
+#[allow(dead_code)]
+pub fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[allow(dead_code)]
+pub fn git_output(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[allow(dead_code)]
+pub fn commit(cwd: &std::path::Path, message: &str) {
+    git(
+        cwd,
+        &[
+            "-c",
+            "user.name=Consilium Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            message,
+        ],
+    );
+}
+
 // Each integration-test binary compiles its own copy of this module and uses a
 // different subset of helpers — suppress per-binary dead_code noise.
 #[allow(dead_code)]
