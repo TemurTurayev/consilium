@@ -43,6 +43,8 @@
 ### Task 1: Deterministic safety preflight and command provenance
 
 **Files:**
+- Modify: `core/Cargo.toml`
+- Modify: `Cargo.lock`
 - Create: `core/src/safety/mod.rs`
 - Create: `core/src/safety/preflight.rs`
 - Create: `core/src/safety/commands.rs`
@@ -53,7 +55,7 @@
 
 **Interfaces:**
 - Consumes: `Config`, `VerifyConfig`, `ConfigSummary`, `confine::cwd_within_root`.
-- Produces: `ExecutionMode`, `RepositoryState`, `SafetyPreflightReport`, `PreflightInput`, `VerificationCommand`, `CommandSource`, `resolve_commands_with_provenance`, and renamed `doctor::ModelProbeReport`.
+- Produces: `ExecutionMode`, `RepositoryState`, `SafetyPreflightReport`, `PreflightInput`, `VerificationCommand`, `CommandSource`, `resolve_commands_with_provenance`, `digest_commands`, and renamed `doctor::ModelProbeReport`.
 
 - [ ] **Step 1: Write failing serialization and provenance tests**
 
@@ -101,16 +103,16 @@ Expected: FAIL with `could not find safety in consilium`.
 // core/src/safety/preflight.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum ExecutionMode { SafeWorktree, InPlace, ReadOnly }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum RepositoryKind { Git, NonGit }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct RepositoryState {
     pub canonical_path: String,
     pub git_root: Option<String>,
@@ -123,7 +125,7 @@ pub struct RepositoryState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct RoleAssignment {
     pub role: String,
     pub primary: String,
@@ -132,11 +134,11 @@ pub struct RoleAssignment {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum ReadinessState { UnknownNotProbed, Ready, NeedsLogin, CliMissing, Down }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct ProviderReadiness {
     pub provider: String,
     pub state: ReadinessState,
@@ -150,17 +152,22 @@ pub struct PreflightInput {
     pub cwd: PathBuf,
     pub config: Option<Config>,
     pub provider_readiness: Vec<ProviderReadiness>,
-    pub attached: bool,
+    attached: bool,
+    confinement_root: Option<PathBuf>,
 }
 
 impl PreflightInput {
     pub fn standalone(cwd: PathBuf, config: Option<Config>) -> Self {
-        Self { cwd, config, provider_readiness: Vec::new(), attached: false }
+        Self { cwd, config, provider_readiness: Vec::new(), attached: false, confinement_root: None }
+    }
+
+    pub fn attached(cwd: PathBuf, launch_root: PathBuf, config: Option<Config>, provider_readiness: Vec<ProviderReadiness>) -> Self {
+        Self { cwd, config, provider_readiness, attached: true, confinement_root: Some(launch_root) }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct SafetyPreflightReport {
     pub repository: RepositoryState,
     pub default_mode: ExecutionMode,
@@ -169,7 +176,9 @@ pub struct SafetyPreflightReport {
     pub command_digest: String,
     pub roles: Vec<RoleAssignment>,
     pub provider_readiness: Vec<ProviderReadiness>,
+    #[ts(type = "number")]
     pub timeout_secs: u64,
+    #[ts(type = "number | null")]
     pub budget_secs: Option<u64>,
     pub provider_probe_performed: bool,
     pub warnings: Vec<String>,
@@ -180,32 +189,49 @@ pub struct SafetyPreflightReport {
 // core/src/safety/commands.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum CommandSource { AutoDetected, RepositoryConfig, UserProvided }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct VerificationCommand {
     pub label: String,
     pub command: String,
     pub source: CommandSource,
+    #[ts(type = "number")]
     pub timeout_secs: u64,
 }
 
+pub fn digest_commands(commands: &[VerificationCommand]) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(commands).expect("verification commands serialize");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 pub fn resolve_commands_with_provenance(cwd: &Path, cfg: Option<&VerifyConfig>) -> Vec<VerificationCommand> {
-    let timeout = cfg.and_then(|v| v.timeout_secs).unwrap_or(300);
-    if let Some(cfg) = cfg {
-        let configured = [("build", cfg.build.as_ref()), ("test", cfg.test.as_ref()), ("lint", cfg.lint.as_ref())]
-            .into_iter()
-            .filter_map(|(label, command)| command.map(|command| VerificationCommand {
-                label: label.into(), command: command.clone(), source: CommandSource::RepositoryConfig, timeout_secs: timeout,
-            }))
-            .collect::<Vec<_>>();
-        if !configured.is_empty() { return configured; }
-    }
-    detect_commands(cwd).into_iter().map(|(label, command)| VerificationCommand {
-        label, command, source: CommandSource::AutoDetected, timeout_secs: timeout,
-    }).collect()
+    let timeout_secs = command_timeout(cfg).as_secs();
+    let detected = detect_commands(cwd);
+    let cfg = cfg.cloned().unwrap_or_default();
+    [
+        ("build", cfg.build.as_ref()),
+        ("test", cfg.test.as_ref()),
+        ("lint", cfg.lint.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(label, configured)| {
+        configured
+            .map(|command| (command.clone(), CommandSource::RepositoryConfig))
+            .or_else(|| {
+                detected
+                    .iter()
+                    .find(|(detected_label, _)| detected_label == label)
+                    .map(|(_, command)| (command.clone(), CommandSource::AutoDetected))
+            })
+            .map(|(command, source)| VerificationCommand {
+                label: label.into(), command, source, timeout_secs,
+            })
+    })
+    .collect()
 }
 ```
 
@@ -217,15 +243,13 @@ Rename `doctor::PreflightReport` to `doctor::ModelProbeReport`, keep a deprecate
 pub async fn run_resolved_verify(
     cwd: &Path,
     commands: &[VerificationCommand],
-) -> anyhow::Result<Vec<VerifyOutcome>> {
-    let mut outcomes = Vec::with_capacity(commands.len());
-    for item in commands {
-        outcomes.push(run_one(cwd, &item.label, &item.command, item.timeout_secs).await?);
-    }
-    Ok(outcomes)
+) -> VerifyOutcome {
+    // Preserve the existing aggregate contract: `ran`, blocking-command
+    // `passed`, and one capped per-command summary.
+    execute_resolved_commands(cwd, commands).await
 }
 
-pub async fn run_verify(cwd: &Path, cfg: Option<&VerifyConfig>) -> anyhow::Result<Vec<VerifyOutcome>> {
+pub async fn run_verify(cwd: &Path, cfg: Option<&VerifyConfig>) -> VerifyOutcome {
     let commands = resolve_commands_with_provenance(cwd, cfg);
     run_resolved_verify(cwd, &commands).await
 }
@@ -240,22 +264,21 @@ Expected: PASS; no provider executable is launched.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/src/lib.rs core/src/doctor.rs core/src/orchestrator/verify.rs core/src/safety core/tests/preflight_test.rs
+git add Cargo.lock core/Cargo.toml core/src/lib.rs core/src/doctor.rs core/src/orchestrator/verify.rs core/src/safety core/tests/preflight_test.rs
 git commit -m "feat: add deterministic safety preflight"
 ```
 
 ### Task 2: Owner-only trust store with digest invalidation
 
 **Files:**
-- Modify: `core/Cargo.toml`
 - Create: `core/src/safety/fs.rs`
 - Create: `core/src/safety/trust.rs`
 - Modify: `core/src/safety/mod.rs`
 - Create: `core/tests/trust_test.rs`
 
 **Interfaces:**
-- Consumes: `VerificationCommand` from Task 1.
-- Produces: `TrustKey`, `TrustStore::open`, `TrustStore::is_trusted`, `TrustStore::trust`, `digest_commands`, `write_owner_only_json`, and `ensure_owner_only_dir`.
+- Consumes: `VerificationCommand` and `digest_commands` from Task 1.
+- Produces: `TrustKey`, `TrustStore::open`, `TrustStore::is_trusted`, `TrustStore::trust`, `write_owner_only_json`, and `ensure_owner_only_dir`.
 
 - [ ] **Step 1: Write failing trust and Unix permission tests**
 
@@ -295,20 +318,9 @@ Run: `cargo test -p consilium --test trust_test`
 
 Expected: FAIL with unresolved `TrustStore` and `digest_commands` imports.
 
-- [ ] **Step 3: Add deterministic SHA-256 digesting and atomic owner-only writes**
-
-```toml
-# core/Cargo.toml
-sha2 = "0.10"
-```
+- [ ] **Step 3: Add trust keys and atomic owner-only writes around Task 1's SHA-256 digest**
 
 ```rust
-pub fn digest_commands(commands: &[VerificationCommand]) -> String {
-    use sha2::{Digest, Sha256};
-    let bytes = serde_json::to_vec(commands).expect("verification commands serialize");
-    format!("{:x}", Sha256::digest(bytes))
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrustKey { pub canonical_repo: String, pub command_digest: String }
 
@@ -344,7 +356,7 @@ Expected: PASS both times; trust survives reopening and changed digests are untr
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/Cargo.toml core/src/safety/fs.rs core/src/safety/trust.rs core/src/safety/mod.rs core/tests/trust_test.rs
+git add core/src/safety/fs.rs core/src/safety/trust.rs core/src/safety/mod.rs core/tests/trust_test.rs
 git commit -m "feat: persist trusted verification commands"
 ```
 
@@ -501,7 +513,7 @@ Expected: FAIL with unresolved `finalize_result`, `apply_result`, and `discard_r
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub enum ResultState { Ready, Applied, Discarded }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,7 +652,7 @@ Expected: FAIL with missing `consilium::cli` and helper types.
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../ui/src/protocol/")]
+#[ts(export, export_to = "../../ui/src/protocol/")]
 pub struct PreflightAcceptance {
     pub command_digest: Option<String>,
     pub in_place_acknowledged: bool,
