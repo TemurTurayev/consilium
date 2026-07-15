@@ -1,10 +1,22 @@
 mod common;
 
 use consilium::safety::{
-    create_detached_worktree, inspect_repository, remove_worktree, source_is_applyable,
-    RepositoryKind,
+    create_detached_worktree, inspect_repository, remove_worktree, reopen_prepared_worktree,
+    source_is_applyable, PreparedWorktreeSummary, RepositoryKind,
 };
 use std::fs;
+
+#[cfg(unix)]
+fn executable_script(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &std::path::Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
 
 #[test]
 fn edits_happen_only_in_detached_worktree() {
@@ -315,6 +327,241 @@ fn serialized_prepared_worktree_exposes_only_the_documented_fields() {
     assert_eq!(keys, ["base_commit", "id", "path", "source_repo"]);
 
     remove_worktree(&prepared).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn persisted_summary_can_be_securely_reopened_after_process_boundary() {
+    let repo = common::committed_repo();
+    let state = tempfile::tempdir().unwrap();
+    let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+    let summary_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        summary_file.path(),
+        serde_json::to_vec(&PreparedWorktreeSummary::from(&prepared)).unwrap(),
+    )
+    .unwrap();
+    drop(prepared);
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("cross_process_reopen_helper")
+        .arg("--nocapture")
+        .env("CONSILIUM_REOPEN_STATE", state.path())
+        .env("CONSILIUM_REOPEN_SUMMARY", summary_file.path())
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        fs::read_dir(state.path().join("worktrees"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cross_process_reopen_helper() {
+    let Some(state) = std::env::var_os("CONSILIUM_REOPEN_STATE") else {
+        return;
+    };
+    let summary_path = std::env::var_os("CONSILIUM_REOPEN_SUMMARY").unwrap();
+    let summary: PreparedWorktreeSummary =
+        serde_json::from_slice(&fs::read(summary_path).unwrap()).unwrap();
+    let reopened = reopen_prepared_worktree(std::path::Path::new(&state), &summary).unwrap();
+    remove_worktree(&reopened).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn forged_summary_cannot_reopen_cleanup_authority() {
+    let repo = common::committed_repo();
+    let state = tempfile::tempdir().unwrap();
+    let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+    let valid = PreparedWorktreeSummary::from(&prepared);
+
+    let mut forged = valid.clone();
+    forged.base_commit = "0000000000000000000000000000000000000000".into();
+    assert!(reopen_prepared_worktree(state.path(), &forged).is_err());
+
+    let mut forged = valid.clone();
+    forged.id = "a".repeat(32);
+    forged.path = state.path().join("worktrees").join(&forged.id);
+    assert!(reopen_prepared_worktree(state.path(), &forged).is_err());
+
+    let other_state = tempfile::tempdir().unwrap();
+    assert!(reopen_prepared_worktree(other_state.path(), &valid).is_err());
+    assert!(prepared.path.join("base.txt").is_file());
+    remove_worktree(&prepared).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn permissive_existing_state_root_is_rejected_without_chmod() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = common::committed_repo();
+    let outer = tempfile::tempdir().unwrap();
+    let state = outer.path().join("existing-state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(state.join("unrelated.txt"), "preserve").unwrap();
+
+    let error = create_detached_worktree(repo.path(), &state).unwrap_err();
+
+    assert!(error.to_string().contains("owner-only"));
+    assert_eq!(mode(&state), 0o755);
+    assert_eq!(
+        fs::read_to_string(state.join("unrelated.txt")).unwrap(),
+        "preserve"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_materialization_preserves_executable_symlink_and_gitlink_without_filters() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let repo = common::committed_repo();
+    fs::write(repo.path().join("tool.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(
+        repo.path().join("tool.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink("base.txt", repo.path().join("base-link")).unwrap();
+    common::git(repo.path(), &["add", "--", "tool.sh", "base-link"]);
+    common::commit(repo.path(), "raw tree entries");
+    let head = common::git_output(repo.path(), &["rev-parse", "HEAD"]);
+    common::git(
+        repo.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},vendor"),
+        ],
+    );
+    common::commit(repo.path(), "gitlink");
+    let state = tempfile::tempdir().unwrap();
+
+    let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+
+    assert_eq!(mode(&prepared.path.join("tool.sh")) & 0o111, 0o100);
+    assert_eq!(
+        fs::read_link(prepared.path.join("base-link")).unwrap(),
+        std::path::Path::new("base.txt")
+    );
+    assert!(prepared.path.join("vendor").is_dir());
+    remove_worktree(&prepared).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_post_checkout_hook_cannot_mutate_source() {
+    let repo = common::committed_repo();
+    let hook = repo.path().join(".git/hooks/post-checkout");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    executable_script(
+        &hook,
+        &format!(
+            "printf 'hooked\\n' > {}",
+            shell_quote(&repo.path().join("base.txt"))
+        ),
+    );
+    let state = tempfile::tempdir().unwrap();
+
+    let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("base.txt")).unwrap(),
+        "base\n"
+    );
+    assert!(common::git_output(repo.path(), &["status", "--porcelain=v1"]).is_empty());
+    remove_worktree(&prepared).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_smudge_filter_is_not_executed() {
+    let repo = common::committed_repo();
+    let marker = repo.path().join("smudge-ran");
+    let script = repo.path().join("evil-smudge.sh");
+    executable_script(
+        &script,
+        &format!("printf ran > {}; cat", shell_quote(&marker)),
+    );
+    fs::write(repo.path().join(".gitattributes"), "base.txt filter=evil\n").unwrap();
+    common::git(repo.path(), &["add", "--", ".gitattributes"]);
+    common::commit(repo.path(), "attributes");
+    common::git(
+        repo.path(),
+        &["config", "filter.evil.smudge", script.to_str().unwrap()],
+    );
+    let state = tempfile::tempdir().unwrap();
+
+    let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+
+    assert!(!marker.exists());
+    assert_eq!(
+        fs::read_to_string(prepared.path.join("base.txt")).unwrap(),
+        "base\n"
+    );
+    remove_worktree(&prepared).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_process_filter_is_not_executed() {
+    let repo = common::committed_repo();
+    let marker = repo.path().join("process-ran");
+    let script = repo.path().join("evil-process.sh");
+    executable_script(
+        &script,
+        &format!("printf ran > {}; exit 1", shell_quote(&marker)),
+    );
+    fs::write(repo.path().join(".gitattributes"), "base.txt filter=evil\n").unwrap();
+    common::git(repo.path(), &["add", "--", ".gitattributes"]);
+    common::commit(repo.path(), "attributes");
+    common::git(
+        repo.path(),
+        &["config", "filter.evil.process", script.to_str().unwrap()],
+    );
+    let state = tempfile::tempdir().unwrap();
+
+    let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+
+    assert!(!marker.exists());
+    assert_eq!(
+        fs::read_to_string(prepared.path.join("base.txt")).unwrap(),
+        "base\n"
+    );
+    remove_worktree(&prepared).unwrap();
+}
+
+#[test]
+fn locked_registration_is_preserved_and_reported() {
+    let repo = common::committed_repo();
+    let state = tempfile::tempdir().unwrap();
+    let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+    common::git(
+        repo.path(),
+        &["worktree", "lock", "--", prepared.path.to_str().unwrap()],
+    );
+
+    let error = remove_worktree(&prepared).unwrap_err();
+
+    assert!(error.to_string().contains("registered"));
+    assert!(
+        common::git_output(repo.path(), &["worktree", "list", "--porcelain"])
+            .contains(&prepared.path.display().to_string())
+    );
+    assert!(fs::read_dir(state.path().join("worktrees"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.path().join("base.txt").is_file()));
 }
 
 #[cfg(unix)]

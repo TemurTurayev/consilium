@@ -9,8 +9,9 @@ pub use commands::{
 };
 pub use fs::{ensure_owner_only_dir, write_owner_only_json};
 pub use git::{
-    create_detached_worktree, inspect_repository, remove_worktree, source_is_applyable,
-    GitRepository, PreparedWorktree, RepositoryKind, RepositoryState,
+    create_detached_worktree, inspect_repository, remove_worktree, reopen_prepared_worktree,
+    source_is_applyable, GitRepository, PreparedWorktree, PreparedWorktreeSummary, RepositoryKind,
+    RepositoryState,
 };
 pub use preflight::{
     inspect, ExecutionMode, PreflightInput, ProviderReadiness, ReadinessState, RoleAssignment,
