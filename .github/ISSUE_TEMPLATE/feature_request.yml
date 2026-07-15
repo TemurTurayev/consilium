@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest a focused improvement to Consilium
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the workflow or friction before describing a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed experience
+      description: What should a user be able to do, and what should happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Share any workaround or smaller solution you have tried.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Onboarding and installation
+        - Council and review
+        - Conduct and verification
+        - Provider integration
+        - Web or desktop interface
+        - Documentation
+        - Other
+    validations:
+      required: true

@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a reproducible problem in Consilium
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Remove credentials and private source code before posting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: Provide the smallest safe command or repository example that reproduces the problem.
+      placeholder: |
+        1. Run ...
+        2. Configure ...
+        3. See ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Consilium version
+      placeholder: consilium 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system
+      placeholder: macOS 15, Ubuntu 24.04, WSL2
+    validations:
+      required: true
+  - type: textarea
+    id: providers
+    attributes:
+      label: Providers involved
+      description: List provider CLIs and versions. Do not paste tokens or credentials.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste a short, redacted excerpt if it helps explain the problem.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private prompts, and sensitive repository contents.
+          required: true
