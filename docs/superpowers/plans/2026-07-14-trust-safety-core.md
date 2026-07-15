@@ -365,6 +365,7 @@ git commit -m "feat: persist trusted verification commands"
 ### Task 3: Detached worktree lifecycle and source-checkout invariants
 
 **Files:**
+- Modify: `core/Cargo.toml`
 - Create: `core/src/safety/git.rs`
 - Modify: `core/src/safety/mod.rs`
 - Modify: `core/tests/common/mod.rs`
@@ -372,7 +373,7 @@ git commit -m "feat: persist trusted verification commands"
 
 **Interfaces:**
 - Consumes: `RepositoryState` and owner-only state directory.
-- Produces: `GitRepository`, `PreparedWorktree`, `inspect_repository`, `create_detached_worktree`, `remove_worktree`, and `source_is_applyable`.
+- Produces: `GitRepository`, live-authority `PreparedWorktree`, four-field `PreparedWorktreeSummary`, `inspect_repository`, `create_detached_worktree`, `reopen_prepared_worktree`, `remove_worktree`, and `source_is_applyable`.
 
 - [ ] **Step 1: Add a shared committed-repository fixture and failing isolation test**
 
@@ -444,7 +445,9 @@ pub fn source_is_applyable(source: &Path, base: &str) -> anyhow::Result<bool> {
 }
 ```
 
-`remove_worktree` uses `git worktree remove --force <path>` followed by `git worktree prune`; it never deletes the source repository and remains idempotent when the worktree already disappeared.
+`remove_worktree` removes only capability-bound state, prunes and rechecks the exact Git registration, never deletes the source repository, and remains idempotent when both the directory and registration already disappeared.
+
+**Reviewed implementation correction:** On Unix, state directories and generated entries are created and retained descriptor-relatively with no-follow semantics; the state root is rejected before mutation if it equals or falls inside the source repository. Repository-controlled checkout commands are never run: worktree registration uses `--no-checkout`, hooks and fsmonitor are disabled for all safety Git invocations, and committed files are materialized from raw `ls-tree -rz`/`cat-file` data while preserving regular, executable, symlink, and gitlink semantics. Cleanup uses descriptor-bound quarantine plus device/inode revalidation and preserves recovery state on any identity or locked-registration mismatch. `PreparedWorktree` is live deletion authority and is not deserializable. Persistent callers store only `PreparedWorktreeSummary` and recover authority with `reopen_prepared_worktree(trusted_state_root, summary)`. Native non-Unix safe worktrees fail closed; Windows support for v0.3 is through WSL.
 
 - [ ] **Step 4: Cover clean, dirty, untracked, changed-HEAD, and non-Git cases**
 
@@ -467,7 +470,7 @@ git commit -m "feat: isolate writes in detached worktrees"
 - Create: `core/tests/result_bundle_test.rs`
 
 **Interfaces:**
-- Consumes: `PreparedWorktree`, `source_is_applyable`, verification outcomes, and owner-only file helpers.
+- Consumes: live `PreparedWorktree`, persistent `PreparedWorktreeSummary`, `reopen_prepared_worktree`, `source_is_applyable`, verification outcomes, and owner-only file helpers.
 - Produces: `ResultBundle`, `ResultState::{Ready,Applied,Discarded}`, `ChangedFile`, `finalize_result`, `apply_result`, and `discard_result`.
 
 - [ ] **Step 1: Write failing text, binary, stale-apply, and discard tests**
@@ -544,8 +547,8 @@ pub struct VerificationRecord {
 pub struct ResultBundle {
     pub id: String,
     pub root: PathBuf,
-    pub source_repo: PathBuf,
-    pub worktree: PathBuf,
+    pub state_root: PathBuf,
+    pub worktree: PreparedWorktreeSummary,
     pub base_commit: String,
     pub state: ResultState,
     pub patch_path: PathBuf,
@@ -569,18 +572,20 @@ fn require_ready(bundle: &ResultBundle) -> anyhow::Result<()> {
 ```rust
 pub fn apply_result(bundle: &ResultBundle) -> anyhow::Result<ResultBundle> {
     require_ready(bundle)?;
-    anyhow::ensure!(source_is_applyable(&bundle.source_repo, &bundle.base_commit)?, "source checkout changed; result preserved");
-    git_apply_binary(&bundle.source_repo, &bundle.patch_path)?;
-    restore_manifest_payloads(&bundle.source_repo, &bundle.files, &bundle.root)?;
+    let prepared = reopen_prepared_worktree(&bundle.state_root, &bundle.worktree)?;
+    anyhow::ensure!(source_is_applyable(&prepared.source_repo, &bundle.base_commit)?, "source checkout changed; result preserved");
+    git_apply_binary(&prepared.source_repo, &bundle.patch_path)?;
+    restore_manifest_payloads(&prepared.source_repo, &bundle.files, &bundle.root)?;
     let updated = bundle.with_state(ResultState::Applied);
     write_owner_only_json(&updated.root.join("bundle.json"), &updated)?;
-    remove_worktree_path(&updated.source_repo, &updated.worktree)?;
+    remove_worktree(&prepared)?;
     Ok(updated)
 }
 
 pub fn discard_result(bundle: &ResultBundle) -> anyhow::Result<ResultBundle> {
     require_ready(bundle)?;
-    remove_worktree_path(&bundle.source_repo, &bundle.worktree)?;
+    let prepared = reopen_prepared_worktree(&bundle.state_root, &bundle.worktree)?;
+    remove_worktree(&prepared)?;
     let updated = bundle.with_state(ResultState::Discarded);
     write_owner_only_json(&updated.root.join("bundle.json"), &updated)?;
     Ok(updated)
