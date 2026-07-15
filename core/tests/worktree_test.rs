@@ -541,6 +541,57 @@ fn repository_process_filter_is_not_executed() {
     remove_worktree(&prepared).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn repository_fsmonitor_is_not_executed_during_inspection() {
+    let repo = common::committed_repo();
+    let commands = tempfile::tempdir().unwrap();
+    let marker = commands.path().join("fsmonitor-inspect-ran");
+    let script = commands.path().join("evil-fsmonitor.sh");
+    executable_script(
+        &script,
+        &format!("printf ran > {}; printf '\\n'", shell_quote(&marker)),
+    );
+    common::git(
+        repo.path(),
+        &["config", "core.fsmonitor", script.to_str().unwrap()],
+    );
+
+    let inspected = inspect_repository(repo.path()).unwrap();
+
+    assert!(inspected.clean);
+    assert!(!marker.exists());
+    assert_eq!(
+        fs::read_to_string(repo.path().join("base.txt")).unwrap(),
+        "base\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_fsmonitor_is_not_executed_during_applyability_check() {
+    let repo = common::committed_repo();
+    let commands = tempfile::tempdir().unwrap();
+    let marker = commands.path().join("fsmonitor-apply-ran");
+    let script = commands.path().join("evil-fsmonitor.sh");
+    executable_script(
+        &script,
+        &format!("printf ran > {}; printf '\\n'", shell_quote(&marker)),
+    );
+    common::git(
+        repo.path(),
+        &["config", "core.fsmonitor", script.to_str().unwrap()],
+    );
+    let base = common::git_output(repo.path(), &["rev-parse", "HEAD"]);
+
+    assert!(source_is_applyable(repo.path(), &base).unwrap());
+    assert!(!marker.exists());
+    assert_eq!(
+        fs::read_to_string(repo.path().join("base.txt")).unwrap(),
+        "base\n"
+    );
+}
+
 #[test]
 fn locked_registration_is_preserved_and_reported() {
     let repo = common::committed_repo();

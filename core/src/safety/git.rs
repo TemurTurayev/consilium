@@ -145,12 +145,25 @@ pub fn inspect_repository(path: &Path) -> Result<RepositoryState> {
 
     let mut tracked_dirty = nul_paths(&required_git_output(
         &canonical_root,
-        static_args(&["diff", "--name-only", "-z"]),
+        static_args(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            "-z",
+        ]),
         "inspect tracked changes",
     )?);
     tracked_dirty.extend(nul_paths(&required_git_output(
         &canonical_root,
-        static_args(&["diff", "--cached", "--name-only", "-z"]),
+        static_args(&[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            "-z",
+        ]),
         "inspect staged changes",
     )?));
     let tracked_dirty = tracked_dirty.into_iter().collect::<Vec<_>>();
@@ -1047,6 +1060,24 @@ fn validate_marker(capability: &CleanupCapability) -> Result<()> {
 
 #[cfg(unix)]
 fn secure_cleanup(capability: &CleanupCapability, remove_marker: bool) -> Result<()> {
+    secure_cleanup_inner(capability, remove_marker, None)
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum CleanupPhase {
+    BeforeMissingEntryPrune,
+}
+
+#[cfg(unix)]
+type SecureCleanupHook<'a> = dyn Fn(CleanupPhase) -> Result<()> + 'a;
+
+#[cfg(unix)]
+fn secure_cleanup_inner(
+    capability: &CleanupCapability,
+    remove_marker: bool,
+    hook: Option<&SecureCleanupHook<'_>>,
+) -> Result<()> {
     if capability.removed.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -1071,11 +1102,21 @@ fn secure_cleanup(capability: &CleanupCapability, remove_marker: bool) -> Result
             inode: stat.st_ino as u64,
         },
         Err(rustix::io::Errno::NOENT) => {
+            if let Some(hook) = hook {
+                hook(CleanupPhase::BeforeMissingEntryPrune)?;
+            }
             required_git_output(
                 &capability.source_repo,
                 static_args(&["worktree", "prune", "--expire", "now"]),
                 "prune externally removed worktree",
             )?;
+            let registration = worktree_registration(&capability.source_repo, &capability.path)?;
+            if registration.locked {
+                bail!("registered detached worktree became locked during prune; preserving recovery marker");
+            }
+            if registration.present {
+                bail!("Git worktree registration remains after prune; preserving recovery marker");
+            }
             if remove_marker {
                 remove_marker_at(capability)?;
             }
@@ -1365,12 +1406,43 @@ fn static_args(args: &[&str]) -> Vec<OsString> {
 }
 
 fn run_git(cwd: &Path, args: Vec<OsString>) -> std::io::Result<Output> {
-    Command::new("git")
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let mut command = Command::new("git");
+    command
         .arg("-c")
-        .arg("core.hooksPath=/dev/null")
+        .arg(format!("core.hooksPath={null_device}"))
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        .arg("--no-pager")
         .args(&args)
         .current_dir(cwd)
-        .output()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null_device)
+        .env("GIT_CONFIG_COUNT", "0")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    for name in [
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_DIFF_OPTS",
+        "GIT_PAGER",
+        "PAGER",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_EXEC_PATH",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_WORK_TREE",
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(name);
+    }
+    command.output()
 }
 
 fn required_git_output(cwd: &Path, args: Vec<OsString>, operation: &str) -> Result<Output> {
@@ -1707,5 +1779,50 @@ mod tests {
             .find(|path| path.is_file())
             .unwrap();
         assert_eq!(fs::read_to_string(attacker).unwrap(), "preserve");
+    }
+
+    #[test]
+    fn missing_entry_cleanup_rechecks_registration_after_prune_race() {
+        let repo = committed_repo();
+        let state = tempfile::tempdir().unwrap();
+        let prepared = create_detached_worktree(repo.path(), state.path()).unwrap();
+        let marker = state
+            .path()
+            .join("worktrees")
+            .join(format!(".run-{}.json", prepared.id));
+        fs::remove_dir_all(&prepared.path).unwrap();
+        let hook = |phase: CleanupPhase| {
+            assert!(matches!(phase, CleanupPhase::BeforeMissingEntryPrune));
+            let output = git(
+                repo.path(),
+                &["worktree", "lock", "--", prepared.path.to_str().unwrap()],
+            );
+            if !output.status.success() {
+                bail!(
+                    "lock race fixture failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(())
+        };
+
+        let error = secure_cleanup_inner(&prepared.capability, true, Some(&hook)).unwrap_err();
+
+        assert!(error.to_string().contains("locked"));
+        assert!(marker.is_file(), "recovery marker must be preserved");
+        assert!(!prepared.capability.removed.load(Ordering::Acquire));
+        let list = git(repo.path(), &["worktree", "list", "--porcelain"]);
+        assert!(
+            String::from_utf8_lossy(&list.stdout).contains(&prepared.path.display().to_string())
+        );
+
+        assert!(git(
+            repo.path(),
+            &["worktree", "unlock", "--", prepared.path.to_str().unwrap(),],
+        )
+        .status
+        .success());
+        remove_worktree(&prepared).unwrap();
+        assert!(!marker.exists());
     }
 }
