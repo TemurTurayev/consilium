@@ -65,8 +65,8 @@ export function App() {
 }
 
 const VIEW_TITLE: Record<View, string> = {
-  run: 'Run',
-  table: 'Table',
+  run: 'Build with a team',
+  table: 'Live team',
   usage: 'Usage',
   providers: 'Providers',
   settings: 'Settings',

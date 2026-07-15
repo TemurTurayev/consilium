@@ -20,10 +20,10 @@ interface Props {
 }
 
 const SEATS: { id: SeatId; name: string; role: string; slot: 'top' | 'left' | 'right' | 'bottom-left' }[] = [
-  { id: 'claude', name: 'Claude', role: 'attending · conductor', slot: 'top' },
-  { id: 'codex', name: 'Codex', role: 'surgeon · worker', slot: 'left' },
-  { id: 'gemini', name: 'Gemini', role: 'radiologist · review', slot: 'right' },
-  { id: 'grok', name: 'Grok', role: 'resident · worker', slot: 'bottom-left' },
+  { id: 'claude', name: 'Claude', role: 'lead · conductor', slot: 'top' },
+  { id: 'codex', name: 'Codex', role: 'builder · worker', slot: 'left' },
+  { id: 'gemini', name: 'Gemini', role: 'reviewer', slot: 'right' },
+  { id: 'grok', name: 'Grok', role: 'builder · worker', slot: 'bottom-left' },
 ]
 
 /** The flagship view: the run rendered as a medical council around an
@@ -58,7 +58,7 @@ export function TableView({ state, onStart, onDemo, onCancel, onPause, onResume,
           <div className="scene__operator">
             {operatorNote && (
               <div className="operator-note">
-                <span className="operator-note__badge">Chief physician</span>
+                <span className="operator-note__badge">Your note</span>
                 <span className="operator-note__text">{operatorNote}</span>
                 {running && <span className="operator-note__hint">queued for next decision</span>}
               </div>
@@ -84,16 +84,16 @@ export function TableView({ state, onStart, onDemo, onCancel, onPause, onResume,
                     className="field__input"
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
-                    placeholder="Say a word to the council…"
+                    placeholder="Guide the team at its next decision…"
                     disabled={!socketOpen}
-                    aria-label="Interject a note to the council"
+                    aria-label="Add guidance for the team"
                   />
                   <button
                     className="btn btn--ghost"
                     type="submit"
                     disabled={!socketOpen || note.trim().length === 0}
                   >
-                    Say a word
+                    Add guidance
                   </button>
                 </form>
               </div>

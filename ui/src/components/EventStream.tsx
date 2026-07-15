@@ -13,7 +13,7 @@ export function EventStream({ events }: Props) {
   }, [events.length])
 
   if (events.length === 0) {
-    return <div className="stream stream--empty">No events yet — start a run to watch the council work.</div>
+    return <div className="stream stream--empty">No activity yet. Start a team run or try the demo.</div>
   }
   return (
     <div className="stream">

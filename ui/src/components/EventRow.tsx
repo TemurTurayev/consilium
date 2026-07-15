@@ -78,13 +78,13 @@ export function EventRow({ event }: { event: AgentEvent }) {
     case 'paused':
       return (
         <Row kind="system" badge="PAUSED">
-          <span className="row__dim">Council paused by the chief physician.</span>
+          <span className="row__dim">Team paused by you.</span>
         </Row>
       )
     case 'resumed':
       return (
         <Row kind="system" badge="RESUMED">
-          <span className="row__dim">Council resumed.</span>
+          <span className="row__dim">Team resumed.</span>
         </Row>
       )
     case 'operator_note':

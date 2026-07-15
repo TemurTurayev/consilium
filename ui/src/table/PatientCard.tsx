@@ -1,17 +1,17 @@
 import type { Patient, Verdict } from './tableState'
 
 const PHASE_LABEL: Record<Patient['phase'], string> = {
-  idle: 'Awaiting admission',
-  running: 'In session',
-  done: 'Post-op',
-  errored: 'Complications',
+  idle: 'Ready for a task',
+  running: 'Work in progress',
+  done: 'Run finished',
+  errored: 'Run needs attention',
 }
 
 const VERDICT_LABEL: Record<NonNullable<Verdict>, string> = {
-  completed: 'Stable — discharged',
-  halted: 'Halted mid-procedure',
-  failed: 'Complications',
-  cancelled: 'Procedure aborted',
+  completed: 'Completed',
+  halted: 'Stopped by review',
+  failed: 'Checks failed',
+  cancelled: 'Run cancelled',
 }
 
 /** The centrepiece of the table: the task-as-patient. Shows run phase, files
@@ -21,9 +21,9 @@ export function PatientCard({ patient, paused }: { patient: Patient; paused: boo
     <div className="patient">
       <div className="patient__figure" aria-hidden="true" />
       <div className="patient__body">
-        <span className="patient__title">{patient.taskKnown ? 'Patient on the table' : 'No patient yet'}</span>
+        <span className="patient__title">{patient.taskKnown ? 'Current task' : 'No task yet'}</span>
         <span className="patient__phase">{PHASE_LABEL[patient.phase]}</span>
-        {paused && <span className="badge patient__paused-pill">Council paused</span>}
+        {paused && <span className="badge patient__paused-pill">Team paused</span>}
         <span className="patient__files">
           {patient.filesChanged} file{patient.filesChanged === 1 ? '' : 's'} touched
         </span>

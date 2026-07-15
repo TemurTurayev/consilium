@@ -1,8 +1,8 @@
 export type View = 'run' | 'table' | 'usage' | 'providers' | 'settings'
 
 const ITEMS: { id: View; label: string }[] = [
-  { id: 'run', label: 'Run' },
-  { id: 'table', label: 'Table' },
+  { id: 'run', label: 'Build' },
+  { id: 'table', label: 'Live team' },
   { id: 'usage', label: 'Usage' },
   { id: 'providers', label: 'Providers' },
   { id: 'settings', label: 'Settings' },
@@ -19,7 +19,7 @@ export function Sidebar({ view, onSelect }: Props) {
   return (
     <nav className="sidebar" aria-label="Sections">
       <div className="brand">
-        <span className="brand__name">consilium</span>
+        <span className="brand__name">Consilium</span>
         <span className="brand__dots" aria-hidden="true">
           <i className="dot dot--claude" />
           <i className="dot dot--codex" />
