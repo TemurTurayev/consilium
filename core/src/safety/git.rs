@@ -118,6 +118,16 @@ struct FileIdentity {
     inode: u64,
 }
 
+#[cfg(unix)]
+fn file_identity_component<T>(value: T) -> Result<u64>
+where
+    T: TryInto<u64>,
+{
+    value
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("file identity component is outside the u64 range"))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CreatePhase {
     BeforeGit,
@@ -1098,8 +1108,8 @@ fn secure_cleanup_inner(
     );
     let current = match current {
         Ok(stat) => FileIdentity {
-            device: stat.st_dev as u64,
-            inode: stat.st_ino as u64,
+            device: file_identity_component(stat.st_dev)?,
+            inode: file_identity_component(stat.st_ino)?,
         },
         Err(rustix::io::Errno::NOENT) => {
             if let Some(hook) = hook {
