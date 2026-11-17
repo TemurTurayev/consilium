@@ -1,0 +1,15 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index ae9e45055b257ac61c3ee05aa3da1abe6f4727bd..003f831e622c33b6396100e13fa80dc6cbd5700c 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,4 +1,6 @@
+-// TASK: implement `pub fn parse_kv(s: &str) -> Option<(String, String)>` that
+-// splits `s` on the FIRST '=' into (key, value); returns None if there is no '='.
+-// A value may itself contain '='. The test in tests/parse.rs asserts this —
+-// implement the function here, do not edit the test.
++/// Splits `s` on the FIRST '=' into (key, value); `None` if there is no '='.
++/// The value may itself contain '='.
++pub fn parse_kv(s: &str) -> Option<(String, String)> {
++    s.split_once('=')
++        .map(|(key, value)| (key.to_string(), value.to_string()))
++}

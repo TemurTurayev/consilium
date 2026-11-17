@@ -10,6 +10,7 @@ pub mod models;
 pub mod orchestrator;
 pub mod protocol;
 pub mod quota;
+pub mod reaper;
 pub mod recommend;
 pub mod safety;
 pub mod server;

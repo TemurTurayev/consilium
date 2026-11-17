@@ -1,0 +1,12 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 10b96ba2af0b70295189bd9d3d0860267154e561..990caaf003090316c2f6696e49472186a9c094ab 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,5 +1,4 @@
+-// BUG: `sum_to(n)` should return the sum of 1..=n (inclusive), but it stops at
+-// n - 1. The test in tests/sum.rs catches this — fix the function here.
++/// The sum of all integers from 1 to `n`, inclusive.
+ pub fn sum_to(n: u32) -> u32 {
+-    (1..n).sum()
++    (1..=n).sum()
+ }

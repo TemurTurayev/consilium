@@ -1,0 +1,10 @@
+{
+  "name": "rename-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User formatting helpers",
+  "main": "user.js",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "json-content-type",
+  "category": "api",
+  "language": "python",
+  "difficulty": "small",
+  "prompt": "Finish `json_response(payload, status=200)` in responder.py. It returns a tuple `(status, headers, body)` for a JSON API response: `status` is the given status code (200 by default); `headers` is a dict that contains the key `Content-Type` with the value `application/json`; `body` is a `str` holding the JSON encoding of `payload`, so that `json.loads(body)` gives the payload back. Use only the Python standard library. The tests in test_responder.py assert this — make them pass without modifying the test file.",
+  "context": "A single-module Python project with no dependencies. Run `python3 -m unittest` to check your work.",
+  "verify": { "test": "python3 -m unittest" },
+  "protected_paths": ["test_responder.py"]
+}

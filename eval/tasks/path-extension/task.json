@@ -1,0 +1,10 @@
+{
+  "name": "path-extension",
+  "category": "parsing",
+  "language": "rust",
+  "difficulty": "small",
+  "prompt": "Fix `pub fn extension(path: &str) -> Option<String>` in src/lib.rs of the `path_extension` crate. It returns the final extension of a '/'-separated path, in lowercase. Rules: look only at the last path component (text after the final '/'); the extension is the text after that component's LAST '.'; return it lowercased (\"report.PDF\" gives Some(\"pdf\"), \"archive.tar.gz\" gives Some(\"gz\")). Return None when the last component has no '.', when the '.' is its first character and it is the only one (a dotfile such as \".bashrc\"), when nothing follows the last '.' (\"notes.\"), or when the path is empty or ends in '/'. A dotfile with a further dot does have an extension: \".config.toml\" gives Some(\"toml\"). A '.' in a directory name is never an extension (\"v1.2/readme\" gives None). The integration test in tests/extension.rs asserts the full contract — make it pass without modifying the test.",
+  "context": "A single-crate Rust library with no dependencies; the crate is `path_extension`. Run `cargo test` to check your work.",
+  "verify": { "build": "cargo build", "test": "cargo test" },
+  "protected_paths": ["tests/extension.rs"]
+}

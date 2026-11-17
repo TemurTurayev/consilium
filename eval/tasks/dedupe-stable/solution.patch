@@ -1,0 +1,34 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 0cd4d3a35c1145da79e6d3ad177613a104c3864f..77311c7be20a14c5844229997c075f61a6052af9 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,12 +1,19 @@
+-/// Joins tags into one comma-separated line, each tag once.
+-///
+-/// TASK (refactor): duplicates are removed here by sorting, which throws away
+-/// the order the tags were first seen in, and the logic cannot be reused for
+-/// anything but strings. Extract a generic `dedupe_stable` (see task.json) and
+-/// build `tag_line` on it. tests/dedupe.rs asserts the result — do not edit it.
++use std::collections::HashSet;
++use std::hash::Hash;
++
++/// Returns `items` with duplicates removed, keeping the first occurrence of
++/// each and preserving first-seen order.
++pub fn dedupe_stable<T: Eq + Hash + Clone>(items: &[T]) -> Vec<T> {
++    let mut seen = HashSet::new();
++    items
++        .iter()
++        .filter(|item| seen.insert((*item).clone()))
++        .cloned()
++        .collect()
++}
++
++/// Joins tags into one comma-separated line, each tag once, in the order the
++/// tags were first seen.
+ pub fn tag_line(tags: &[String]) -> String {
+-    let mut unique = tags.to_vec();
+-    unique.sort();
+-    unique.dedup();
+-    unique.join(", ")
++    dedupe_stable(tags).join(", ")
+ }

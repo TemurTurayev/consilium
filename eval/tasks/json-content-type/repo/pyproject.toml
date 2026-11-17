@@ -1,0 +1,5 @@
+[project]
+name = "responder"
+version = "0.1.0"
+description = "HTTP-style response helpers"
+requires-python = ">=3.9"

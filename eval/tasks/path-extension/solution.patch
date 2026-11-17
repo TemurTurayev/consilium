@@ -1,0 +1,24 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index b0a39d62dacde317ecc19534bc95204c0b5e63a2..4484d47d079f4a6f5d5c9e64d47d37cc26d1bfa2 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,8 +1,13 @@
+-// TASK: `extension` should return a path's final extension in lowercase, and
+-// None where there is none. This first draft just takes whatever follows the
+-// last '.', which is wrong for dotfiles, names without a dot, dots in a
+-// directory name and upper-case extensions. See task.json for the contract;
+-// tests/extension.rs asserts it — fix the function here, do not edit the test.
++/// The final extension of a '/'-separated path, in lowercase.
++///
++/// Only the last path component counts. `None` when it has no '.', when its
++/// only '.' is the first character (a dotfile), or when nothing follows the
++/// last '.'.
+ pub fn extension(path: &str) -> Option<String> {
+-    path.rsplit('.').next().map(str::to_string)
++    let name = path.rsplit('/').next()?;
++    let (stem, ext) = name.rsplit_once('.')?;
++    if stem.is_empty() || ext.is_empty() {
++        return None;
++    }
++    Some(ext.to_lowercase())
+ }

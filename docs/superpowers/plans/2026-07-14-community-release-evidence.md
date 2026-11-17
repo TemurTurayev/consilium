@@ -179,7 +179,7 @@ git commit -m "docs: lead with the safe Consilium workflow"
 - Consumes: existing `Approach`, `run_verify`, conduct attempt/fallback metadata, and provider quota snapshots.
 - Produces: `EVAL_SCHEMA_VERSION`, `VerificationStatus`, expanded `EvalTask`, `ProviderTokens`, `TrialResult`, `MetricSummary`, `SuiteReport`, and schema-v2 JSON/Markdown.
 
-- [ ] **Step 1: Write failing schema/statistics tests**
+- [x] **Step 1: Write failing schema/statistics tests**
 
 ```rust
 #[test]
@@ -208,13 +208,13 @@ fn variance_is_absent_for_n1_and_present_for_n2() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm schema v1 cannot satisfy tests**
+- [x] **Step 2: Run and confirm schema v1 cannot satisfy tests**
 
 Run: `cargo test -p consilium --test eval_test report_v2 && cargo test -p consilium orchestrator::eval::tests::variance`
 
 Expected: FAIL with missing fields/types.
 
-- [ ] **Step 3: Define the exact v2 schema**
+- [x] **Step 3: Define the exact v2 schema**
 
 ```rust
 pub const EVAL_SCHEMA_VERSION: u32 = 2;
@@ -272,23 +272,23 @@ pub struct SuiteReport {
 
 Use sample standard deviation (`n - 1` denominator) only for N ≥ 2. Keep a compatibility reader for old ignored local results if any comparison command reads them; new writes are v2 only.
 
-- [ ] **Step 4: Capture attempts/fallbacks without changing score semantics**
+- [x] **Step 4: Capture attempts/fallbacks without changing score semantics**
 
 Independent external verification remains the only score: `Passed` only if commands ran and all passed, `Failed` if any command ran and failed, `NotRun` when no verifier command resolved. Pull conduct attempts/fallbacks from its outcome transcript metadata and solo fallbacks from `run_with_failover`; pipeline self-report remains informational.
 
-- [ ] **Step 5: Preserve and test the quota gate**
+- [x] **Step 5: Preserve and test the quota gate**
 
 Run: `cargo run -q -p consilium -- eval`
 
 Expected: exit success, list tasks/approaches/call estimates, print the exact phrase `no quota spent`, create no result file, and open no provider configuration.
 
-- [ ] **Step 6: Run all eval tests**
+- [x] **Step 6: Run all eval tests**
 
 Run: `cargo test -p consilium --test eval_test && cargo test -p consilium orchestrator::eval`
 
 Expected: PASS for v2 serialization, Grok totals, verification states, category grouping, N, and variance.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add core/src/orchestrator/eval.rs core/src/main.rs core/tests/eval_test.rs eval/README.md
@@ -317,7 +317,7 @@ git commit -m "feat: make eval evidence explicit and versioned"
 - Consumes: Task 2 `EvalTask` manifest fields and existing fixture-copy verifier.
 - Produces: 12 deterministic tasks across `bugfix`, `parsing`, `api`, and `refactor`, with Rust, Python standard library, and Node standard library coverage.
 
-- [ ] **Step 1: Write the failing fixture-integrity test**
+- [x] **Step 1: Write the failing fixture-integrity test**
 
 ```rust
 #[test]
@@ -340,13 +340,13 @@ fn fixture_suite_has_twelve_valid_reference_solutions() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm only four tasks/no patches exist**
+- [x] **Step 2: Run and confirm only four tasks/no patches exist**
 
 Run: `cargo test -p consilium --test eval_test fixture_suite_has_twelve_valid_reference_solutions`
 
 Expected: FAIL with task count `4` and missing `solution.patch`.
 
-- [ ] **Step 3: Add metadata to the existing four manifests**
+- [x] **Step 3: Add metadata to the existing four manifests**
 
 Use:
 
@@ -359,7 +359,7 @@ Use:
 
 Merge the corresponding three fields into each existing manifest without changing its prompt, verifier, or protected paths.
 
-- [ ] **Step 4: Add eight exact task contracts**
+- [x] **Step 4: Add eight exact task contracts**
 
 Create these tasks:
 
@@ -376,17 +376,17 @@ Create these tasks:
 
 Each starter repo contains only source, package metadata, and a protected test; the baseline test fails for the intended assertion, not because a tool/runtime is missing.
 
-- [ ] **Step 5: Generate and inspect reference patches**
+- [x] **Step 5: Generate and inspect reference patches**
 
 For each task, make the minimal solution in a disposable copy, create `git diff --binary --full-index`, restore the starter, and save the reviewed patch as `solution.patch`. The patch may change only non-protected source files and package metadata required by the starter.
 
-- [ ] **Step 6: Run fixture integrity and dry-run**
+- [x] **Step 6: Run fixture integrity and dry-run**
 
 Run: `cargo test -p consilium --test eval_test fixture_suite && cargo run -q -p consilium -- eval`
 
 Expected: PASS; dry-run lists 12 tasks and prints `no quota spent`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add eval/tasks core/tests/eval_test.rs

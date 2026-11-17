@@ -9,6 +9,10 @@ node_modules/
 dist/
 *.log
 
+# Python (the eval fixtures include Python tasks)
+__pycache__/
+*.pyc
+
 # Local env
 .env
 .env.local

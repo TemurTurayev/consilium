@@ -1,0 +1,34 @@
+diff --git a/report.js b/report.js
+index 68d111abc805a4934e17f157391d27ecb2f137f5..243588bd08c745057631a7fc05fe9cdd580e679f 100644
+--- a/report.js
++++ b/report.js
+@@ -1,19 +1,16 @@
+ 'use strict';
+ 
++// The users that count as active: flagged active and not deleted. Pure:
++// returns a new array in the original order and leaves `users` alone.
++function filterActive(users) {
++  return users.filter((user) => user.active && !user.deletedAt);
++}
++
+ // Builds the "active users" report, one `id: name` line per active user.
+-//
+-// TASK (refactor): the rule for who counts as active is tangled into the
+-// formatting loop, so nothing else can reuse it. Extract it into an exported
+-// pure function `filterActive(users)` and make `activeUserReport` use it. The
+-// report's output must not change. See test/report.test.js.
+ function activeUserReport(users) {
+-  const lines = [];
+-  for (const user of users) {
+-    if (user.active && !user.deletedAt) {
+-      lines.push(`${user.id}: ${user.name}`);
+-    }
+-  }
+-  return lines.join('\n');
++  return filterActive(users)
++    .map((user) => `${user.id}: ${user.name}`)
++    .join('\n');
+ }
+ 
+-module.exports = { activeUserReport };
++module.exports = { activeUserReport, filterActive };

@@ -184,8 +184,37 @@ fn print_staleness_hint(config: &consilium::config::Config) {
     }
 }
 
+/// Provider CLIs run in process groups of their own (see `consilium::reaper`),
+/// so a Ctrl-C in the terminal — or a `kill`, or the terminal closing — reaches
+/// only consilium. Stop every provider run still in flight before exiting, with
+/// the exit code a shell reports for that signal.
+#[cfg(unix)]
+fn stop_providers_when_signalled() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let signals = [
+        (SignalKind::interrupt(), 130),
+        (SignalKind::terminate(), 143),
+        (SignalKind::hangup(), 129),
+    ];
+    for (kind, exit_code) in signals {
+        let Ok(mut received) = signal(kind) else {
+            continue;
+        };
+        tokio::spawn(async move {
+            if received.recv().await.is_some() {
+                consilium::reaper::kill_all();
+                std::process::exit(exit_code);
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_providers_when_signalled() {}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    stop_providers_when_signalled();
     // Logs go to stderr so they never corrupt the MCP server's stdout JSON-RPC
     // framing (`consilium mcp`); benign for every other subcommand.
     tracing_subscriber::fmt()
@@ -935,25 +964,34 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let deps = ConfigEvalDeps { config };
+            let out_path = out.unwrap_or_else(|| {
+                std::path::PathBuf::from("eval/results")
+                    .join(format!("{}-results.json", consilium::quota::unix_now()))
+            });
+            eprintln!("results (saved after every run): {}", out_path.display());
+            // Saved after every trial, so a run that is stopped or dies
+            // part-way keeps what it has already measured and paid for.
+            let mut save_progress = |partial: &eval::SuiteReport| {
+                if let Err(e) = eval::save_report(&out_path, partial) {
+                    eprintln!("warning: could not save partial results: {e:#}");
+                }
+            };
+            // Recorded before the first model call: when this run started and
+            // which commit of the suite it measured.
+            let meta = eval::ReportMeta::capture(&suite);
             let report = eval::run_suite(
                 &tasks,
                 &approaches,
                 trials,
                 &deps,
                 std::time::Duration::from_secs(timeout),
+                meta,
+                &mut save_progress,
             )
             .await?;
 
             println!("{}", eval::markdown_report(&report));
-
-            let out_path = out.unwrap_or_else(|| {
-                std::path::PathBuf::from("eval/results")
-                    .join(format!("{}-results.json", consilium::quota::unix_now()))
-            });
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&out_path, serde_json::to_string_pretty(&report)?)?;
+            eval::save_report(&out_path, &report)?;
             println!("results: {}", out_path.display());
         }
     }

@@ -1,0 +1,10 @@
+{
+  "name": "dedupe-stable",
+  "category": "refactor",
+  "language": "rust",
+  "difficulty": "medium",
+  "prompt": "Refactor src/lib.rs of the `dedupe_stable` crate. `tag_line` removes duplicate tags by sorting them, which loses the order the tags were first seen in, and the de-duplication cannot be reused for other types. Add a public generic function `pub fn dedupe_stable<T: Eq + std::hash::Hash + Clone>(items: &[T]) -> Vec<T>` that returns the items with duplicates removed, keeping the FIRST occurrence of each and preserving first-seen order; duplicates need not be adjacent, and the input slice is not modified. Then rewrite `tag_line` to use `dedupe_stable`, so `tag_line` joins each distinct tag once with \", \" in first-seen order (for example [\"rust\", \"cli\", \"rust\", \"ai\", \"cli\"] gives \"rust, cli, ai\"). Use only the standard library. The integration test in tests/dedupe.rs asserts all of this — make it pass without modifying the test.",
+  "context": "A single-crate Rust library with no dependencies; the crate is `dedupe_stable`. Run `cargo test` to check your work.",
+  "verify": { "build": "cargo build", "test": "cargo test" },
+  "protected_paths": ["tests/dedupe.rs"]
+}
