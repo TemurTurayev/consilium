@@ -92,7 +92,8 @@ pub fn guidance(p: Provider, status: &ProviderAuth) -> String {
         ProviderAuth::NeedsLogin(_) => format!("{bin}: {}", login_command(p)),
         ProviderAuth::Down(detail) => {
             format!(
-                "{bin}: {detail} — retry, or run `{}` directly to see the error",
+                "{bin}: {} — retry, or run `{}` directly to see the error",
+                doctor::one_line(detail, doctor::DETAIL_DISPLAY_CHARS),
                 smoke_command(p)
             )
         }
@@ -241,6 +242,16 @@ mod tests {
         assert!(!g.contains("codex -p"), "got: {g}");
         let g = guidance(Provider::Gemini, &ProviderAuth::Down("boom".into()));
         assert!(g.contains("`agy -p hi`"), "got: {g}");
+    }
+
+    /// Real grok 0.2.87 refusal: a pretty-printed JSON blob spread over
+    /// several lines. The status line must stay on one line.
+    #[test]
+    fn guidance_for_down_keeps_a_multi_line_error_on_one_line() {
+        let detail = "transient failure: Internal error: {\n  \"message\": \"API error (status 426 Upgrade Required): Your Grok CLI version (0.2.87) is outdated.\"\n}";
+        let g = guidance(Provider::Grok, &ProviderAuth::Down(detail.into()));
+        assert!(!g.contains('\n'), "got: {g}");
+        assert!(g.contains("is outdated"), "got: {g}");
     }
 
     #[test]

@@ -263,7 +263,7 @@ pub async fn preflight(config: &Config, quota: &QuotaStore) -> ModelProbeReport 
 pub(crate) fn remediation_hint(detail: &str) -> &'static str {
     let d = detail.to_ascii_lowercase();
     if d.starts_with(probe_label(FailureKind::ModelUnavailable)) {
-        "this model is not available to your account (retired, or not in your plan) — run `consilium models --write` to switch to one that is"
+        "this model is not available to your account (retired, or not in your plan) — run `consilium models --write` to switch to one that is, or remove it from consilium.config.json"
     } else if d.contains("outdated") || d.contains("upgrade required") {
         "this CLI version is too old for the provider — update the CLI (its message names the command), then re-run"
     } else if d.contains("no longer supported") || d.contains("ineligible") || d.contains("migrate")
@@ -284,6 +284,23 @@ pub(crate) fn remediation_hint(detail: &str) -> &'static str {
     }
 }
 
+/// How much of a CLI's error text a status line shows.
+pub(crate) const DETAIL_DISPLAY_CHARS: usize = 320;
+
+/// A CLI error squeezed onto one line for a status listing: runs of whitespace
+/// (including newlines) become single spaces, and anything beyond `max_chars`
+/// characters is cut with an ellipsis. Provider CLIs answer with multi-line
+/// text — a pretty-printed JSON blob, or a reason followed by a long model
+/// list — which otherwise buries the status lines around it.
+pub(crate) fn one_line(detail: &str, max_chars: usize) -> String {
+    let flat = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max_chars {
+        return flat;
+    }
+    let kept: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
+}
+
 pub fn print_preflight(report: &ModelProbeReport) {
     println!("── session preflight ──");
     for (candidate, probe) in &report.probes {
@@ -294,7 +311,7 @@ pub fn print_preflight(report: &ModelProbeReport) {
                 "  ✗ {}/{} — {}",
                 candidate.provider.as_str(),
                 candidate.model,
-                probe.detail
+                one_line(&probe.detail, DETAIL_DISPLAY_CHARS)
             );
             println!("      → {}", remediation_hint(&probe.detail));
         }
@@ -466,6 +483,23 @@ mod tests {
         assert!(has(Provider::Claude, "opus"));
         assert!(has(Provider::Codex, "gpt-x"));
         assert!(has(Provider::Gemini, "gemini-pro"));
+    }
+
+    #[test]
+    fn one_line_collapses_a_multi_line_cli_error_and_caps_its_length() {
+        // Shape of the real agy 1.5 error: the reason, then a long model list.
+        let detail = "unavailable: error: invalid model selection\nAvailable models:\n  Gemini 4 Argon (High)\n  Gemini 4 Argon (Low)";
+        assert_eq!(
+            one_line(detail, 200),
+            "unavailable: error: invalid model selection Available models: Gemini 4 Argon (High) Gemini 4 Argon (Low)"
+        );
+        // capped to at most `max_chars` characters (never mid-character),
+        // ending in an ellipsis
+        assert_eq!(one_line(detail, 20), "unavailable: error:…");
+        assert_eq!(one_line("привет\nмир", 8), "привет…");
+        assert_eq!(one_line("привет\nмир", 9), "привет м…");
+        // short single-line details pass through untouched
+        assert_eq!(one_line("ok", 200), "ok");
     }
 
     #[test]
