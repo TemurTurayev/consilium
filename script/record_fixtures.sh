@@ -28,7 +28,8 @@ record gemini core/tests/fixtures/gemini/recorded/basic.txt \
 # Grok Build CLI is BETA — its headless NDJSON schema is unverified (adapters/grok.rs
 # was written from docs.x.ai/build facts, not a recording). Requires an X Premium+/
 # SuperGrok subscription with `grok` already logged in (browser OAuth, cached token).
+# Same flags as adapters/grok.rs (`--no-auto-update` never existed in the real CLI).
 record grok core/tests/fixtures/grok/recorded/basic.jsonl \
-  grok -p 'Reply with exactly: ok' --output-format streaming-json --no-auto-update
+  grok -p 'Reply with exactly: ok' --output-format streaming-json
 
 echo "Now diff recorded vs synthetic fixtures; update parsers if formats drifted."

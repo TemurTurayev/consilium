@@ -7,7 +7,7 @@ import type { InboundFrame } from '../protocol'
  * multi-provider council: a Claude conductor, a Codex worker, a Gemini reviewer.
  */
 export const demoSession: InboundFrame[] = [
-  { type: 'session_started', session_id: 'demo-conductor', provider: 'claude', model: 'claude-opus-4-8' },
+  { type: 'session_started', session_id: 'demo-conductor', provider: 'claude', model: 'claude-opus-5-5' },
   { type: 'thinking', text: 'Decomposing the task into subtasks and assigning workers…' },
   { type: 'message', text: 'Plan: (1) add the parser, (2) wire it into the CLI, (3) cover it with tests.' },
   // A short operator beat: the chief physician pauses the council, leaves a

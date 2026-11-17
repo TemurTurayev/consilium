@@ -197,7 +197,7 @@ describe('deriveSeats', () => {
 
     expect(seats.claude).toMatchObject({
       status: 'speaking',
-      model: 'claude-opus-4-8',
+      model: 'claude-opus-5-5',
       lastMessage: 'Plan: (1) add the parser, (2) wire it into the CLI, (3) cover it with tests.',
       active: false,
     })
