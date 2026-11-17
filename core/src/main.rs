@@ -465,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
             diff_file,
             timeout,
         } => {
+            use consilium::orchestrator::resilience::{ModelHealth, RetryConfig};
             use consilium::orchestrator::{review, roles, transcript::TranscriptStore};
 
             let cwd = std::env::current_dir()?;
@@ -491,21 +492,31 @@ async fn main() -> anyhow::Result<()> {
             let config = consilium::config::Config::load(Some(std::path::Path::new(
                 "consilium.config.json",
             )))?;
-            let reviewer_role = &config.roles.reviewer;
-            let reviewer = roles::adapter_for(reviewer_role);
+            print_staleness_hint(&config);
+            // The reviewer's full ladder, like council and conduct: a retired
+            // or plan-gated primary falls through to the next rung instead of
+            // failing the review outright.
+            let ladder = roles::resolve_ladder(&config.roles.reviewer);
+            let health = ModelHealth::with_retry(RetryConfig::prod());
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
 
-            let result = review::run_review(
+            let (result, fallbacks) = review::run_review_ladder(
                 &diff,
-                reviewer,
-                Some(reviewer_role.model.clone()),
+                &ladder,
+                &health,
                 &store,
                 cwd,
                 std::time::Duration::from_secs(timeout),
             )
             .await?;
             let path = transcripts.save("review", &result.transcript)?;
+            if let Some(model) = &result.model_used {
+                println!("reviewed by {model}");
+            }
+            for fb in &fallbacks {
+                println!("  ↳ {} → {} ({})", fb.from, fb.to, fb.reason);
+            }
 
             match &result.verdict {
                 Some(v) if v.findings.is_empty() => println!("✓ clean — no findings"),
@@ -809,7 +820,7 @@ async fn main() -> anyhow::Result<()> {
                 println!(
                     "wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)"
                 );
-                println!("Next: authenticate providers with `consilium auth`, then verify with `consilium doctor --models`.");
+                println!("Next: `consilium auth` checks the CLIs are signed in; `consilium models --write` then switches this lineup to the models your plans include.");
                 println!("Then run your first task:  consilium conduct \"add a hello() function with a test\"");
             } else {
                 let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
