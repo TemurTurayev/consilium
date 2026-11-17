@@ -76,8 +76,8 @@ pub fn login_command(p: Provider) -> &'static str {
     match p {
         Provider::Claude => "run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN=<token> (add it to your shell profile so it persists)",
         Provider::Codex => "run `codex login`",
-        Provider::Gemini => "run `agy login`",
-        Provider::Grok => "run `grok` once and complete the browser login (X Premium+ / SuperGrok subscription)",
+        Provider::Gemini => "run `agy` once and sign in with Google (it shares the Antigravity app's sign-in)",
+        Provider::Grok => "run `grok login` and complete the browser sign-in (needs an X Premium+ / SuperGrok subscription)",
     }
 }
 
@@ -204,13 +204,13 @@ mod tests {
         assert!(g.contains("setup-token"), "got: {g}");
         let g = guidance(Provider::Codex, &ProviderAuth::NeedsLogin("401".into()));
         assert!(g.contains("codex login"), "got: {g}");
+        // agy 1.5 has no `login` subcommand (`agy help login` → "unknown
+        // subcommand"): sign-in happens on its first interactive start.
         let g = guidance(Provider::Gemini, &ProviderAuth::NeedsLogin("401".into()));
-        assert!(g.contains("agy login"), "got: {g}");
+        assert!(!g.contains("agy login"), "got: {g}");
+        assert!(g.contains("run `agy`") && g.contains("sign in"), "got: {g}");
         let g = guidance(Provider::Grok, &ProviderAuth::NeedsLogin("401".into()));
-        assert!(
-            g.contains("grok") && g.contains("browser login"),
-            "got: {g}"
-        );
+        assert!(g.contains("`grok login`"), "got: {g}");
     }
 
     #[test]
@@ -227,7 +227,7 @@ mod tests {
         let g = guidance(Provider::Gemini, &ProviderAuth::Down("rate limited".into()));
         assert!(g.contains("rate limited"), "got: {g}");
         assert!(
-            !g.contains("agy login"),
+            !g.contains("sign in"),
             "Down must not suggest re-login: {g}"
         );
     }
