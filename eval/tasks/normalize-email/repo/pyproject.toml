@@ -1,0 +1,5 @@
+[project]
+name = "emailnorm"
+version = "0.1.0"
+description = "Email address normalization"
+requires-python = ">=3.9"

@@ -1,0 +1,10 @@
+{
+  "name": "split-validation",
+  "category": "refactor",
+  "language": "python",
+  "difficulty": "medium",
+  "prompt": "Refactor appconfig.py. `load_config(text)` both reads the `key = value` syntax and validates the values in one loop. Split it into two public functions; `load_config` must keep returning the same dict for valid input and keep raising ValueError for invalid input. (1) `parse_config(text) -> dict[str, str]` handles syntax only: it skips blank lines and lines starting with '#', splits each remaining line on the FIRST '=' into a stripped key and a stripped value, keeps every value as a string, and raises ValueError mentioning `line N` (1-based) for a line without '='. It does not check values or required keys. (2) `validate_config(raw) -> dict` takes that dict of strings and returns a NEW dict without modifying its argument: `port` must be all digits and from 1 to 65535 and becomes an int, otherwise ValueError mentioning `port`; `debug` must be `true` or `false` and becomes a bool, otherwise ValueError mentioning `debug`; other keys pass through unchanged; a missing `host` raises ValueError mentioning `host`. (3) `load_config(text)` is `validate_config(parse_config(text))`. Use only the Python standard library. test_appconfig.py asserts all of this — make it pass without modifying the test file.",
+  "context": "A single-module Python project with no dependencies. Run `python3 -m unittest` to check your work.",
+  "verify": { "test": "python3 -m unittest" },
+  "protected_paths": ["test_appconfig.py"]
+}

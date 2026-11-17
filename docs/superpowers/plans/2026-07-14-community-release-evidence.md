@@ -317,7 +317,7 @@ git commit -m "feat: make eval evidence explicit and versioned"
 - Consumes: Task 2 `EvalTask` manifest fields and existing fixture-copy verifier.
 - Produces: 12 deterministic tasks across `bugfix`, `parsing`, `api`, and `refactor`, with Rust, Python standard library, and Node standard library coverage.
 
-- [ ] **Step 1: Write the failing fixture-integrity test**
+- [x] **Step 1: Write the failing fixture-integrity test**
 
 ```rust
 #[test]
@@ -340,13 +340,13 @@ fn fixture_suite_has_twelve_valid_reference_solutions() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm only four tasks/no patches exist**
+- [x] **Step 2: Run and confirm only four tasks/no patches exist**
 
 Run: `cargo test -p consilium --test eval_test fixture_suite_has_twelve_valid_reference_solutions`
 
 Expected: FAIL with task count `4` and missing `solution.patch`.
 
-- [ ] **Step 3: Add metadata to the existing four manifests**
+- [x] **Step 3: Add metadata to the existing four manifests**
 
 Use:
 
@@ -359,7 +359,7 @@ Use:
 
 Merge the corresponding three fields into each existing manifest without changing its prompt, verifier, or protected paths.
 
-- [ ] **Step 4: Add eight exact task contracts**
+- [x] **Step 4: Add eight exact task contracts**
 
 Create these tasks:
 
@@ -376,17 +376,17 @@ Create these tasks:
 
 Each starter repo contains only source, package metadata, and a protected test; the baseline test fails for the intended assertion, not because a tool/runtime is missing.
 
-- [ ] **Step 5: Generate and inspect reference patches**
+- [x] **Step 5: Generate and inspect reference patches**
 
 For each task, make the minimal solution in a disposable copy, create `git diff --binary --full-index`, restore the starter, and save the reviewed patch as `solution.patch`. The patch may change only non-protected source files and package metadata required by the starter.
 
-- [ ] **Step 6: Run fixture integrity and dry-run**
+- [x] **Step 6: Run fixture integrity and dry-run**
 
 Run: `cargo test -p consilium --test eval_test fixture_suite && cargo run -q -p consilium -- eval`
 
 Expected: PASS; dry-run lists 12 tasks and prints `no quota spent`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add eval/tasks core/tests/eval_test.rs

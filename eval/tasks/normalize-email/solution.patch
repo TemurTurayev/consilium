@@ -1,0 +1,20 @@
+diff --git a/emailnorm.py b/emailnorm.py
+index b2bc02111271a1718c1cc65a549eda0a11d2d77c..aaf65487ad5820742054df2d3cf160020439bff7 100644
+--- a/emailnorm.py
++++ b/emailnorm.py
+@@ -2,9 +2,11 @@
+ 
+ 
+ def normalize_email(raw: str) -> str:
+-    """Return `raw` as a canonical email address.
++    """Return `raw` as a canonical email address: trimmed and lowercased.
+ 
+-    TASK: this returns its input untouched. Implement the contract described in
+-    task.json; test_emailnorm.py asserts it. Do not modify the test.
++    Raises ValueError if the trimmed input has no '@'.
+     """
+-    return raw
++    email = raw.strip().lower()
++    if "@" not in email:
++        raise ValueError(f"not an email address: {raw!r}")
++    return email

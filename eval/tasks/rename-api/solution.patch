@@ -1,0 +1,27 @@
+diff --git a/user.js b/user.js
+index bc928c754bceead4765c15689de4dac57060c6bf..f00091b2e2a59c053b152afc4172ac2dd7253ae8 100644
+--- a/user.js
++++ b/user.js
+@@ -1,12 +1,16 @@
+ 'use strict';
+ 
++const util = require('node:util');
++
+ // Formats a user as `Name <email>`.
+-//
+-// TASK: the public name breaks the package's camelCase convention. Expose the
+-// function as `formatUser` and keep `format_user` working as a deprecated
+-// alias. See task.json for the contract; test/user.test.js asserts it.
+-function format_user(user) {
++function formatUser(user) {
+   return `${user.name} <${user.email}>`;
+ }
+ 
+-module.exports = { format_user };
++// The old snake_case name, kept so existing callers keep working.
++const format_user = util.deprecate(
++  formatUser,
++  'format_user() is deprecated. Use formatUser() instead.',
++);
++
++module.exports = { formatUser, format_user };

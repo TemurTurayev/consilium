@@ -1,0 +1,10 @@
+{
+  "name": "filter-active",
+  "category": "refactor",
+  "language": "node",
+  "difficulty": "small",
+  "prompt": "Refactor report.js. The rule for which users are active (`user.active` is truthy and `user.deletedAt` is falsy) is written inline inside `activeUserReport`. Extract it into an exported pure function `filterActive(users)` that returns a NEW array holding only the active users, in their original order, without modifying the input array or its objects. Then make `activeUserReport` use `filterActive`. The report's output must stay exactly the same. Export both functions from report.js. Use only the Node.js standard library; test/report.test.js asserts all of this — make it pass without modifying the test.",
+  "context": "A dependency-free CommonJS package. Run `node --test` to check your work.",
+  "verify": { "test": "node --test" },
+  "protected_paths": ["test/report.test.js"]
+}

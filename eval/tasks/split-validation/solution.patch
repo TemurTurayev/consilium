@@ -1,0 +1,65 @@
+diff --git a/appconfig.py b/appconfig.py
+index 35afaf5db2a8084091d4f677a395de094d75e63a..668172b9935ed520f5f4a7975ec5c2f93997c529 100644
+--- a/appconfig.py
++++ b/appconfig.py
+@@ -1,15 +1,9 @@
+ """Tiny `key = value` configuration loader."""
+ 
+ 
+-def load_config(text):
+-    """Parse and validate configuration text, returning a dict.
+-
+-    TASK (refactor): reading the `key = value` syntax and checking the values
+-    are tangled together in one loop. Split them into `parse_config` and
+-    `validate_config` (see task.json); `load_config` must keep returning the
+-    same result. test_appconfig.py asserts all of it — do not modify it.
+-    """
+-    config = {}
++def parse_config(text):
++    """Read `key = value` lines into a dict of raw strings (syntax only)."""
++    raw = {}
+     for number, line in enumerate(text.splitlines(), start=1):
+         line = line.strip()
+         if not line or line.startswith("#"):
+@@ -17,16 +11,31 @@ def load_config(text):
+         if "=" not in line:
+             raise ValueError(f"line {number}: expected key = value")
+         key, value = (part.strip() for part in line.split("=", 1))
+-        if key == "port":
+-            if not value.isdigit() or not 1 <= int(value) <= 65535:
+-                raise ValueError(f"port must be a number from 1 to 65535, got {value!r}")
+-            config[key] = int(value)
+-        elif key == "debug":
+-            if value not in ("true", "false"):
+-                raise ValueError(f"debug must be true or false, got {value!r}")
+-            config[key] = value == "true"
+-        else:
+-            config[key] = value
++        raw[key] = value
++    return raw
++
++
++def _convert(key, value):
++    """Check one raw value and return it in its final type."""
++    if key == "port":
++        if not value.isdigit() or not 1 <= int(value) <= 65535:
++            raise ValueError(f"port must be a number from 1 to 65535, got {value!r}")
++        return int(value)
++    if key == "debug":
++        if value not in ("true", "false"):
++            raise ValueError(f"debug must be true or false, got {value!r}")
++        return value == "true"
++    return value
++
++
++def validate_config(raw):
++    """Check parsed values and return a new dict with them converted."""
++    config = {key: _convert(key, value) for key, value in raw.items()}
+     if "host" not in config:
+         raise ValueError("host is required")
+     return config
++
++
++def load_config(text):
++    """Parse and validate configuration text, returning a dict."""
++    return validate_config(parse_config(text))

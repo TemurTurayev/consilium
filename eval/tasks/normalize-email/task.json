@@ -1,0 +1,10 @@
+{
+  "name": "normalize-email",
+  "category": "parsing",
+  "language": "python",
+  "difficulty": "small",
+  "prompt": "Implement `normalize_email(raw: str) -> str` in emailnorm.py. It returns one email address in canonical form: surrounding whitespace removed and every character lowercased. If the trimmed input contains no '@' (this includes empty or whitespace-only input), raise ValueError. Use only the Python standard library. The tests in test_emailnorm.py assert this contract — make them pass without modifying the test file.",
+  "context": "A single-module Python project with no dependencies. Run `python3 -m unittest` to check your work.",
+  "verify": { "test": "python3 -m unittest" },
+  "protected_paths": ["test_emailnorm.py"]
+}

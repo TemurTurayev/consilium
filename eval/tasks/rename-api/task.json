@@ -1,0 +1,10 @@
+{
+  "name": "rename-api",
+  "category": "api",
+  "language": "node",
+  "difficulty": "medium",
+  "prompt": "Rename the public API of user.js without breaking existing callers. Export the formatter as `formatUser(user)`; it returns `Name <email>` exactly as before and must not emit any warning. Keep `format_user` exported as a deprecated alias: calling it returns the same string as `formatUser` and makes the process emit a `DeprecationWarning` (a 'warning' event on `process` whose `name` is 'DeprecationWarning') whose message mentions both `format_user` and `formatUser`. Node's built-in `util.deprecate` or `process.emitWarning` is the intended tool; use only the Node.js standard library. test/user.test.js asserts all of this — make it pass without modifying the test.",
+  "context": "A dependency-free CommonJS package. Run `node --test` to check your work.",
+  "verify": { "test": "node --test" },
+  "protected_paths": ["test/user.test.js"]
+}

@@ -116,15 +116,64 @@ provider's tokens:
 - A result holds for this suite, at this commit, at this N. It is not a
   general claim about the models.
 
+## The built-in suite
+
+Twelve small, deterministic tasks. They use only each language's standard
+library, so a trial needs no network and no dependency install.
+
+| Task | Category | Language | Difficulty | What is asked |
+|---|---|---|---|---|
+| `add-greeting` | api | rust | small | Add a public function the test calls |
+| `clamp-retry` | bugfix | node | small | Clamp a retry count to a whole number from 0 to 10 |
+| `dedupe-stable` | refactor | rust | medium | Extract a generic, order-preserving de-duplication |
+| `filter-active` | refactor | node | small | Extract a pure active-user filter; keep the report unchanged |
+| `fix-sum` | bugfix | rust | small | Fix an off-by-one in an inclusive sum |
+| `json-content-type` | api | python | small | Return a JSON body with its `Content-Type` header |
+| `normalize-email` | parsing | python | small | Trim and lowercase an address; reject one without `@` |
+| `parse-duration` | parsing | rust | medium | Parse `1h30m`-style durations with strict validation |
+| `parse-kv` | parsing | rust | small | Split `key=value` on the first `=` |
+| `path-extension` | parsing | rust | small | Lowercase final extension; dotfiles have none |
+| `rename-api` | api | node | medium | Rename a function and keep a deprecated alias |
+| `split-validation` | refactor | python | medium | Separate parsing from validation behind the same entry point |
+
+That is three tasks per category; six in Rust, three in Python, three in Node.
+They are deliberately small. The suite can show whether an approach breaks
+easy work or wastes tokens on it; it cannot show how approaches compare on
+large or ambiguous tasks.
+
+### The suite checks itself
+
+Every task ships a reference `solution.patch`. A test applies it and proves,
+for each task, without calling any model:
+
+- the starter repository **fails** the task's own check;
+- with the reference patch applied, the same check **passes**;
+- the patch does not touch the protected tests.
+
+So each task is solvable, is not already solved, and fails because of the
+code rather than a missing tool. The same test also feeds the check
+deliberately broken fixtures and requires it to object.
+
+```sh
+cargo test -p consilium --test eval_fixture_test
+```
+
+It needs `cargo`, `python3` and `node` (18 or newer) on `PATH` and takes a few
+seconds. Live trials need the same tools, because they run the same checks.
+
 ## Task format
 
 Each task is a directory under `eval/tasks/`:
 
 ```text
 eval/tasks/<name>/
-  task.json      the manifest
-  repo/          the starter repository, copied for every trial
+  task.json        the manifest
+  repo/            the starter repository, copied for every trial
+  solution.patch   a reference solution, used only by the integrity test
 ```
+
+`solution.patch` sits outside `repo/`, so it is never copied into a trial and
+no model sees it.
 
 ```json
 {
@@ -143,3 +192,19 @@ eval/tasks/<name>/
 `verify` may hold `build`, `test`, `lint` and `timeoutSecs`; `build` and `test`
 decide the score, `lint` is advisory. `protected_paths` lists the files that
 are restored before scoring — normally the tests.
+
+### Adding a task
+
+1. Create `eval/tasks/<name>/repo/` with the source, package metadata and a
+   test. Use only the standard library. The test must fail on the starter for
+   the reason the task describes.
+2. Write `task.json`. List the test under `protected_paths`.
+3. Solve the task in a throwaway copy of `repo/` that you have committed with
+   git, and save the result of `git diff --binary --full-index` as
+   `eval/tasks/<name>/solution.patch`. Change only non-protected files.
+4. Add the task's name to `TASK_NAMES` in `core/tests/eval_fixture_test.rs` and
+   run the integrity test above.
+
+Do not run a task's tests inside `eval/tasks/<name>/repo/` itself: build output
+left there (`target/`, `__pycache__/`, `node_modules/`) fails the integrity
+test. Copy the directory somewhere else first.

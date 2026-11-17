@@ -1,0 +1,21 @@
+diff --git a/retry.js b/retry.js
+index 66f2cb4354f81a417bf7deb89111a70d6deb4a36..915ac74112e295689cafaa2bc4fd6c111f1b4f51 100644
+--- a/retry.js
++++ b/retry.js
+@@ -2,11 +2,12 @@
+ 
+ const MAX_RETRIES = 10;
+ 
+-// BUG: this should turn any requested retry count into a whole number from 0
+-// to MAX_RETRIES, but it only caps the top end. test/retry.test.js catches the
+-// rest — fix the function here. Do not modify the test.
++// Turns any requested retry count into a whole number from 0 to MAX_RETRIES.
+ function clampRetries(requested) {
+-  return Math.min(requested, MAX_RETRIES);
++  if (Number.isNaN(requested)) {
++    return 0;
++  }
++  return Math.min(Math.max(Math.trunc(requested), 0), MAX_RETRIES);
+ }
+ 
+ module.exports = { clampRetries, MAX_RETRIES };

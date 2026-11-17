@@ -1,0 +1,46 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 8257e02a21ad98763aac0340a7031b87fcc6c029..e6a44e3a39bbdf834cc63782061daa825e8140ad 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,35 @@
+-// TASK: implement `pub fn parse_duration(s: &str) -> Option<u64>` here.
+-//
+-// It parses a human duration string into total seconds. See task.json for the
+-// full contract (compound units d/h/m/s in strictly descending order, each at
+-// most once; thorough validation → None). The integration test in
+-// tests/parse_duration.rs asserts the whole contract — do not modify the test.
++/// Units in the only order they may appear in, with their length in seconds.
++const UNITS: [(char, u64); 4] = [('d', 86_400), ('h', 3_600), ('m', 60), ('s', 1)];
++
++/// Parses a human duration such as `1h30m` into total seconds.
++///
++/// The trimmed input is a sequence of `<non-negative integer><unit>` segments
++/// with units d, h, m, s in strictly descending order, each at most once.
++/// Anything else is `None`.
++pub fn parse_duration(s: &str) -> Option<u64> {
++    let input = s.trim();
++    if input.is_empty() {
++        return None;
++    }
++    let mut total: u64 = 0;
++    // Index of the first unit still allowed: later units only.
++    let mut next_unit = 0;
++    let mut digits = String::new();
++    for c in input.chars() {
++        if c.is_ascii_digit() {
++            digits.push(c);
++            continue;
++        }
++        let offset = UNITS[next_unit..].iter().position(|(unit, _)| *unit == c)?;
++        let (_, seconds) = UNITS[next_unit + offset];
++        if digits.is_empty() {
++            return None;
++        }
++        let amount: u64 = digits.parse().ok()?;
++        total = total.checked_add(amount.checked_mul(seconds)?)?;
++        digits.clear();
++        next_unit += offset + 1;
++    }
++    // Leftover digits are a number with no unit.
++    digits.is_empty().then_some(total)
++}

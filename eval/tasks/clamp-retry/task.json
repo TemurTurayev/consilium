@@ -1,0 +1,10 @@
+{
+  "name": "clamp-retry",
+  "category": "bugfix",
+  "language": "node",
+  "difficulty": "small",
+  "prompt": "There is a bug in `clampRetries(requested)` in retry.js. It must return a whole number of retries from 0 to 10 inclusive: values above 10 become 10 (including Infinity), values below 0 become 0 (including -Infinity), a fractional part is dropped (2.9 becomes 2), and NaN becomes 0. Right now it only caps the top end. Fix retry.js so that test/retry.test.js passes. Use only the Node.js standard library and do not modify the test.",
+  "context": "A dependency-free CommonJS package. Run `node --test` to check your work.",
+  "verify": { "test": "node --test" },
+  "protected_paths": ["test/retry.test.js"]
+}

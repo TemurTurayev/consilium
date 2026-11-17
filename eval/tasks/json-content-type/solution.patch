@@ -1,0 +1,21 @@
+diff --git a/responder.py b/responder.py
+index 2df1c2adcb92cda457270dc2d065c4eed4ce8c63..0fb6f182916553a330fa1ab48e6c4e369c2e02e1 100644
+--- a/responder.py
++++ b/responder.py
+@@ -1,11 +1,9 @@
+ """HTTP-style response helpers."""
+ 
++import json
+ 
+-def json_response(payload, status=200):
+-    """Return `(status, headers, body)` for a JSON API response.
+ 
+-    TASK: the body is not JSON yet and no header says what it is. Implement the
+-    contract described in task.json; test_responder.py asserts it. Do not
+-    modify the test.
+-    """
+-    return status, {}, str(payload)
++def json_response(payload, status=200):
++    """Return `(status, headers, body)` for a JSON API response."""
++    headers = {"Content-Type": "application/json"}
++    return status, headers, json.dumps(payload)
