@@ -494,4 +494,38 @@ mod tests {
             .iter()
             .any(|e| matches!(e, AgentEvent::Completed { .. })));
     }
+
+    fn first_failure(raw: &str) -> String {
+        raw.lines()
+            .flat_map(|l| GrokAdapter.parse_line(l))
+            .find_map(|e| match e {
+                AgentEvent::Failed { error } => Some(error),
+                _ => None,
+            })
+            .expect("recorded stream carries a Failed event")
+    }
+
+    /// Real grok 0.2.87 output for a retired model id (`grok-build`, recorded
+    /// 2026-11-17): the model is gone, so the ladder must mark it dead.
+    #[test]
+    fn recorded_unknown_model_is_model_unavailable() {
+        let raw = include_str!("../../tests/fixtures/grok/recorded/error_unknown_model.jsonl");
+        let error = first_failure(raw);
+        assert!(error.contains("unknown model id"), "got: {error}");
+        assert_eq!(
+            GrokAdapter.classify_failure(&error),
+            FailureKind::ModelUnavailable
+        );
+    }
+
+    /// Real grok 0.2.87 output once xAI started refusing old clients (HTTP 426,
+    /// recorded 2026-11-17). The CLI is too old — the MODEL is fine — so this
+    /// must not mark the model dead.
+    #[test]
+    fn recorded_outdated_cli_is_not_model_unavailable() {
+        let raw = include_str!("../../tests/fixtures/grok/recorded/error_outdated_cli.jsonl");
+        let error = first_failure(raw);
+        assert!(error.contains("outdated"), "got: {error}");
+        assert_eq!(GrokAdapter.classify_failure(&error), FailureKind::Transient);
+    }
 }

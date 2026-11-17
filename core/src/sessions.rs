@@ -67,9 +67,21 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) -> String {
     String::from_utf8_lossy(&tail).into_owned()
 }
 
-// Design note: the double-terminal-event case (adapter emits Completed via
-// parsing AND process exit status adds Failed) is deliberately NOT deduplicated
-// in M1 — the orchestrator (M2) treats the first terminal event as authoritative.
+/// The failure message for a non-zero exit: the status plus whatever the CLI
+/// explained on stderr.
+fn exit_error(status: &str, stderr_tail: &str) -> String {
+    let stderr_tail = stderr_tail.trim();
+    if stderr_tail.is_empty() {
+        format!("process exited with {status}")
+    } else {
+        format!("process exited with {status}; stderr tail: {stderr_tail}")
+    }
+}
+
+// Design note: the double-terminal-event case (a streaming adapter emits a
+// terminal event via parsing AND the process exit status adds Failed) is
+// deliberately NOT deduplicated — the orchestrator treats the first terminal
+// event as authoritative.
 
 /// Spawns the adapter's CLI process and streams normalized events.
 /// The channel closes when the process exits and all events are delivered.
@@ -122,32 +134,32 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
                 }
             }
         }
-        for ev in adapter.parse_final(&full_output) {
-            if tx.send(ev).await.is_err() {
-                // Receiver dropped → returning drops the child, which is
-                // SIGKILLed (kill_on_drop). The stderr-drain task then ends
-                // when the killed child's stderr closes.
-                return;
-            }
-        }
+        // stdout is at EOF, so the process is done (or about to be): settle its
+        // exit status BEFORE the adapter's end-of-stream parsing. A non-zero
+        // exit is reported first — the first terminal event is authoritative —
+        // so the CLI's own stderr explanation is never masked by an adapter's
+        // generic end-of-stream fallback ("produced no output"), and a run that
+        // died mid-answer is never reported as completed on its partial text.
+        // Streaming adapters are unaffected: their terminal event was already
+        // sent line by line above.
         let stderr_tail = stderr_task.await.unwrap_or_default();
-        match child.wait().await {
+        let exit_failure = match child.wait().await {
             Ok(status) if !status.success() => {
                 tracing::warn!(session = %task_id, %status, "session process exited non-zero");
-                let mut error = format!("process exited with {status}");
-                if !stderr_tail.trim().is_empty() {
-                    error.push_str(&format!("; stderr tail: {}", stderr_tail.trim()));
-                }
-                let _ = tx.send(AgentEvent::Failed { error }).await;
+                Some(exit_error(&status.to_string(), &stderr_tail))
             }
-            Err(e) => {
-                let _ = tx
-                    .send(AgentEvent::Failed {
-                        error: e.to_string(),
-                    })
-                    .await;
+            Err(e) => Some(e.to_string()),
+            Ok(_) => None,
+        };
+        let final_events = exit_failure
+            .map(|error| AgentEvent::Failed { error })
+            .into_iter()
+            .chain(adapter.parse_final(&full_output));
+        for ev in final_events {
+            if tx.send(ev).await.is_err() {
+                // Receiver dropped — nothing left to deliver to.
+                return;
             }
-            _ => {}
         }
     });
 

@@ -164,3 +164,84 @@ async fn advisory_plus_write_combination_is_rejected() {
     let err = sessions::spawn(adapter, bad).unwrap_err();
     assert!(err.to_string().contains("contradictory RunRequest"));
 }
+
+/// Mimics `agy`: a non-streaming CLI whose adapter reports "produced no output"
+/// when stdout is empty (delegates to the real `GeminiAdapter::parse_final`).
+struct NonStreamingCli {
+    script: &'static str,
+}
+
+impl Adapter for NonStreamingCli {
+    fn provider(&self) -> Provider {
+        Provider::Gemini
+    }
+    fn cli_binary(&self) -> &'static str {
+        "sh"
+    }
+    fn build_command(&self, _req: &RunRequest) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(self.script);
+        cmd
+    }
+    fn parse_final(&self, full_output: &str) -> Vec<AgentEvent> {
+        consilium::adapters::gemini::GeminiAdapter.parse_final(full_output)
+    }
+}
+
+fn first_terminal(events: &[AgentEvent]) -> Option<&AgentEvent> {
+    events
+        .iter()
+        .find(|e| matches!(e, AgentEvent::Failed { .. } | AgentEvent::Completed { .. }))
+}
+
+/// Regression (agy 1.5, 2026-11): an unknown `--model` makes agy print the real
+/// reason on stderr, leave stdout empty and exit 1. The first terminal event is
+/// authoritative, so it must carry the CLI's own message — not the adapter's
+/// generic "produced no output" fallback, which hid the cause and made the
+/// failure look transient instead of "model unavailable".
+#[tokio::test]
+async fn nonzero_exit_stderr_outranks_the_empty_output_fallback() {
+    let adapter = NonStreamingCli {
+        script: "echo 'error: invalid model selection' >&2; exit 1",
+    };
+    let events = collect(sessions::spawn(Arc::new(adapter), req()).unwrap()).await;
+    assert!(
+        matches!(
+            first_terminal(&events),
+            Some(AgentEvent::Failed { error }) if error.contains("invalid model selection")
+        ),
+        "first terminal event must carry stderr, got: {events:?}"
+    );
+}
+
+/// A CLI that dies mid-answer (non-zero exit after partial stdout) has failed:
+/// the partial text must not be reported as a completed run.
+#[tokio::test]
+async fn nonzero_exit_outranks_partial_output() {
+    let adapter = NonStreamingCli {
+        script: "echo 'half an answer'; echo 'stream timed out' >&2; exit 1",
+    };
+    let events = collect(sessions::spawn(Arc::new(adapter), req()).unwrap()).await;
+    assert!(
+        matches!(
+            first_terminal(&events),
+            Some(AgentEvent::Failed { error }) if error.contains("stream timed out")
+        ),
+        "a crashed run must fail, got: {events:?}"
+    );
+    // The partial text is still surfaced for diagnostics.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Message { text } if text == "half an answer")));
+}
+
+/// Exit 0 with empty stdout keeps the adapter's own explanation.
+#[tokio::test]
+async fn clean_exit_with_no_output_keeps_the_adapter_failure() {
+    let adapter = NonStreamingCli { script: "exit 0" };
+    let events = collect(sessions::spawn(Arc::new(adapter), req()).unwrap()).await;
+    assert!(matches!(
+        first_terminal(&events),
+        Some(AgentEvent::Failed { error }) if error.contains("produced no output")
+    ));
+}

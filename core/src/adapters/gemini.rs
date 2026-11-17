@@ -5,13 +5,15 @@ use tokio::process::Command;
 /// The "Gemini" provider is reached through the **Antigravity CLI** (`agy`), not
 /// the retired standalone `gemini` CLI (Google deprecated free-tier Gemini Code
 /// Assist for it). `agy` is a multi-model gateway driven headlessly with
-/// `agy -p <prompt> --model "<model>"`, where `<model>` is an Antigravity display
-/// name (e.g. "Gemini 3.1 Pro (High)" — run `agy models` to list them).
+/// `agy -p <prompt> --model "<model>"`, where `<model>` is an Antigravity model
+/// id (e.g. `gemini-4-argon-high`) or its display name ("Gemini 4 Argon
+/// (High)") — run `agy models` to list both. Verified against agy 1.5.10.
 ///
-/// `agy -p` prints a plain-text response (no JSON/usage envelope), so unlike the
-/// old gemini CLI there is no per-run token accounting — quota stays at 0 for
-/// agy runs. Worker (write) runs pass `--dangerously-skip-permissions` so the
-/// agent applies file edits unattended.
+/// `agy -p` prints a plain-text response by default, so there is no per-run
+/// token accounting — the engine records a flagged estimate instead. (agy 1.5
+/// also offers `--output-format json` with a real `usage` block; adopting it is
+/// a tracked follow-up.) Worker (write) runs pass
+/// `--dangerously-skip-permissions` so the agent applies file edits unattended.
 pub struct GeminiAdapter;
 
 impl Adapter for GeminiAdapter {
@@ -25,7 +27,15 @@ impl Adapter for GeminiAdapter {
 
     fn classify_failure(&self, error: &str) -> FailureKind {
         let e = error.to_ascii_lowercase();
-        if e.contains("404") || e.contains("unknown model") || e.contains("not found") {
+        // "invalid model selection … is not recognized as a known model" is what
+        // agy 1.5 prints for a retired/unknown `--model` (see the recorded
+        // fixture); the older phrasings are kept for earlier CLI versions.
+        if e.contains("invalid model selection")
+            || e.contains("not recognized as a known model")
+            || e.contains("404")
+            || e.contains("unknown model")
+            || e.contains("not found")
+        {
             FailureKind::ModelUnavailable
         } else if e.contains("resource_exhausted")
             || e.contains("429")
@@ -137,6 +147,19 @@ mod tests {
     fn classifies_model_unavailable() {
         assert_eq!(
             GeminiAdapter.classify_failure("error: unknown model 'x'"),
+            FailureKind::ModelUnavailable
+        );
+    }
+
+    /// Real agy 1.5 stderr for a model name it no longer knows (recorded
+    /// 2026-11-17, when "Gemini 3.1 Pro (High)" had been retired). It must mark
+    /// the model dead so the ladder moves on instead of retrying a dead name.
+    #[test]
+    fn classifies_recorded_unknown_model_error_as_unavailable() {
+        let stderr = include_str!("../../tests/fixtures/gemini/recorded/unknown_model.stderr.txt");
+        let error = format!("process exited with exit status: 1; stderr tail: {stderr}");
+        assert_eq!(
+            GeminiAdapter.classify_failure(&error),
             FailureKind::ModelUnavailable
         );
     }

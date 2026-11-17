@@ -267,15 +267,36 @@ mod tests {
             .iter()
             .any(|e| matches!(e, AgentEvent::Message { .. })));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Usage { .. })));
+        // Recorded from codex-cli 0.160.1 (2026-11-17).
         assert!(events.iter().any(|e| matches!(
             e,
             AgentEvent::Usage {
-                input_tokens: 10324,
+                input_tokens: 17204,
                 output_tokens: 5
             }
         )));
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::Completed { .. })));
+    }
+
+    /// Real codex-cli 0.160.1 stream for a model the account cannot run
+    /// (`gpt-5.5` on a ChatGPT plan that no longer offers it, 2026-11-17). The
+    /// first terminal event must be a failure classified as "model unavailable"
+    /// so the failover ladder marks it dead and moves on.
+    #[test]
+    fn recorded_unsupported_model_fails_as_model_unavailable() {
+        let raw = include_str!("../../tests/fixtures/codex/recorded/model_unavailable.jsonl");
+        let events = parse_all(raw);
+        let first_terminal = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Failed { .. } | AgentEvent::Completed { .. }));
+        let Some(AgentEvent::Failed { error }) = first_terminal else {
+            panic!("expected a Failed terminal event, got: {events:?}");
+        };
+        assert_eq!(
+            CodexAdapter.classify_failure(error),
+            FailureKind::ModelUnavailable
+        );
     }
 }

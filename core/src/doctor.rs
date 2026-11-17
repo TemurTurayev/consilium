@@ -224,7 +224,10 @@ pub async fn preflight(config: &Config, quota: &QuotaStore) -> ModelProbeReport 
 /// no correctness risk in the (necessarily fuzzy) string matching.
 pub(crate) fn remediation_hint(detail: &str) -> &'static str {
     let d = detail.to_ascii_lowercase();
-    if d.contains("no longer supported") || d.contains("ineligible") || d.contains("migrate") {
+    if d.contains("outdated") || d.contains("upgrade required") {
+        "this CLI version is too old for the provider — update the CLI (its message names the command), then re-run"
+    } else if d.contains("no longer supported") || d.contains("ineligible") || d.contains("migrate")
+    {
         "provider tier looks deprecated — migrate this CLI's auth (a supported tier or API key)"
     } else if d.contains("401")
         || d.contains("authenticat")
@@ -235,7 +238,7 @@ pub(crate) fn remediation_hint(detail: &str) -> &'static str {
     } else if d.contains("rate") && d.contains("limit") {
         "rate-limited — wait and retry, or reduce concurrency"
     } else if d.contains("no output") || d.contains("produced no") {
-        "CLI returned nothing — run it directly (e.g. `gemini -p hi`) to see its error; usually an expired/unsupported session"
+        "CLI returned nothing — run it directly (e.g. `agy -p hi`) to see its error; usually an expired/unsupported session"
     } else {
         "re-authenticate or update this CLI, then re-run `consilium doctor --models`"
     }
@@ -346,6 +349,13 @@ mod tests {
                 .contains("migrate")
         );
         assert!(remediation_hint("error: rate limit exceeded").contains("rate-limited"));
+        // Real grok 0.2.87 refusal (HTTP 426) once xAI required a newer client.
+        assert!(remediation_hint(
+            "API error (status 426 Upgrade Required): Your Grok CLI version (0.2.87) is outdated. Please update to version 1.0.13 or later via `grok update`"
+        )
+        .contains("update the CLI"));
+        // The "returned nothing" hint must name a CLI that still exists.
+        assert!(!remediation_hint("agy (antigravity) produced no output").contains("gemini -p"));
         assert!(!remediation_hint("some unrecognized failure").is_empty());
     }
 
