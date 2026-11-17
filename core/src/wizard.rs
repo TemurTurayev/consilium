@@ -140,8 +140,14 @@ pub async fn run_init_wizard(quota: &QuotaStore, target: &Path, force: bool) -> 
     println!("\nFinding the best model each provider can run on your plan…");
     let resolved = models::resolve_top_models_for(&ready, quota).await;
     let live = models::live_models(&resolved);
-    for (p, model) in &live {
-        println!("  ✓ {:8} {model}", p.as_str());
+    for (p, top) in &resolved {
+        match top {
+            models::TopModel::Live(model) => println!("  ✓ {:8} {model}", p.as_str()),
+            models::TopModel::NoLiveModel | models::TopModel::CliMissing => println!(
+                "  ✗ {:8} no model answered just now (rate limit or a temporary failure) — left out of this lineup; re-run `consilium init` later to add it",
+                p.as_str()
+            ),
+        }
     }
     let available: Vec<CatalogEntry> = models::live_subset(&catalog(), &live);
     if available.is_empty() {

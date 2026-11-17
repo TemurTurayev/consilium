@@ -16,7 +16,7 @@
 //!
 //! `consilium models [--write]` wires these together.
 
-use crate::adapters::CLI_DEFAULT_MODEL;
+use crate::adapters::{FailureKind, CLI_DEFAULT_MODEL};
 use crate::catalog::{self, CatalogEntry};
 use crate::config::{Config, ModelCandidate, RoleConfig, RolesConfig};
 use crate::doctor;
@@ -64,11 +64,34 @@ pub enum TopModel {
     CliMissing,
 }
 
+/// What one probe result means for the best-first search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Walk {
+    /// The model answered — this is the account's best live model.
+    Found,
+    /// The model is unavailable to this account — try the next tier down.
+    NextTier,
+    /// Anything else (rate limit, timeout, auth, network): this says nothing
+    /// about what the plan includes, so stop without an answer rather than
+    /// conclude the account is limited to a lower tier.
+    Stop,
+}
+
+pub(crate) fn walk_step(probe: &doctor::ModelProbe) -> Walk {
+    match probe.kind {
+        None => Walk::Found,
+        Some(FailureKind::ModelUnavailable) => Walk::NextTier,
+        Some(FailureKind::RateLimited | FailureKind::Transient) => Walk::Stop,
+    }
+}
+
 /// Probe a provider's catalog models best/newest first and return the first that
-/// answers a ~1-token liveness probe — the best model this account can run. If
-/// none answers, try the CLI's own default model: it still works when every
-/// catalog id has been retired or is gated on this plan. `None` when nothing
-/// answers. I/O (spawns the CLI); not unit-tested.
+/// answers a ~1-token liveness probe — the best model this account can run. A
+/// tier is skipped only when the provider says the model is unavailable; once
+/// every catalog id is unavailable, the CLI's own default model is tried (it
+/// still works when the whole catalog has been retired or is gated on this
+/// plan). `None` when nothing answers or the search was cut short by a
+/// temporary failure (see `Walk::Stop`). I/O (spawns the CLI); not unit-tested.
 pub async fn best_live_model(provider: Provider, quota: &QuotaStore) -> Option<ModelCandidate> {
     let candidates = catalog::entries_for(provider)
         .into_iter()
@@ -76,8 +99,10 @@ pub async fn best_live_model(provider: Provider, quota: &QuotaStore) -> Option<M
         .chain(std::iter::once(CLI_DEFAULT_MODEL.to_string()));
     for model in candidates {
         let adapter = doctor::adapter_for(provider);
-        if doctor::probe_model(adapter, &model, quota).await.ok {
-            return Some(ModelCandidate { provider, model });
+        match walk_step(&doctor::probe_model(adapter, &model, quota).await) {
+            Walk::Found => return Some(ModelCandidate { provider, model }),
+            Walk::NextTier => continue,
+            Walk::Stop => return None,
         }
     }
     None
@@ -191,17 +216,30 @@ fn upgrade_model(provider: Provider, model: &str, chosen: &[(Provider, String)])
     }
 }
 
+/// Upgrades every rung of a role's ladder, then drops any rung that now
+/// repeats an earlier one (two tiers can collapse onto the same live model).
 fn upgrade_role(role: &RoleConfig, chosen: &[(Provider, String)]) -> RoleConfig {
-    RoleConfig {
+    let primary = ModelCandidate {
+        provider: role.provider,
         model: upgrade_model(role.provider, &role.model, chosen),
-        fallbacks: role
-            .fallbacks
-            .iter()
-            .map(|f| ModelCandidate {
-                provider: f.provider,
-                model: upgrade_model(f.provider, &f.model, chosen),
-            })
-            .collect(),
+    };
+    let fallbacks = role
+        .fallbacks
+        .iter()
+        .map(|f| ModelCandidate {
+            provider: f.provider,
+            model: upgrade_model(f.provider, &f.model, chosen),
+        })
+        .fold(Vec::new(), |kept: Vec<ModelCandidate>, rung| {
+            if rung == primary || kept.contains(&rung) {
+                kept
+            } else {
+                kept.into_iter().chain(std::iter::once(rung)).collect()
+            }
+        });
+    RoleConfig {
+        model: primary.model,
+        fallbacks,
         ..role.clone()
     }
 }
@@ -386,6 +424,56 @@ mod tests {
         let upgraded = upgrade_config(&v0_2_config(), &account);
         assert_eq!(upgraded.roles.workers[0].model, CLI_DEFAULT_MODEL);
         assert_eq!(upgraded.roles.reviewer.model, CLI_DEFAULT_MODEL);
+    }
+
+    fn failed_probe(kind: FailureKind) -> doctor::ModelProbe {
+        doctor::ModelProbe {
+            provider: Provider::Claude,
+            model: "claude-opus-5-5".into(),
+            ok: false,
+            kind: Some(kind),
+            detail: "boom".into(),
+        }
+    }
+
+    /// A rate limit or a timeout says nothing about what a plan includes. Only
+    /// "this model is unavailable" may send the search down a tier — otherwise
+    /// one throttled probe would make `models --write` downgrade a healthy
+    /// config for good.
+    #[test]
+    fn only_an_unavailable_model_sends_the_search_down_a_tier() {
+        assert_eq!(
+            walk_step(&failed_probe(FailureKind::ModelUnavailable)),
+            Walk::NextTier
+        );
+        assert_eq!(
+            walk_step(&failed_probe(FailureKind::RateLimited)),
+            Walk::Stop
+        );
+        assert_eq!(walk_step(&failed_probe(FailureKind::Transient)), Walk::Stop);
+        let alive = doctor::ModelProbe {
+            ok: true,
+            kind: None,
+            ..failed_probe(FailureKind::Transient)
+        };
+        assert_eq!(walk_step(&alive), Walk::Found);
+    }
+
+    /// An account that only runs Sonnet turns [opus, sonnet, default] into
+    /// sonnet twice. The duplicate rung must go: on a transient failure it
+    /// would burn a second full retry budget on a rung that just failed.
+    #[test]
+    fn upgrade_drops_rungs_that_collapse_onto_an_earlier_one() {
+        let account = chosen(&[(Provider::Claude, "claude-sonnet-5-5")]);
+        let upgraded = upgrade_config(&Config::default(), &account);
+        let models: Vec<String> = upgraded
+            .roles
+            .conductor
+            .ladder()
+            .into_iter()
+            .map(|c| c.model)
+            .collect();
+        assert_eq!(models, ["claude-sonnet-5-5", CLI_DEFAULT_MODEL]);
     }
 
     #[test]

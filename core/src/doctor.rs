@@ -76,6 +76,9 @@ pub struct ModelProbe {
     pub provider: Provider,
     pub model: String,
     pub ok: bool,
+    /// Why the probe failed; `None` when it answered. A timeout or a launch
+    /// error counts as `Transient`.
+    pub kind: Option<FailureKind>,
     /// Human-readable detail: "ok", "unavailable", "rate-limited", or "transient: …"
     pub detail: String,
 }
@@ -143,36 +146,26 @@ pub async fn probe_model(adapter: Arc<dyn Adapter>, model: &str, quota: &QuotaSt
     // would wrongly abort the conduct/auto preflight gate). A genuinely dead model
     // costs this once each — rare, and `--no-preflight` skips the gate entirely.
     let timeout = Duration::from_secs(120);
-    match run_to_completion(adapter.clone(), req, quota, timeout).await {
+    let (kind, detail) = match run_to_completion(adapter.clone(), req, quota, timeout).await {
         Ok(outcome) => match outcome.status {
-            RunStatus::Completed => ModelProbe {
-                provider,
-                model: model.to_string(),
-                ok: true,
-                detail: "ok".to_string(),
-            },
+            RunStatus::Completed => (None, "ok".to_string()),
             RunStatus::Failed(ref e) => {
                 let kind = adapter.classify_failure(e);
-                ModelProbe {
-                    provider,
-                    model: model.to_string(),
-                    ok: false,
-                    detail: format!("{}: {}", probe_label(kind), e),
-                }
+                (Some(kind), format!("{}: {}", probe_label(kind), e))
             }
-            RunStatus::TimedOut => ModelProbe {
-                provider,
-                model: model.to_string(),
-                ok: false,
-                detail: "timed out".to_string(),
-            },
+            RunStatus::TimedOut => (Some(FailureKind::Transient), "timed out".to_string()),
         },
-        Err(e) => ModelProbe {
-            provider,
-            model: model.to_string(),
-            ok: false,
-            detail: format!("transient failure: {e}"),
-        },
+        Err(e) => (
+            Some(FailureKind::Transient),
+            format!("transient failure: {e}"),
+        ),
+    };
+    ModelProbe {
+        provider,
+        model: model.to_string(),
+        ok: kind.is_none(),
+        kind,
+        detail,
     }
 }
 
@@ -218,17 +211,38 @@ pub(crate) fn split_cli_defaults(
         .partition(|c| c.model != CLI_DEFAULT_MODEL)
 }
 
-/// Whether a provider's CLI-default rung is worth a probe: only when none of
-/// its named models answered, i.e. when the default is what a run would
-/// actually land on. It is a last resort, so probing it on every healthy run
-/// would spend a call per provider (and ~40s for `agy`) for nothing.
+/// Every role's full ladder (primary, then fallbacks), one entry per role.
+pub(crate) fn role_ladders(config: &Config) -> Vec<Vec<ModelCandidate>> {
+    let r = &config.roles;
+    [&r.conductor, &r.chairman, &r.reviewer, &r.supervisor]
+        .into_iter()
+        .chain(r.workers.iter())
+        .map(|role| role.ladder())
+        .collect()
+}
+
+/// Whether a CLI-default rung is worth a probe: only when some role would
+/// actually land on it, i.e. its ladder contains the rung and no rung before
+/// it answered. It is a last resort, so probing it on every healthy run would
+/// spend a call per provider (and ~40s for `agy`) for nothing. Judged per
+/// ladder, not per provider: a role whose own named models are dead still
+/// needs its default probed even if another role's model answered.
 pub(crate) fn needs_cli_default_probe(
-    provider: Provider,
+    default_rung: &ModelCandidate,
+    ladders: &[Vec<ModelCandidate>],
     probes: &[(ModelCandidate, ModelProbe)],
 ) -> bool {
-    !probes
-        .iter()
-        .any(|(candidate, probe)| candidate.provider == provider && probe.ok)
+    let answered = |rung: &ModelCandidate| {
+        probes
+            .iter()
+            .any(|(candidate, probe)| candidate == rung && probe.ok)
+    };
+    ladders.iter().any(|ladder| {
+        ladder
+            .iter()
+            .position(|rung| rung == default_rung)
+            .is_some_and(|at| !ladder[..at].iter().any(answered))
+    })
 }
 
 async fn probe_candidate(
@@ -245,12 +259,13 @@ async fn probe_candidate(
 /// `needs_cli_default_probe`).
 pub async fn preflight(config: &Config, quota: &QuotaStore) -> ModelProbeReport {
     let (named, defaults) = split_cli_defaults(collect_distinct_model_pairs(config));
+    let ladders = role_ladders(config);
     let mut probes = Vec::new();
     for candidate in named {
         probes.push(probe_candidate(candidate, quota).await);
     }
     for candidate in defaults {
-        if needs_cli_default_probe(candidate.provider, &probes) {
+        if needs_cli_default_probe(&candidate, &ladders, &probes) {
             probes.push(probe_candidate(candidate, quota).await);
         }
     }
@@ -349,6 +364,7 @@ mod tests {
             provider,
             model: model.to_string(),
             ok,
+            kind: (!ok).then_some(FailureKind::Transient),
             detail: detail.to_string(),
         }
     }
@@ -534,8 +550,12 @@ mod tests {
         );
     }
 
+    fn ladder(rungs: &[(Provider, &str)]) -> Vec<ModelCandidate> {
+        rungs.iter().map(|(p, m)| candidate(*p, m)).collect()
+    }
+
     #[test]
-    fn cli_default_is_probed_only_when_no_named_model_of_its_provider_answered() {
+    fn cli_default_is_probed_only_when_a_role_would_actually_land_on_it() {
         let probes = vec![
             (
                 candidate(Provider::Claude, "claude-opus-5-5"),
@@ -546,12 +566,58 @@ mod tests {
                 probe(Provider::Codex, "gpt-6.1-sol", false, "unavailable"),
             ),
         ];
-        // claude answered on a named model → its last-resort rung is not worth a probe
-        assert!(!needs_cli_default_probe(Provider::Claude, &probes));
-        // codex's only named model is dead → the CLI default is what will run
-        assert!(needs_cli_default_probe(Provider::Codex, &probes));
-        // a provider with no named model at all (a `default`-only lineup)
-        assert!(needs_cli_default_probe(Provider::Gemini, &probes));
+        let claude_default = candidate(Provider::Claude, CLI_DEFAULT_MODEL);
+        let codex_default = candidate(Provider::Codex, CLI_DEFAULT_MODEL);
+        let gemini_default = candidate(Provider::Gemini, CLI_DEFAULT_MODEL);
+        let ladders = vec![
+            ladder(&[
+                (Provider::Claude, "claude-opus-5-5"),
+                (Provider::Claude, CLI_DEFAULT_MODEL),
+            ]),
+            ladder(&[
+                (Provider::Codex, "gpt-6.1-sol"),
+                (Provider::Codex, CLI_DEFAULT_MODEL),
+            ]),
+            ladder(&[(Provider::Gemini, CLI_DEFAULT_MODEL)]),
+        ];
+        // an earlier rung answered → the last-resort rung is not worth a probe
+        assert!(!needs_cli_default_probe(&claude_default, &ladders, &probes));
+        // the only named rung is dead → the CLI default is what will run
+        assert!(needs_cli_default_probe(&codex_default, &ladders, &probes));
+        // a `default`-only role always lands on it
+        assert!(needs_cli_default_probe(&gemini_default, &ladders, &probes));
+    }
+
+    /// The conductor gate looks at the conductor's own ladder. If its only
+    /// named model is dead, its CLI-default rung must be probed even though
+    /// another role's Claude model answered — otherwise the gate would stop a
+    /// run that the default rung can carry.
+    #[test]
+    fn cli_default_is_judged_per_ladder_not_per_provider() {
+        let probes = vec![
+            (
+                candidate(Provider::Claude, "claude-opus-5-5"),
+                probe(Provider::Claude, "claude-opus-5-5", false, "unavailable"),
+            ),
+            (
+                candidate(Provider::Claude, "claude-sonnet-5-5"),
+                probe(Provider::Claude, "claude-sonnet-5-5", true, "ok"),
+            ),
+        ];
+        let ladders = vec![
+            // conductor: opus is dead, so it lands on the CLI default
+            ladder(&[
+                (Provider::Claude, "claude-opus-5-5"),
+                (Provider::Claude, CLI_DEFAULT_MODEL),
+            ]),
+            // a worker pinned to sonnet, which answers
+            ladder(&[(Provider::Claude, "claude-sonnet-5-5")]),
+        ];
+        assert!(needs_cli_default_probe(
+            &candidate(Provider::Claude, CLI_DEFAULT_MODEL),
+            &ladders,
+            &probes
+        ));
     }
 
     #[test]
