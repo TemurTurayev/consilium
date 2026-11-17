@@ -27,7 +27,16 @@ consilium council "What is the safest way to simplify this module?"
 ```
 
 `consilium init` detects the providers available on your machine, explains any
-missing login step and creates `consilium.config.json`.
+missing login step, finds the best model each of your subscriptions can run and
+creates `consilium.config.json`. It takes a couple of minutes: every provider is
+asked a one-word question to prove it answers.
+
+If a run later reports that a model is unavailable (providers rename and retire
+models every few months), let Consilium switch to current ones:
+
+```sh
+consilium models --write
+```
 
 Not ready to connect a provider? You can explore the interface with a built-in
 demo that does not start agents or spend quota:
@@ -39,7 +48,7 @@ npm install
 npm run dev
 ```
 
-Open the local address printed by Vite and choose **Demo run**.
+Open the local address printed by Vite and choose **Try the demo**.
 
 ## Three useful commands
 
@@ -136,7 +145,7 @@ On Windows, use WSL. Native Windows is not supported yet.
 | Command | Purpose |
 |---|---|
 | `consilium init` | Detect providers and create a configuration |
-| `consilium doctor` | Check that configured CLIs are usable |
+| `consilium doctor` | Check that the provider CLIs are installed (`--models` also probes every configured model) |
 | `consilium auth` | Show provider authentication state and next steps |
 | `consilium run --provider codex "..."` | Send one prompt to one provider |
 | `consilium council "..."` | Deliberate on a question with multiple agents |
@@ -144,7 +153,7 @@ On Windows, use WSL. Native Windows is not supported yet.
 | `consilium conduct "..."` | Split, implement, verify and review a coding task |
 | `consilium auto "..." --check "..."` | Run the complete automated pipeline |
 | `consilium quota` | Show local provider usage counters |
-| `consilium models` | Check the best currently available provider models |
+| `consilium models` | Find the best model each provider can run on your account (`--write` updates the configuration) |
 | `consilium serve` | Start the localhost server for the web interface |
 | `consilium mcp` | Run the MCP server for an attached conductor |
 
@@ -166,6 +175,19 @@ checks, add or edit its `verify` section:
 The snippet above is one section of the generated file, not a complete
 configuration. Start with the wizard's defaults and customize roles only when
 you need to.
+
+Each role names a provider and a model, plus optional `fallbacks` tried in
+order when the model is unavailable or rate-limited. The model name `default`
+means "let the provider's CLI choose": it never goes out of date and always
+fits your plan, so the generated ladders end with it.
+
+```json
+"reviewer": {
+  "provider": "codex",
+  "model": "gpt-6.1-sol",
+  "fallbacks": [{ "provider": "codex", "model": "default" }]
+}
+```
 
 ## Safety and privacy
 
@@ -195,7 +217,7 @@ npm run dev
 ```
 
 The interface shows a live session, provider activity and quota information.
-The **Demo run** button works without the backend.
+The **Try the demo** button works without the backend.
 
 ## Project status
 
