@@ -935,12 +935,16 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let deps = ConfigEvalDeps { config };
+            // Recorded before the first model call: when this run started and
+            // which commit of the suite it measured.
+            let meta = eval::ReportMeta::capture(&suite);
             let report = eval::run_suite(
                 &tasks,
                 &approaches,
                 trials,
                 &deps,
                 std::time::Duration::from_secs(timeout),
+                meta,
             )
             .await?;
 

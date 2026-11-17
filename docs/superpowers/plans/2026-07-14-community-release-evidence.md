@@ -179,7 +179,7 @@ git commit -m "docs: lead with the safe Consilium workflow"
 - Consumes: existing `Approach`, `run_verify`, conduct attempt/fallback metadata, and provider quota snapshots.
 - Produces: `EVAL_SCHEMA_VERSION`, `VerificationStatus`, expanded `EvalTask`, `ProviderTokens`, `TrialResult`, `MetricSummary`, `SuiteReport`, and schema-v2 JSON/Markdown.
 
-- [ ] **Step 1: Write failing schema/statistics tests**
+- [x] **Step 1: Write failing schema/statistics tests**
 
 ```rust
 #[test]
@@ -208,13 +208,13 @@ fn variance_is_absent_for_n1_and_present_for_n2() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm schema v1 cannot satisfy tests**
+- [x] **Step 2: Run and confirm schema v1 cannot satisfy tests**
 
 Run: `cargo test -p consilium --test eval_test report_v2 && cargo test -p consilium orchestrator::eval::tests::variance`
 
 Expected: FAIL with missing fields/types.
 
-- [ ] **Step 3: Define the exact v2 schema**
+- [x] **Step 3: Define the exact v2 schema**
 
 ```rust
 pub const EVAL_SCHEMA_VERSION: u32 = 2;
@@ -272,23 +272,23 @@ pub struct SuiteReport {
 
 Use sample standard deviation (`n - 1` denominator) only for N ≥ 2. Keep a compatibility reader for old ignored local results if any comparison command reads them; new writes are v2 only.
 
-- [ ] **Step 4: Capture attempts/fallbacks without changing score semantics**
+- [x] **Step 4: Capture attempts/fallbacks without changing score semantics**
 
 Independent external verification remains the only score: `Passed` only if commands ran and all passed, `Failed` if any command ran and failed, `NotRun` when no verifier command resolved. Pull conduct attempts/fallbacks from its outcome transcript metadata and solo fallbacks from `run_with_failover`; pipeline self-report remains informational.
 
-- [ ] **Step 5: Preserve and test the quota gate**
+- [x] **Step 5: Preserve and test the quota gate**
 
 Run: `cargo run -q -p consilium -- eval`
 
 Expected: exit success, list tasks/approaches/call estimates, print the exact phrase `no quota spent`, create no result file, and open no provider configuration.
 
-- [ ] **Step 6: Run all eval tests**
+- [x] **Step 6: Run all eval tests**
 
 Run: `cargo test -p consilium --test eval_test && cargo test -p consilium orchestrator::eval`
 
 Expected: PASS for v2 serialization, Grok totals, verification states, category grouping, N, and variance.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add core/src/orchestrator/eval.rs core/src/main.rs core/tests/eval_test.rs eval/README.md

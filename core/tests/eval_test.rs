@@ -10,7 +10,10 @@ use consilium::config::{ModelCandidate, VerifyConfig};
 use consilium::event::Provider;
 use consilium::orchestrator::conduct::{ConductDeps, RoleHandle};
 use consilium::orchestrator::council::CouncilMember;
-use consilium::orchestrator::eval::{self, Approach, EvalDeps};
+use consilium::orchestrator::eval::{
+    self, Approach, EvalDeps, ProviderTokens, ReportMeta, SuiteReport, TrialResult,
+    VerificationStatus,
+};
 use consilium::orchestrator::resilience::Rung;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +51,9 @@ fn make_suite_full(
     }
     let manifest = serde_json::json!({
         "name": "demo",
+        "category": "bugfix",
+        "language": "shell",
+        "difficulty": "small",
         "prompt": "do the thing",
         "verify": { "test": test_cmd },
         "protected_paths": protected,
@@ -62,6 +68,24 @@ fn make_suite_full(
 
 fn make_suite(test_cmd: &str) -> tempfile::TempDir {
     make_suite_full(test_cmd, &[], &[])
+}
+
+fn meta() -> ReportMeta {
+    ReportMeta {
+        generated_at: "2026-11-17T12:00:00Z".into(),
+        suite_commit: "0123abc".into(),
+    }
+}
+
+async fn run(
+    tasks: &[eval::EvalTask],
+    approaches: &[Approach],
+    trials: u32,
+    deps: &dyn EvalDeps,
+) -> SuiteReport {
+    eval::run_suite(tasks, approaches, trials, deps, TIMEOUT, meta())
+        .await
+        .unwrap()
 }
 
 /// Solo arm backed by a single scripted worker whose `pre_script` mutates the
@@ -89,14 +113,20 @@ async fn solo_passing_scores_success_and_records_tokens() {
     let deps = SoloDeps {
         pre_script: "echo ok > good.txt".into(),
     };
-    let report = eval::run_suite(&tasks, &[Approach::Solo], 1, &deps, TIMEOUT)
-        .await
-        .unwrap();
+    let report = run(&tasks, &[Approach::Solo], 1, &deps).await;
 
     let r = &report.results[0];
-    assert!(r.success, "should pass external verify: {r:?}");
-    assert!(r.verify_ran);
+    assert_eq!(
+        r.verification,
+        VerificationStatus::Passed,
+        "should pass external verify: {r:?}"
+    );
     assert!(r.pipeline_ok);
+    assert_eq!(
+        (r.category.as_str(), r.language.as_str()),
+        ("bugfix", "shell")
+    );
+    assert_eq!(r.difficulty, "small");
     assert!(
         r.tokens.total() >= 15,
         "scripted usage (10 in + 5 out) should be recorded, got {}",
@@ -113,13 +143,15 @@ async fn solo_completes_but_broken_tree_scores_fail() {
     let deps = SoloDeps {
         pre_script: "echo noop > other.txt".into(), // never creates good.txt
     };
-    let report = eval::run_suite(&tasks, &[Approach::Solo], 1, &deps, TIMEOUT)
-        .await
-        .unwrap();
+    let report = run(&tasks, &[Approach::Solo], 1, &deps).await;
 
     let r = &report.results[0];
     assert!(r.pipeline_ok, "pipeline reported completion");
-    assert!(!r.success, "external verify must override pipeline_ok");
+    assert_eq!(
+        r.verification,
+        VerificationStatus::Failed,
+        "external verify must override pipeline_ok"
+    );
 }
 
 #[tokio::test]
@@ -129,15 +161,14 @@ async fn aggregates_over_multiple_trials() {
     let deps = SoloDeps {
         pre_script: "echo ok > good.txt".into(),
     };
-    let report = eval::run_suite(&tasks, &[Approach::Solo], 3, &deps, TIMEOUT)
-        .await
-        .unwrap();
+    let report = run(&tasks, &[Approach::Solo], 3, &deps).await;
 
     assert_eq!(report.results.len(), 3);
     let cell = &report.aggregate.per_task_approach[0];
-    assert_eq!((cell.passed, cell.total), (3, 3));
-    assert!(cell.stable);
-    assert_eq!(cell.unscored, 0);
+    assert_eq!((cell.stats.passed, cell.stats.total), (3, 3));
+    assert_eq!(cell.stats.stable, Some(true));
+    assert_eq!(cell.stats.not_run, 0);
+    assert_eq!(cell.stats.wall_ms.n, 3);
 }
 
 /// Minimal scripted conduct pipeline: conductor plans one subtask then accepts;
@@ -193,13 +224,12 @@ async fn conduct_approach_runs_and_scores_via_external_verify() {
     let deps = ConductTestDeps {
         worker_pre: "echo ok > good.txt".into(),
     };
-    let report = eval::run_suite(&tasks, &[Approach::Conduct], 1, &deps, TIMEOUT)
-        .await
-        .unwrap();
+    let report = run(&tasks, &[Approach::Conduct], 1, &deps).await;
 
     let r = &report.results[0];
-    assert!(
-        r.success,
+    assert_eq!(
+        r.verification,
+        VerificationStatus::Passed,
         "conduct should write good.txt and pass external verify: {r:?}"
     );
     assert!(r.pipeline_ok);
@@ -214,14 +244,13 @@ async fn conduct_no_grounding_green_pipeline_broken_tree_scores_fail() {
     let deps = ConductTestDeps {
         worker_pre: "echo nope > other.txt".into(), // never creates good.txt
     };
-    let report = eval::run_suite(&tasks, &[Approach::ConductNoGrounding], 1, &deps, TIMEOUT)
-        .await
-        .unwrap();
+    let report = run(&tasks, &[Approach::ConductNoGrounding], 1, &deps).await;
 
     let r = &report.results[0];
     assert!(r.pipeline_ok, "pipeline completes");
-    assert!(
-        !r.success,
+    assert_eq!(
+        r.verification,
+        VerificationStatus::Failed,
         "external verify overrides a green pipeline on a broken tree"
     );
 }
@@ -239,11 +268,10 @@ async fn protected_paths_restore_the_oracle_before_scoring() {
     let deps = SoloDeps {
         pre_script: "echo HACKED > oracle.txt".into(),
     };
-    let report = eval::run_suite(&tasks, &[Approach::Solo], 1, &deps, TIMEOUT)
-        .await
-        .unwrap();
-    assert!(
-        report.results[0].success,
+    let report = run(&tasks, &[Approach::Solo], 1, &deps).await;
+    assert_eq!(
+        report.results[0].verification,
+        VerificationStatus::Passed,
         "the protected oracle should be restored before scoring"
     );
 }
@@ -261,11 +289,10 @@ async fn unprotected_tampered_oracle_is_scored_as_is() {
     let deps = SoloDeps {
         pre_script: "echo HACKED > oracle.txt".into(),
     };
-    let report = eval::run_suite(&tasks, &[Approach::Solo], 1, &deps, TIMEOUT)
-        .await
-        .unwrap();
-    assert!(
-        !report.results[0].success,
+    let report = run(&tasks, &[Approach::Solo], 1, &deps).await;
+    assert_eq!(
+        report.results[0].verification,
+        VerificationStatus::Failed,
         "an unprotected tampered oracle must score fail"
     );
 }
@@ -279,7 +306,11 @@ async fn unscored_when_no_verifier_resolves() {
     std::fs::write(task_dir.join("repo").join(".keep"), "").unwrap();
     std::fs::write(
         task_dir.join("task.json"),
-        serde_json::json!({ "name": "empty", "prompt": "noop" }).to_string(),
+        serde_json::json!({
+            "name": "empty", "category": "bugfix", "language": "shell",
+            "difficulty": "small", "prompt": "noop"
+        })
+        .to_string(),
     )
     .unwrap();
 
@@ -287,12 +318,468 @@ async fn unscored_when_no_verifier_resolves() {
     let deps = SoloDeps {
         pre_script: String::new(),
     };
-    let report = eval::run_suite(&tasks, &[Approach::Solo], 1, &deps, TIMEOUT)
-        .await
-        .unwrap();
+    let report = run(&tasks, &[Approach::Solo], 1, &deps).await;
 
     let r = &report.results[0];
-    assert!(!r.verify_ran, "no command should resolve in an empty repo");
-    assert!(!r.success, "a could-not-score trial counts as not-passed");
-    assert_eq!(report.aggregate.per_task_approach[0].unscored, 1);
+    assert_eq!(
+        r.verification,
+        VerificationStatus::NotRun,
+        "no command should resolve in an empty repo"
+    );
+    // a could-not-score trial is neither a pass nor a real failure
+    let cell = &report.aggregate.per_task_approach[0].stats;
+    assert_eq!((cell.passed, cell.failed, cell.not_run), (0, 0, 1));
+}
+
+// ── Schema v2: explicit verification state, provenance, honest statistics ────
+
+fn tokens(claude: u64, codex: u64, gemini: u64, grok: u64) -> ProviderTokens {
+    ProviderTokens {
+        claude,
+        codex,
+        gemini,
+        grok,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trial(
+    task: &str,
+    category: &str,
+    language: &str,
+    difficulty: &str,
+    verification: VerificationStatus,
+    tokens: ProviderTokens,
+    attempts: u32,
+    fallbacks: u32,
+) -> TrialResult {
+    TrialResult {
+        task: task.into(),
+        category: category.into(),
+        language: language.into(),
+        difficulty: difficulty.into(),
+        approach: "conduct".into(),
+        trial: 0,
+        verification,
+        pipeline_ok: true,
+        attempts,
+        fallbacks,
+        tokens,
+        wall_ms: 1_000,
+        error: None,
+    }
+}
+
+fn fixture_report(results: Vec<TrialResult>) -> SuiteReport {
+    eval::build_report(meta(), 1, results)
+}
+
+fn find<'a>(rows: &'a serde_json::Value, key: &str, value: &str) -> &'a serde_json::Value {
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row[key] == value)
+        .unwrap_or_else(|| panic!("no row with {key}={value} in {rows}"))
+}
+
+#[test]
+fn report_v2_records_verification_provenance_and_all_providers() {
+    let report = fixture_report(vec![trial(
+        "parse-kv",
+        "parsing",
+        "rust",
+        "small",
+        VerificationStatus::Passed,
+        tokens(1, 2, 3, 4),
+        2,
+        1,
+    )]);
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["generated_at"], "2026-11-17T12:00:00Z");
+    assert_eq!(json["suite_commit"], "0123abc");
+    assert_eq!(json["trials"], 1);
+    let result = &json["results"][0];
+    assert_eq!(result["verification"], "passed");
+    assert_eq!(result["category"], "parsing");
+    assert_eq!(result["language"], "rust");
+    assert_eq!(result["difficulty"], "small");
+    assert_eq!(result["tokens"]["grok"], 4);
+    assert_eq!(result["attempts"], 2);
+    assert_eq!(result["fallbacks"], 1);
+    // v1's booleans are gone: one field says what the verifier did
+    assert!(result.get("success").is_none() && result.get("verify_ran").is_none());
+}
+
+#[test]
+fn report_v2_spells_out_every_verification_state() {
+    for (status, word) in [
+        (VerificationStatus::Passed, "passed"),
+        (VerificationStatus::Failed, "failed"),
+        (VerificationStatus::NotRun, "not_run"),
+    ] {
+        let report = fixture_report(vec![trial(
+            "t",
+            "bugfix",
+            "rust",
+            "small",
+            status,
+            tokens(0, 0, 0, 0),
+            1,
+            0,
+        )]);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["results"][0]["verification"], word);
+    }
+}
+
+#[test]
+fn report_v2_counts_states_apart_and_groups_by_category() {
+    let none = tokens(0, 0, 0, 0);
+    let report = fixture_report(vec![
+        trial(
+            "parse-kv",
+            "parsing",
+            "rust",
+            "small",
+            VerificationStatus::Passed,
+            none,
+            1,
+            0,
+        ),
+        trial(
+            "parse-duration",
+            "parsing",
+            "rust",
+            "medium",
+            VerificationStatus::Failed,
+            none,
+            3,
+            0,
+        ),
+        trial(
+            "fix-sum",
+            "bugfix",
+            "rust",
+            "small",
+            VerificationStatus::NotRun,
+            none,
+            1,
+            2,
+        ),
+    ]);
+    let json = serde_json::to_value(&report).unwrap();
+    let aggregate = &json["aggregate"];
+
+    let parsing = find(&aggregate["per_category_approach"], "category", "parsing");
+    assert_eq!(parsing["approach"], "conduct");
+    assert_eq!(
+        (
+            &parsing["passed"],
+            &parsing["failed"],
+            &parsing["not_run"],
+            &parsing["total"]
+        ),
+        (&1.into(), &1.into(), &0.into(), &2.into())
+    );
+    let bugfix = find(&aggregate["per_category_approach"], "category", "bugfix");
+    assert_eq!(
+        (
+            &bugfix["passed"],
+            &bugfix["failed"],
+            &bugfix["not_run"],
+            &bugfix["total"]
+        ),
+        (&0.into(), &0.into(), &1.into(), &1.into())
+    );
+
+    let overall = find(&aggregate["per_approach"], "approach", "conduct");
+    assert_eq!(
+        (
+            &overall["passed"],
+            &overall["failed"],
+            &overall["not_run"],
+            &overall["total"]
+        ),
+        (&1.into(), &1.into(), &1.into(), &3.into())
+    );
+    // attempts and fallbacks are summed, so a costly path is visible
+    assert_eq!(overall["attempts"], 5);
+    assert_eq!(overall["fallbacks"], 2);
+}
+
+#[test]
+fn report_v2_counts_grok_in_the_token_totals() {
+    assert_eq!(tokens(1, 2, 3, 4).total(), 10);
+    let report = fixture_report(vec![trial(
+        "t",
+        "api",
+        "node",
+        "small",
+        VerificationStatus::Passed,
+        tokens(1, 2, 3, 4),
+        1,
+        0,
+    )]);
+    let json = serde_json::to_value(&report).unwrap();
+    let overall = find(&json["aggregate"]["per_approach"], "approach", "conduct");
+    assert_eq!(overall["tokens"]["grok"]["mean"], 4.0);
+    assert_eq!(overall["tokens"]["total"]["mean"], 10.0);
+}
+
+#[test]
+fn report_v2_states_sample_size_and_gives_no_spread_for_one_trial() {
+    let report = fixture_report(vec![trial(
+        "t",
+        "api",
+        "node",
+        "small",
+        VerificationStatus::Passed,
+        tokens(100, 0, 0, 0),
+        1,
+        0,
+    )]);
+    let json = serde_json::to_value(&report).unwrap();
+    let cell = find(&json["aggregate"]["per_task_approach"], "task", "t");
+    assert_eq!(cell["wall_ms"]["n"], 1);
+    assert_eq!(cell["tokens"]["claude"]["n"], 1);
+    assert!(
+        cell["wall_ms"]["std_dev"].is_null(),
+        "no spread from one sample"
+    );
+    assert!(cell["tokens"]["claude"]["std_dev"].is_null());
+    assert!(cell["stable"].is_null(), "one trial cannot be 'stable'");
+
+    let markdown = eval::markdown_report(&report);
+    assert!(markdown.contains("schema v2"), "{markdown}");
+    assert!(markdown.contains("N = 1"), "{markdown}");
+    assert!(
+        markdown.contains("n/a"),
+        "spread must read n/a at N = 1: {markdown}"
+    );
+    assert!(!markdown.contains('±'), "no ± figure at N = 1: {markdown}");
+}
+
+#[test]
+fn report_v2_gives_mean_and_sample_spread_from_two_trials() {
+    let slow = TrialResult {
+        trial: 1,
+        wall_ms: 3_000,
+        ..trial(
+            "t",
+            "api",
+            "node",
+            "small",
+            VerificationStatus::Failed,
+            tokens(300, 0, 0, 0),
+            1,
+            0,
+        )
+    };
+    let fast = trial(
+        "t",
+        "api",
+        "node",
+        "small",
+        VerificationStatus::Passed,
+        tokens(100, 0, 0, 0),
+        1,
+        0,
+    );
+    let report = eval::build_report(meta(), 2, vec![fast, slow]);
+    let json = serde_json::to_value(&report).unwrap();
+    let cell = find(&json["aggregate"]["per_task_approach"], "task", "t");
+    assert_eq!(cell["tokens"]["claude"]["n"], 2);
+    assert_eq!(cell["tokens"]["claude"]["mean"], 200.0);
+    assert_eq!(cell["tokens"]["claude"]["median"], 200.0);
+    let spread = cell["tokens"]["claude"]["std_dev"].as_f64().unwrap();
+    assert!(
+        (spread - 141.421).abs() < 0.01,
+        "sample std dev, got {spread}"
+    );
+    assert_eq!(cell["stable"], false, "one pass and one fail disagree");
+
+    let markdown = eval::markdown_report(&report);
+    assert!(markdown.contains("N = 2"), "{markdown}");
+    assert!(markdown.contains('±'), "{markdown}");
+}
+
+#[test]
+fn load_suite_rejects_a_manifest_without_category_language_difficulty() {
+    let suite = tempfile::tempdir().unwrap();
+    let task_dir = suite.path().join("bare");
+    std::fs::create_dir_all(task_dir.join("repo")).unwrap();
+    std::fs::write(
+        task_dir.join("task.json"),
+        serde_json::json!({ "name": "bare", "prompt": "noop" }).to_string(),
+    )
+    .unwrap();
+    let error = format!("{:#}", eval::load_suite(suite.path(), None).unwrap_err());
+    assert!(error.contains("category"), "got: {error}");
+    assert!(error.contains("task.json"), "got: {error}");
+}
+
+// ── Attempts and fallbacks: recorded, never part of the score ────────────────
+
+/// Solo ladder whose first model is refused (real codex wording), so the run
+/// lands on the second rung.
+struct SoloWithDeadFirstRung;
+impl EvalDeps for SoloWithDeadFirstRung {
+    fn solo_ladder(&self) -> Vec<Rung> {
+        let dead = Arc::new(ScriptedAdapter::failing(
+            Provider::Codex,
+            "The 'gpt-x' model is not supported when using Codex with a ChatGPT account.",
+        ));
+        let alive = Arc::new(ScriptedAdapter {
+            pre_script: "echo ok > good.txt".into(),
+            ..ScriptedAdapter::ok_with_text(Provider::Codex, "done")
+        });
+        vec![
+            rung(Provider::Codex, "gpt-x", dead),
+            rung(Provider::Codex, "gpt-y", alive),
+        ]
+    }
+    fn conduct_deps(&self, _verify: Option<VerifyConfig>, _cross_family: bool) -> ConductDeps {
+        unreachable!("solo-only test deps")
+    }
+}
+
+#[tokio::test]
+async fn solo_records_one_attempt_and_each_model_fallback() {
+    let suite = make_suite("test -f good.txt");
+    let tasks = eval::load_suite(suite.path(), None).unwrap();
+    let report = run(&tasks, &[Approach::Solo], 1, &SoloWithDeadFirstRung).await;
+    let r = &report.results[0];
+    assert_eq!(r.verification, VerificationStatus::Passed, "{r:?}");
+    assert_eq!(r.attempts, 1, "solo is a single worker pass");
+    assert_eq!(r.fallbacks, 1, "one demotion: gpt-x → gpt-y");
+}
+
+/// Conduct pipeline whose conductor sends the worker back once before accepting.
+struct ConductWithOneRework;
+impl EvalDeps for ConductWithOneRework {
+    fn solo_ladder(&self) -> Vec<Rung> {
+        unreachable!("conduct-only test deps")
+    }
+    fn conduct_deps(&self, verify: Option<VerifyConfig>, cross_family: bool) -> ConductDeps {
+        let plan =
+            r#"{"subtasks":[{"id":1,"title":"x","prompt":"write good.txt","depends_note":""}]}"#;
+        let conductor = Arc::new(SequencedAdapter::new(
+            Provider::Claude,
+            vec![
+                ScriptedAdapter::ok_with_text(Provider::Claude, plan),
+                ScriptedAdapter::ok_with_text(
+                    Provider::Claude,
+                    r#"{"decision":"rework","feedback":"try again"}"#,
+                ),
+                ScriptedAdapter::ok_with_text(
+                    Provider::Claude,
+                    r#"{"decision":"accept","feedback":""}"#,
+                ),
+            ],
+        ));
+        let worker = Arc::new(ScriptedAdapter {
+            pre_script: "echo ok > good.txt".into(),
+            ..ScriptedAdapter::ok_with_text(Provider::Codex, "did it")
+        });
+        ConductDeps {
+            conductor: RoleHandle {
+                ladder: vec![rung(Provider::Claude, "m", conductor)],
+            },
+            workers: vec![CouncilMember {
+                label: "codex".into(),
+                ladder: vec![rung(Provider::Codex, "gpt", worker)],
+            }],
+            supervisor: None,
+            reviewer: None,
+            arbiter: None,
+            verify,
+            memory: Default::default(),
+            cross_family_review: cross_family,
+            max_replans: 0,
+            budget: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn conduct_records_every_worker_attempt_including_rework() {
+    let suite = make_suite("test -f good.txt");
+    let tasks = eval::load_suite(suite.path(), None).unwrap();
+    // grounding off, so the scripted "rework" verdict is what drives attempt 2
+    let report = run(
+        &tasks,
+        &[Approach::ConductNoGrounding],
+        1,
+        &ConductWithOneRework,
+    )
+    .await;
+    let r = &report.results[0];
+    assert_eq!(r.verification, VerificationStatus::Passed, "{r:?}");
+    assert_eq!(r.attempts, 2, "first attempt + one rework");
+    assert_eq!(r.fallbacks, 0);
+}
+
+// ── The quota gate: a bare `consilium eval` plans and spends nothing ─────────
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("core/ has a parent")
+        .to_path_buf()
+}
+
+fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .flat_map(|path| {
+            if path.is_dir() {
+                files_under(&path)
+            } else {
+                vec![path]
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn bare_eval_is_a_dry_run_that_spends_and_writes_nothing() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    // A config that cannot be parsed: a dry run must not even open it.
+    std::fs::write(cwd.path().join("consilium.config.json"), "{ not json").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_consilium"))
+        .arg("eval")
+        .arg("--suite")
+        .arg(repo_root().join("eval/tasks"))
+        .current_dir(cwd.path())
+        .env("HOME", home.path())
+        // No provider CLI can be found, let alone run.
+        .env("PATH", "/nonexistent")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("no quota spent"), "{stdout}");
+    assert!(stdout.contains("parse-kv"), "tasks are listed: {stdout}");
+    assert!(
+        stdout.contains("solo") && stdout.contains("conduct"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("model call"),
+        "call estimates are shown: {stdout}"
+    );
+    // nothing written: no results file, no usage ledger, no runs directory
+    assert!(!cwd.path().join("eval").exists(), "a dry run wrote results");
+    assert_eq!(files_under(home.path()), Vec::<std::path::PathBuf>::new());
 }
