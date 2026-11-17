@@ -30,7 +30,7 @@ body:
     id: version
     attributes:
       label: Consilium version
-      placeholder: consilium 0.2.1
+      placeholder: consilium 0.2.2
     validations:
       required: true
   - type: input

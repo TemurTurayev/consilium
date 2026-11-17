@@ -1,7 +1,7 @@
 {
   "name": "consilium",
   "description": "Turn your live Claude Code session into the conductor of a multi-model council. Offload build work to Codex / Gemini / Grok, get anonymized second opinions, and review diffs across model families — on the subscriptions you already pay for. Requires the consilium CLI (see homepage).",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "author": {
     "name": "Temur Turaev",
     "url": "https://github.com/TemurTurayev"
