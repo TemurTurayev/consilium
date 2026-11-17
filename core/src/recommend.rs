@@ -236,6 +236,32 @@ mod tests {
         }
     }
 
+    /// A free ChatGPT plan only runs `gpt-6-luna` (seen live 2026-11-17). Codex
+    /// must still earn a worker seat there: leaving a signed-in provider idle
+    /// pushes its share of the work onto the Claude subscription instead.
+    #[test]
+    fn a_plan_limited_codex_still_gets_a_worker_seat() {
+        let live = [
+            (Provider::Claude, "claude-opus-5-5".to_string()),
+            (Provider::Codex, "gpt-6-luna".to_string()),
+            (Provider::Gemini, "gemini-4-argon-high".to_string()),
+        ];
+        let available = crate::models::live_subset(&catalog(), &live);
+        let roles = recommend_roles(&available).unwrap();
+        let workers: Vec<(Provider, &str)> = roles
+            .workers
+            .iter()
+            .map(|w| (w.provider, w.model.as_str()))
+            .collect();
+        assert_eq!(
+            workers,
+            vec![
+                (Provider::Codex, "gpt-6-luna"),
+                (Provider::Gemini, "gemini-4-argon-high")
+            ]
+        );
+    }
+
     #[test]
     fn a_cli_default_primary_gets_no_duplicate_default_rung() {
         // What the wizard builds when a provider answers only on its default.

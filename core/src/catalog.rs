@@ -81,12 +81,15 @@ pub fn catalog() -> Vec<CatalogEntry> {
             (7, 9, 9, 7),
             "frontier",
         ),
-        // The only current Codex model on free/Go plans.
+        // The only current Codex model on free/Go plans. Its worker score ties
+        // Gemini's top and beats Claude Sonnet's on purpose: where it is all
+        // Codex offers, it should still take a worker seat rather than leave a
+        // signed-in subscription idle and push that work onto Claude.
         entry(
             Provider::Codex,
             "gpt-6-luna",
             AuthMethod::CliLogin,
-            (5, 7, 6, 6),
+            (5, 8, 6, 6),
             "fast",
         ),
         // Antigravity (`agy`) ids. Argon is Google's planner model, Hydrogen its
