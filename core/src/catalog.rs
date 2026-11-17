@@ -45,80 +45,115 @@ pub struct CatalogEntry {
 /// `crate::recommend::recommend_roles(&catalog())` reproduces the curated
 /// `Config::default()` lineup (see the recommend module's keystone test).
 ///
+/// Model ids were verified against the live CLIs on 2026-11-17 (claude 2.1.292,
+/// codex-cli 0.160.1, agy 1.5.10): `codex debug models --bundled`, `agy models`,
+/// `grok models`, plus a real probe wherever the test account's plan allowed.
+///
 /// ORDERING CONVENTION: within each provider, entries are listed best/newest
-/// first — `top_model(provider)` returns the first one. When a provider ships a
-/// newer top model, add it as that provider's first entry (demoting the one it
-/// replaces) AND add the replaced model to `superseded_models`; everything
-/// downstream then re-resolves to the new top.
+/// first — `top_model(provider)` returns the first one, and
+/// `crate::models::best_live_model` walks them in order to find the best model a
+/// given account can actually run (lower tiers exist because the top one is
+/// often plan-gated: e.g. a free ChatGPT plan only gets `gpt-6-luna`). When a
+/// provider ships a newer top model, add it as that provider's first entry
+/// (demoting the one it replaces) AND add the replaced model to
+/// `superseded_models`; everything downstream then re-resolves to the new top.
 pub fn catalog() -> Vec<CatalogEntry> {
     vec![
-        CatalogEntry {
-            provider: Provider::Claude,
-            model: "claude-opus-4-8".into(),
-            auth_method: AuthMethod::SetupToken,
-            scores: RoleScores {
-                conductor: 10,
-                worker: 6,
-                reviewer: 8,
-                supervisor: 7,
-            },
-            tier: "frontier",
-        },
-        CatalogEntry {
-            provider: Provider::Claude,
-            model: "claude-sonnet-4-6".into(),
-            auth_method: AuthMethod::SetupToken,
-            scores: RoleScores {
-                conductor: 8,
-                worker: 7,
-                reviewer: 7,
-                supervisor: 7,
-            },
-            tier: "mid",
-        },
-        CatalogEntry {
-            provider: Provider::Codex,
-            model: "gpt-5.5".into(),
-            auth_method: AuthMethod::CliLogin,
-            scores: RoleScores {
-                conductor: 7,
-                worker: 9,
-                reviewer: 9,
-                supervisor: 7,
-            },
-            tier: "frontier",
-        },
-        CatalogEntry {
-            provider: Provider::Gemini,
-            model: "Gemini 3.1 Pro (High)".into(),
-            auth_method: AuthMethod::CliLogin,
-            scores: RoleScores {
-                conductor: 7,
-                worker: 8,
-                reviewer: 7,
-                supervisor: 9,
-            },
-            tier: "frontier",
-        },
+        entry(
+            Provider::Claude,
+            "claude-opus-5-5",
+            AuthMethod::SetupToken,
+            (10, 6, 8, 7),
+            "frontier",
+        ),
+        entry(
+            Provider::Claude,
+            "claude-sonnet-5-5",
+            AuthMethod::SetupToken,
+            (8, 7, 7, 7),
+            "mid",
+        ),
+        // Codex's workhorse on paid ChatGPT plans (the CLI's own default there).
+        entry(
+            Provider::Codex,
+            "gpt-6.1-sol",
+            AuthMethod::CliLogin,
+            (7, 9, 9, 7),
+            "frontier",
+        ),
+        // The only current Codex model on free/Go plans.
+        entry(
+            Provider::Codex,
+            "gpt-6-luna",
+            AuthMethod::CliLogin,
+            (5, 7, 6, 6),
+            "fast",
+        ),
+        // Antigravity (`agy`) ids. Argon is Google's planner model, Hydrogen its
+        // fast implementation model (both need a paid Google AI plan); Flash is
+        // what a free plan gets. Argon tops both the worker and the supervisor
+        // score on purpose: one Gemini model for both roles means one preflight
+        // probe, and every `agy` call costs ~40s of startup regardless of model.
+        entry(
+            Provider::Gemini,
+            "gemini-4-argon-high",
+            AuthMethod::CliLogin,
+            (7, 8, 7, 9),
+            "frontier",
+        ),
+        entry(
+            Provider::Gemini,
+            "gemini-4-hydrogen-high",
+            AuthMethod::CliLogin,
+            (6, 7, 7, 7),
+            "fast",
+        ),
+        entry(
+            Provider::Gemini,
+            "gemini-3.8-flash-high",
+            AuthMethod::CliLogin,
+            (5, 6, 5, 6),
+            "mid",
+        ),
         // Beta: the Grok Build CLI's headless event schema is unstable (see
         // adapters::grok's doc comment) and its token accounting is unverified
         // against real output — scored modestly below every other provider's
         // corresponding role so it never displaces the curated default lineup
         // (see recommend::tests::full_catalog_reproduces_the_curated_default_lineup),
-        // but is still available as an explicit choice once authed.
-        CatalogEntry {
-            provider: Provider::Grok,
-            model: "grok-build".into(),
-            auth_method: AuthMethod::CliLogin,
-            scores: RoleScores {
-                conductor: 5,
-                worker: 6,
-                reviewer: 5,
-                supervisor: 5,
-            },
-            tier: "beta",
-        },
+        // but is still available as an explicit choice once authed. `grok-4.7`
+        // is what `grok models` lists; it has not been run end to end (the
+        // installed 0.2.87 CLI is refused by xAI until it is updated).
+        entry(
+            Provider::Grok,
+            "grok-4.7",
+            AuthMethod::CliLogin,
+            (5, 6, 5, 5),
+            "beta",
+        ),
     ]
+}
+
+/// Builds one catalog row; `scores` is (conductor, worker, reviewer, supervisor).
+fn entry(
+    provider: Provider,
+    model: &str,
+    auth_method: AuthMethod,
+    scores: (u8, u8, u8, u8),
+    tier: &'static str,
+) -> CatalogEntry {
+    let (conductor, worker, reviewer, supervisor) = scores;
+    CatalogEntry {
+        provider,
+        model: model.into(),
+        auth_method,
+        scores: RoleScores {
+            conductor,
+            worker,
+            reviewer,
+            supervisor,
+        },
+        tier,
+    }
 }
 
 /// All catalog entries for one provider, best/newest first (catalog order).
@@ -135,23 +170,60 @@ pub fn top_model(provider: Provider) -> Option<CatalogEntry> {
     entries_for(provider).into_iter().next()
 }
 
+/// A model's position in its provider's best-first list (0 = top), or `None`
+/// when it is not a catalog model (uncurated, retired, or the CLI default).
+pub fn rank(provider: Provider, model: &str) -> Option<usize> {
+    entries_for(provider).iter().position(|e| e.model == model)
+}
+
+/// A retired model and the catalog model that replaces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Superseded {
+    pub provider: Provider,
+    pub retired: &'static str,
+    pub successor: &'static str,
+}
+
 /// Retired models: a specific `(provider, model)` superseded by a newer version
 /// of the *same* line. This is deliberately an explicit allowlist, NOT "anything
 /// missing from the catalog" — a configured model can be valid yet uncurated
 /// (e.g. a cross-family Antigravity fallback: the `gemini` provider running a
 /// Claude model), and that must never be mistaken for stale. Add a row when a
-/// provider ships a new version; the replacement is always the provider's
-/// current `top_model`. Drives the staleness hint and `consilium models`.
-pub fn superseded_models() -> Vec<(Provider, &'static str)> {
-    vec![(Provider::Codex, "gpt-5.4")]
+/// provider ships a new version, naming the same-tier catalog model that
+/// replaces it. Drives the staleness hint and `consilium models`.
+pub fn superseded_models() -> Vec<Superseded> {
+    let row = |provider, retired, successor| Superseded {
+        provider,
+        retired,
+        successor,
+    };
+    vec![
+        row(Provider::Claude, "claude-opus-4-8", "claude-opus-5-5"),
+        row(Provider::Claude, "claude-sonnet-4-6", "claude-sonnet-5-5"),
+        row(Provider::Codex, "gpt-5.4", "gpt-6.1-sol"),
+        row(Provider::Codex, "gpt-5.5", "gpt-6.1-sol"),
+        row(
+            Provider::Gemini,
+            "Gemini 3.1 Pro (High)",
+            "gemini-4-argon-high",
+        ),
+        row(Provider::Grok, "grok-build", "grok-4.7"),
+    ]
+}
+
+/// The catalog model that replaces a retired `(provider, model)`, or `None`
+/// when the model has not been retired.
+pub fn successor_of(provider: Provider, model: &str) -> Option<&'static str> {
+    superseded_models()
+        .into_iter()
+        .find(|s| s.provider == provider && s.retired == model)
+        .map(|s| s.successor)
 }
 
 /// Whether `(provider, model)` has been retired in favor of a newer version
 /// (see `superseded_models`). `crate::models::stale_models` flags these.
 pub fn is_superseded(provider: Provider, model: &str) -> bool {
-    superseded_models()
-        .iter()
-        .any(|(p, m)| *p == provider && *m == model)
+    successor_of(provider, model).is_some()
 }
 
 #[cfg(test)]
@@ -232,6 +304,38 @@ mod tests {
     }
 
     #[test]
+    fn every_provider_lists_its_models_best_first() {
+        let models = |p| -> Vec<String> { entries_for(p).into_iter().map(|e| e.model).collect() };
+        assert_eq!(
+            models(Provider::Claude),
+            ["claude-opus-5-5", "claude-sonnet-5-5"]
+        );
+        // A plan-gated top model is followed by what cheaper plans can run.
+        assert_eq!(models(Provider::Codex), ["gpt-6.1-sol", "gpt-6-luna"]);
+        assert_eq!(
+            models(Provider::Gemini),
+            [
+                "gemini-4-argon-high",
+                "gemini-4-hydrogen-high",
+                "gemini-3.8-flash-high"
+            ]
+        );
+        assert_eq!(models(Provider::Grok), ["grok-4.7"]);
+    }
+
+    #[test]
+    fn rank_is_the_position_in_the_best_first_list() {
+        assert_eq!(rank(Provider::Codex, "gpt-6.1-sol"), Some(0));
+        assert_eq!(rank(Provider::Codex, "gpt-6-luna"), Some(1));
+        // retired, uncurated and CLI-default models are not ranked
+        assert_eq!(rank(Provider::Codex, "gpt-5.5"), None);
+        assert_eq!(rank(Provider::Gemini, "Claude Opus 4.6 (Thinking)"), None);
+        assert_eq!(rank(Provider::Codex, "default"), None);
+        // a model only ranks under its own provider
+        assert_eq!(rank(Provider::Claude, "gpt-6-luna"), None);
+    }
+
+    #[test]
     fn entries_for_filters_by_provider() {
         let claude = entries_for(Provider::Claude);
         assert!(claude.len() >= 2, "Claude has opus + sonnet");
@@ -242,33 +346,73 @@ mod tests {
     fn top_model_is_the_first_entry_per_provider() {
         assert_eq!(
             top_model(Provider::Claude).unwrap().model,
-            "claude-opus-4-8"
+            "claude-opus-5-5"
         );
-        assert_eq!(top_model(Provider::Codex).unwrap().model, "gpt-5.5");
-        assert!(top_model(Provider::Gemini).is_some());
-        assert_eq!(top_model(Provider::Grok).unwrap().model, "grok-build");
+        assert_eq!(top_model(Provider::Codex).unwrap().model, "gpt-6.1-sol");
+        assert_eq!(
+            top_model(Provider::Gemini).unwrap().model,
+            "gemini-4-argon-high"
+        );
+        assert_eq!(top_model(Provider::Grok).unwrap().model, "grok-4.7");
     }
 
     #[test]
     fn is_superseded_flags_only_explicitly_retired_models() {
         // explicitly retired
         assert!(is_superseded(Provider::Codex, "gpt-5.4"));
+        assert!(is_superseded(Provider::Codex, "gpt-5.5"));
         // the current top is not retired
-        assert!(!is_superseded(Provider::Codex, "gpt-5.5"));
+        assert!(!is_superseded(Provider::Codex, "gpt-6.1-sol"));
         // a valid-but-uncurated cross-family fallback must NOT be flagged
         assert!(!is_superseded(
             Provider::Gemini,
             "Claude Opus 4.6 (Thinking)"
         ));
+        // retirement is per provider
+        assert!(!is_superseded(Provider::Claude, "gpt-5.5"));
+    }
+
+    /// Every model the v0.2.0 defaults shipped with was retired or renamed by
+    /// its provider within four months (found 2026-11-17). Each must map to a
+    /// same-tier successor so `consilium models --write` can migrate old configs.
+    #[test]
+    fn every_v0_2_default_model_has_a_successor() {
+        let cases = [
+            (Provider::Claude, "claude-opus-4-8", "claude-opus-5-5"),
+            (Provider::Claude, "claude-sonnet-4-6", "claude-sonnet-5-5"),
+            (Provider::Codex, "gpt-5.5", "gpt-6.1-sol"),
+            (
+                Provider::Gemini,
+                "Gemini 3.1 Pro (High)",
+                "gemini-4-argon-high",
+            ),
+            (Provider::Grok, "grok-build", "grok-4.7"),
+        ];
+        for (provider, retired, successor) in cases {
+            assert_eq!(
+                successor_of(provider, retired),
+                Some(successor),
+                "{provider:?}/{retired}"
+            );
+        }
+        assert_eq!(successor_of(Provider::Codex, "gpt-6.1-sol"), None);
     }
 
     #[test]
-    fn superseded_models_have_a_current_top_replacement() {
-        // every retired model's provider must still have a top model to point to
-        for (provider, _retired) in superseded_models() {
+    fn successors_are_current_catalog_models_never_retired_themselves() {
+        for s in superseded_models() {
             assert!(
-                top_model(provider).is_some(),
-                "retired model for {provider:?} has no replacement top_model"
+                rank(s.provider, s.successor).is_some(),
+                "{:?}/{} points at {}, which is not in the catalog",
+                s.provider,
+                s.retired,
+                s.successor
+            );
+            assert!(
+                rank(s.provider, s.retired).is_none(),
+                "{:?}/{} is both retired and in the catalog",
+                s.provider,
+                s.retired
             );
         }
     }

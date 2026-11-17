@@ -86,7 +86,7 @@ pub struct RunWorkerParams {
     /// The full, self-contained instruction for the worker.
     pub prompt: String,
     /// Which configured worker to route to, as "provider-model"
-    /// (e.g. "codex-gpt-5.5"); see the workers in consilium.config.json.
+    /// (e.g. "codex-gpt-6.1-sol"); see the workers in consilium.config.json.
     pub worker_label: String,
     /// Absolute path to the repository/working directory the worker edits.
     /// Must be inside the directory the MCP server was launched in.

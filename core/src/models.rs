@@ -1,33 +1,35 @@
-//! Top-model resolution: keep the configured lineup on the provider's current
-//! best model. The curated `crate::catalog` is the source of truth for which
-//! models are endorsed; anything configured *outside* it is treated as
-//! superseded. This module provides:
+//! Top-model resolution: keep the configured lineup on models the account can
+//! actually run. The curated `crate::catalog` is the source of truth for which
+//! models are endorsed and which have been retired. This module provides:
 //!
-//! - `stale_models` — pure: which configured models have been superseded (free,
+//! - `stale_models` — pure: which configured models have been retired (free,
 //!   no I/O; drives the one-line staleness hint shown before a run).
 //! - `best_live_model` / `resolve_top_models` — I/O: probe a provider's catalog
-//!   models (best/newest first) and pick the newest one its account can actually
-//!   run (handles per-account/tier gating).
-//! - `upgrade_config` — pure: rewrite a config so every superseded model adopts
-//!   the chosen top model for its provider, leaving intentional (still-endorsed)
-//!   choices untouched. Immutable: returns a new `Config`.
+//!   models (best/newest first) and pick the best one its account can actually
+//!   run (handles per-account/tier gating), falling back to the CLI's own
+//!   default model when the whole catalog has gone stale.
+//! - `live_subset` — pure: the slice of the catalog an account can run, which
+//!   is what the onboarding wizard builds a lineup from.
+//! - `planned_changes` / `upgrade_config` — pure: move every retired or
+//!   plan-gated model to one the account can run, leaving intentional
+//!   (uncurated) choices untouched. Immutable: returns a new `Config`.
 //!
 //! `consilium models [--write]` wires these together.
 
-use crate::catalog;
+use crate::adapters::CLI_DEFAULT_MODEL;
+use crate::catalog::{self, CatalogEntry};
 use crate::config::{Config, ModelCandidate, RoleConfig, RolesConfig};
 use crate::doctor;
 use crate::event::Provider;
 use crate::quota::QuotaStore;
 
-/// A configured model that has been superseded (is no longer in the catalog),
-/// together with the provider's current top model as the suggested replacement.
+/// A configured model that has been retired, together with the catalog model
+/// that replaces it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleModel {
     pub provider: Provider,
     pub current: String,
-    /// The provider's top catalog model, or `None` if the provider has no
-    /// catalog entry at all (then we can't suggest anything).
+    /// The same-tier catalog model that replaces it.
     pub suggested: Option<String>,
 }
 
@@ -37,41 +39,45 @@ pub struct StaleModel {
 /// is cheap enough to call before every run for the staleness hint. Valid but
 /// uncurated models (e.g. a cross-family Antigravity fallback) are never flagged.
 pub fn stale_models(config: &Config) -> Vec<StaleModel> {
-    let mut out = Vec::new();
-    for candidate in doctor::collect_distinct_model_pairs(config) {
-        if catalog::is_superseded(candidate.provider, &candidate.model) {
-            out.push(StaleModel {
+    doctor::collect_distinct_model_pairs(config)
+        .into_iter()
+        .filter_map(|candidate| {
+            let successor = catalog::successor_of(candidate.provider, &candidate.model)?;
+            Some(StaleModel {
                 provider: candidate.provider,
                 current: candidate.model,
-                suggested: catalog::top_model(candidate.provider).map(|e| e.model),
-            });
-        }
-    }
-    out
+                suggested: Some(successor.to_string()),
+            })
+        })
+        .collect()
 }
 
 /// The outcome of resolving one provider's best currently-usable model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopModel {
-    /// The newest catalog model that probed live for this account.
+    /// The best model that probed live for this account: a catalog model, or
+    /// `CLI_DEFAULT_MODEL` when the CLI answers but no catalog model does.
     Live(String),
-    /// The CLI is present but no catalog model answered (auth/tier/transient).
+    /// The CLI is present but nothing answered (auth/transient).
     NoLiveModel,
     /// The provider's CLI binary is not on PATH.
     CliMissing,
 }
 
 /// Probe a provider's catalog models best/newest first and return the first that
-/// answers a ~1-token liveness probe — the newest model this account can run.
-/// `None` when none answer. I/O (spawns the CLI); not unit-tested.
+/// answers a ~1-token liveness probe — the best model this account can run. If
+/// none answers, try the CLI's own default model: it still works when every
+/// catalog id has been retired or is gated on this plan. `None` when nothing
+/// answers. I/O (spawns the CLI); not unit-tested.
 pub async fn best_live_model(provider: Provider, quota: &QuotaStore) -> Option<ModelCandidate> {
-    for entry in catalog::entries_for(provider) {
+    let candidates = catalog::entries_for(provider)
+        .into_iter()
+        .map(|entry| entry.model)
+        .chain(std::iter::once(CLI_DEFAULT_MODEL.to_string()));
+    for model in candidates {
         let adapter = doctor::adapter_for(provider);
-        if doctor::probe_model(adapter, &entry.model, quota).await.ok {
-            return Some(ModelCandidate {
-                provider,
-                model: entry.model,
-            });
+        if doctor::probe_model(adapter, &model, quota).await.ok {
+            return Some(ModelCandidate { provider, model });
         }
     }
     None
@@ -87,19 +93,68 @@ async fn resolve_one(provider: Provider, quota: &QuotaStore) -> TopModel {
     }
 }
 
-/// Resolve the top live model for every v1 provider concurrently (a cold Claude
-/// probe must not serialize the wait). Stable order: claude, codex, gemini, grok.
-pub async fn resolve_top_models(quota: &QuotaStore) -> Vec<(Provider, TopModel)> {
-    let providers = [
-        Provider::Claude,
-        Provider::Codex,
-        Provider::Gemini,
-        Provider::Grok,
-    ];
+/// Resolve the top live model for each given provider concurrently (a cold
+/// Claude probe must not serialize the wait). Order follows `providers`.
+pub async fn resolve_top_models_for(
+    providers: &[Provider],
+    quota: &QuotaStore,
+) -> Vec<(Provider, TopModel)> {
     let futs = providers
-        .into_iter()
-        .map(|p| async move { (p, resolve_one(p, quota).await) });
+        .iter()
+        .map(|&p| async move { (p, resolve_one(p, quota).await) });
     futures::future::join_all(futs).await
+}
+
+/// Resolve the top live model for every provider. Stable order: claude, codex,
+/// gemini, grok.
+pub async fn resolve_top_models(quota: &QuotaStore) -> Vec<(Provider, TopModel)> {
+    resolve_top_models_for(
+        &[
+            Provider::Claude,
+            Provider::Codex,
+            Provider::Gemini,
+            Provider::Grok,
+        ],
+        quota,
+    )
+    .await
+}
+
+/// The live `(provider, model)` pairs out of a resolution.
+pub fn live_models(resolved: &[(Provider, TopModel)]) -> Vec<(Provider, String)> {
+    resolved
+        .iter()
+        .filter_map(|(provider, top)| match top {
+            TopModel::Live(model) => Some((*provider, model.clone())),
+            TopModel::NoLiveModel | TopModel::CliMissing => None,
+        })
+        .collect()
+}
+
+/// Pure: the part of `catalog` an account can run, given each provider's best
+/// live model (`live`, from `live_models`). Per provider: the live model and
+/// every tier below it (a plan that runs a tier runs the cheaper ones too);
+/// tiers above it are dropped. A provider whose CLI answers only on its own
+/// default model keeps one entry — its top entry's role scores, with the model
+/// replaced by `CLI_DEFAULT_MODEL`. Providers absent from `live` are dropped.
+/// Catalog order is preserved (the recommender's tie-breaks rely on it).
+pub fn live_subset(catalog: &[CatalogEntry], live: &[(Provider, String)]) -> Vec<CatalogEntry> {
+    catalog
+        .iter()
+        .filter_map(|entry| {
+            let live_model = chosen_for(live, entry.provider)?;
+            let entry_rank = catalog::rank(entry.provider, &entry.model)?;
+            match catalog::rank(entry.provider, live_model) {
+                Some(live_rank) if entry_rank >= live_rank => Some(entry.clone()),
+                Some(_) => None,
+                None if entry_rank == 0 => Some(CatalogEntry {
+                    model: live_model.to_string(),
+                    ..entry.clone()
+                }),
+                None => None,
+            }
+        })
+        .collect()
 }
 
 /// Resolve a provider's chosen replacement model from `chosen` (a list of
@@ -111,16 +166,29 @@ fn chosen_for(chosen: &[(Provider, String)], provider: Provider) -> Option<&str>
         .map(|(_, m)| m.as_str())
 }
 
-/// Pure: the new model string for one (provider, model) — adopt the chosen top
-/// model for its provider only if this exact model has been retired; otherwise
-/// keep it (still-current or deliberately-uncurated choices are untouched).
+/// Pure: the model a configured `(provider, model)` should move to, given the
+/// best model the account can run for that provider (`chosen`).
+///
+/// - A retired model first resolves to its same-tier successor.
+/// - If the account can run that tier (it is at or below the live model in the
+///   provider's best-first list), that is the answer — so a retired Sonnet
+///   becomes the new Sonnet, not the top Opus.
+/// - If the tier is above what the account can run, or only the CLI default
+///   answered, the live model is the answer.
+/// - Uncurated models (deliberate choices the catalog does not know) and
+///   providers with nothing live are left exactly as they were.
 fn upgrade_model(provider: Provider, model: &str, chosen: &[(Provider, String)]) -> String {
-    if !catalog::is_superseded(provider, model) {
+    let Some(live_top) = chosen_for(chosen, provider) else {
         return model.to_string();
+    };
+    let target = catalog::successor_of(provider, model).unwrap_or(model);
+    let Some(target_rank) = catalog::rank(provider, target) else {
+        return model.to_string();
+    };
+    match catalog::rank(provider, live_top) {
+        Some(live_rank) if target_rank >= live_rank => target.to_string(),
+        _ => live_top.to_string(),
     }
-    chosen_for(chosen, provider)
-        .map(str::to_string)
-        .unwrap_or_else(|| model.to_string())
 }
 
 fn upgrade_role(role: &RoleConfig, chosen: &[(Provider, String)]) -> RoleConfig {
@@ -138,10 +206,34 @@ fn upgrade_role(role: &RoleConfig, chosen: &[(Provider, String)]) -> RoleConfig 
     }
 }
 
-/// Pure: a new config where every superseded model (primary or fallback) adopts
-/// the chosen top model for its provider. Still-endorsed models — and roles
-/// whose provider isn't in `chosen` — are left exactly as they were. Immutable:
-/// the input is not modified.
+/// One model swap `upgrade_config` would make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChange {
+    pub provider: Provider,
+    pub from: String,
+    pub to: String,
+}
+
+/// Pure: the distinct model swaps `upgrade_config(config, chosen)` would make —
+/// what `consilium models` previews before `--write`.
+pub fn planned_changes(config: &Config, chosen: &[(Provider, String)]) -> Vec<ModelChange> {
+    doctor::collect_distinct_model_pairs(config)
+        .into_iter()
+        .filter_map(|candidate| {
+            let to = upgrade_model(candidate.provider, &candidate.model, chosen);
+            (to != candidate.model).then_some(ModelChange {
+                provider: candidate.provider,
+                from: candidate.model,
+                to,
+            })
+        })
+        .collect()
+}
+
+/// Pure: a new config where every retired or plan-gated model (primary or
+/// fallback) moves to one the account can run (see `upgrade_model`). Uncurated
+/// models — and roles whose provider isn't in `chosen` — are left exactly as
+/// they were. Immutable: the input is not modified.
 pub fn upgrade_config(config: &Config, chosen: &[(Provider, String)]) -> Config {
     let r = &config.roles;
     Config {
@@ -160,9 +252,13 @@ pub fn upgrade_config(config: &Config, chosen: &[(Provider, String)]) -> Config 
 mod tests {
     use super::*;
 
-    /// A config with a superseded codex model (gpt-5.4) as worker + reviewer and
-    /// as the gemini worker's fallback; everything else current.
-    fn config_with_stale_codex() -> Config {
+    fn chosen(pairs: &[(Provider, &str)]) -> Vec<(Provider, String)> {
+        pairs.iter().map(|(p, m)| (*p, m.to_string())).collect()
+    }
+
+    /// The lineup `consilium init` wrote under v0.2.0 — every model in it has
+    /// since been retired or renamed by its provider.
+    fn v0_2_config() -> Config {
         let json = r#"{
           "roles": {
             "conductor":  { "provider": "claude", "model": "claude-opus-4-8",
@@ -170,15 +266,24 @@ mod tests {
               "fallbacks": [{"provider": "claude", "model": "claude-sonnet-4-6"}] },
             "chairman":   { "provider": "claude", "model": "claude-opus-4-8" },
             "workers":    [
-              { "provider": "codex",  "model": "gpt-5.4" },
+              { "provider": "codex",  "model": "gpt-5.5" },
               { "provider": "gemini", "model": "Gemini 3.1 Pro (High)",
-                "fallbacks": [{"provider": "codex", "model": "gpt-5.4"}] }
+                "fallbacks": [{"provider": "codex", "model": "gpt-5.5"}] }
             ],
-            "reviewer":   { "provider": "codex",  "model": "gpt-5.4" },
+            "reviewer":   { "provider": "codex",  "model": "gpt-5.5" },
             "supervisor": { "provider": "gemini", "model": "Gemini 3.1 Pro (High)" }
           }
         }"#;
         serde_json::from_str(json).unwrap()
+    }
+
+    /// Every provider answering on its top catalog model.
+    fn top_tier_account() -> Vec<(Provider, String)> {
+        chosen(&[
+            (Provider::Claude, "claude-opus-5-5"),
+            (Provider::Codex, "gpt-6.1-sol"),
+            (Provider::Gemini, "gemini-4-argon-high"),
+        ])
     }
 
     #[test]
@@ -187,71 +292,125 @@ mod tests {
     }
 
     #[test]
-    fn detects_superseded_codex_model_and_suggests_top() {
-        let stale = stale_models(&config_with_stale_codex());
-        // gpt-5.4 appears as worker primary, reviewer primary, and a gemini
-        // fallback — but collect_distinct_model_pairs dedupes it to one.
-        assert_eq!(stale.len(), 1, "gpt-5.4 should be flagged once: {stale:?}");
-        assert_eq!(stale[0].provider, Provider::Codex);
-        assert_eq!(stale[0].current, "gpt-5.4");
-        assert_eq!(stale[0].suggested.as_deref(), Some("gpt-5.5"));
+    fn detects_each_retired_model_once_and_suggests_its_successor() {
+        let stale = stale_models(&v0_2_config());
+        let suggestion = |current: &str| {
+            stale
+                .iter()
+                .find(|s| s.current == current)
+                .and_then(|s| s.suggested.clone())
+        };
+        // gpt-5.5 appears three times in the config but is flagged once
+        assert_eq!(stale.len(), 4, "{stale:?}");
+        assert_eq!(suggestion("gpt-5.5").as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            suggestion("claude-opus-4-8").as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            suggestion("claude-sonnet-4-6").as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+        assert_eq!(
+            suggestion("Gemini 3.1 Pro (High)").as_deref(),
+            Some("gemini-4-argon-high")
+        );
     }
 
     #[test]
-    fn still_endorsed_models_are_not_flagged() {
-        // sonnet (a deliberate fallback) is in the catalog → never stale.
-        let stale = stale_models(&config_with_stale_codex());
-        assert!(stale
-            .iter()
-            .all(|s| s.current != "claude-sonnet-4-6" && s.current != "claude-opus-4-8"));
-    }
+    fn upgrade_moves_each_retired_model_to_its_same_tier_successor() {
+        let upgraded = upgrade_config(&v0_2_config(), &top_tier_account());
 
-    #[test]
-    fn upgrade_swaps_only_superseded_models() {
-        let cfg = config_with_stale_codex();
-        let upgraded = upgrade_config(&cfg, &[(Provider::Codex, "gpt-5.5".to_string())]);
-
-        // codex worker + reviewer + the gemini fallback all move to gpt-5.5
-        assert_eq!(upgraded.roles.workers[0].model, "gpt-5.5");
-        assert_eq!(upgraded.roles.reviewer.model, "gpt-5.5");
-        assert_eq!(upgraded.roles.workers[1].fallbacks[0].model, "gpt-5.5");
-
-        // intentional, still-endorsed choices are untouched
-        assert_eq!(upgraded.roles.conductor.model, "claude-opus-4-8");
+        assert_eq!(upgraded.roles.conductor.model, "claude-opus-5-5");
+        // the cheaper fallback stays a cheaper fallback — it must not collapse
+        // onto the top model
         assert_eq!(
             upgraded.roles.conductor.fallbacks[0].model,
-            "claude-sonnet-4-6"
+            "claude-sonnet-5-5"
         );
-        assert_eq!(upgraded.roles.workers[1].model, "Gemini 3.1 Pro (High)");
+        assert_eq!(upgraded.roles.workers[0].model, "gpt-6.1-sol");
+        assert_eq!(upgraded.roles.workers[1].model, "gemini-4-argon-high");
+        assert_eq!(upgraded.roles.workers[1].fallbacks[0].model, "gpt-6.1-sol");
+        assert_eq!(upgraded.roles.reviewer.model, "gpt-6.1-sol");
+        assert_eq!(upgraded.roles.supervisor.model, "gemini-4-argon-high");
 
         // and the upgraded config now has nothing stale
         assert!(stale_models(&upgraded).is_empty());
     }
 
+    /// A free ChatGPT plan cannot run `gpt-6.1-sol` (verified 2026-11-17): the
+    /// retired model must land on what the account can actually run.
     #[test]
-    fn upgrade_is_immutable_and_a_noop_without_a_chosen_model() {
-        let cfg = config_with_stale_codex();
-        // No chosen model for codex → stale models are left as-is (can't upgrade).
-        let same = upgrade_config(&cfg, &[]);
-        assert_eq!(same.roles.workers[0].model, "gpt-5.4");
-        // original is untouched (immutability)
-        assert_eq!(cfg.roles.workers[0].model, "gpt-5.4");
+    fn upgrade_respects_a_plan_gated_account() {
+        let account = chosen(&[(Provider::Codex, "gpt-6-luna")]);
+        let upgraded = upgrade_config(&v0_2_config(), &account);
+        assert_eq!(upgraded.roles.workers[0].model, "gpt-6-luna");
+        assert_eq!(upgraded.roles.reviewer.model, "gpt-6-luna");
+    }
+
+    /// The same holds for a current-but-gated model, e.g. the shipped default
+    /// lineup on a free plan.
+    #[test]
+    fn upgrade_lowers_a_current_model_the_account_cannot_run() {
+        let account = chosen(&[(Provider::Codex, "gpt-6-luna")]);
+        let upgraded = upgrade_config(&Config::default(), &account);
+        assert_eq!(upgraded.roles.workers[0].model, "gpt-6-luna");
+        // a provider that was not resolved is left alone
+        assert_eq!(
+            upgraded.roles.conductor.model,
+            Config::default().roles.conductor.model
+        );
     }
 
     #[test]
-    fn uncurated_cross_family_fallback_is_never_stale_or_rewritten() {
-        // The `gemini` provider running a Claude model via Antigravity is a valid,
-        // deliberate fallback that isn't in the curated catalog. It must NOT be
-        // flagged as stale, and `--write` must leave it exactly as-is — only the
-        // explicitly-retired gpt-5.4 moves.
+    fn upgrade_keeps_a_lower_tier_the_account_can_still_run() {
+        // An account on the top tier keeps a deliberately cheaper choice.
         let json = r#"{
           "roles": {
-            "conductor":  { "provider": "claude", "model": "claude-opus-4-8",
+            "conductor":  { "provider": "claude", "model": "claude-sonnet-5-5" },
+            "chairman":   { "provider": "claude", "model": "claude-sonnet-5-5" },
+            "workers":    [ { "provider": "codex", "model": "gpt-6-luna" } ],
+            "reviewer":   { "provider": "codex", "model": "gpt-6-luna" },
+            "supervisor": { "provider": "gemini", "model": "gemini-3.8-flash-high" }
+          }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(upgrade_config(&cfg, &top_tier_account()), cfg);
+    }
+
+    /// When every catalog id for a provider is dead but its CLI still answers
+    /// on its own default model, the config adopts `default`.
+    #[test]
+    fn upgrade_adopts_the_cli_default_when_no_catalog_model_is_live() {
+        let account = chosen(&[(Provider::Codex, CLI_DEFAULT_MODEL)]);
+        let upgraded = upgrade_config(&v0_2_config(), &account);
+        assert_eq!(upgraded.roles.workers[0].model, CLI_DEFAULT_MODEL);
+        assert_eq!(upgraded.roles.reviewer.model, CLI_DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn upgrade_is_immutable_and_a_noop_without_a_chosen_model() {
+        let cfg = v0_2_config();
+        // No live model for codex → retired models are left as-is (can't upgrade).
+        let same = upgrade_config(&cfg, &[]);
+        assert_eq!(same.roles.workers[0].model, "gpt-5.5");
+        // original is untouched (immutability)
+        assert_eq!(cfg.roles.workers[0].model, "gpt-5.5");
+    }
+
+    #[test]
+    fn uncurated_and_cli_default_models_are_never_stale_or_rewritten() {
+        // The `gemini` provider running a Claude model via Antigravity is a
+        // deliberate choice the catalog does not know, and `default` defers to
+        // the CLI. Neither may be flagged or rewritten — only gpt-5.4 moves.
+        let json = r#"{
+          "roles": {
+            "conductor":  { "provider": "claude", "model": "default",
               "fallbacks": [{"provider": "gemini", "model": "Claude Opus 4.6 (Thinking)"}] },
-            "chairman":   { "provider": "claude", "model": "claude-opus-4-8" },
+            "chairman":   { "provider": "claude", "model": "default" },
             "workers":    [ { "provider": "codex", "model": "gpt-5.4" } ],
             "reviewer":   { "provider": "codex", "model": "gpt-5.4" },
-            "supervisor": { "provider": "gemini", "model": "Gemini 3.1 Pro (High)" }
+            "supervisor": { "provider": "gemini", "model": "gemini-4-argon-high" }
           }
         }"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
@@ -260,22 +419,89 @@ mod tests {
         assert_eq!(stale.len(), 1, "only gpt-5.4 is retired: {stale:?}");
         assert_eq!(stale[0].current, "gpt-5.4");
 
-        let upgraded = upgrade_config(&cfg, &[(Provider::Codex, "gpt-5.5".to_string())]);
-        // the cross-family fallback survives untouched
+        let upgraded = upgrade_config(&cfg, &top_tier_account());
+        assert_eq!(upgraded.roles.conductor.model, "default");
         assert_eq!(
             upgraded.roles.conductor.fallbacks[0].model,
             "Claude Opus 4.6 (Thinking)"
         );
-        // and the retired codex model still upgraded
-        assert_eq!(upgraded.roles.workers[0].model, "gpt-5.5");
+        assert_eq!(upgraded.roles.workers[0].model, "gpt-6.1-sol");
     }
 
     #[test]
     fn upgrade_preserves_role_hints() {
-        let cfg = config_with_stale_codex();
-        let upgraded = upgrade_config(&cfg, &[(Provider::Codex, "gpt-5.5".to_string())]);
-        // conductor keeps effort/mode; supervisor keeps its provider/model
+        let upgraded = upgrade_config(&v0_2_config(), &top_tier_account());
         assert_eq!(upgraded.roles.conductor.effort.as_deref(), Some("high"));
         assert_eq!(upgraded.roles.conductor.mode.as_deref(), Some("attached"));
+    }
+
+    #[test]
+    fn planned_changes_lists_each_distinct_swap_once() {
+        let changes = planned_changes(&v0_2_config(), &top_tier_account());
+        let swap = |from: &str| {
+            changes
+                .iter()
+                .find(|c| c.from == from)
+                .map(|c| c.to.as_str())
+        };
+        assert_eq!(changes.len(), 4, "{changes:?}");
+        assert_eq!(swap("gpt-5.5"), Some("gpt-6.1-sol"));
+        assert_eq!(swap("claude-sonnet-4-6"), Some("claude-sonnet-5-5"));
+        // nothing to do for an up-to-date lineup
+        assert!(planned_changes(&Config::default(), &top_tier_account()).is_empty());
+    }
+
+    #[test]
+    fn live_models_keeps_only_providers_that_answered() {
+        let resolved = vec![
+            (Provider::Claude, TopModel::Live("claude-opus-5-5".into())),
+            (Provider::Codex, TopModel::NoLiveModel),
+            (Provider::Grok, TopModel::CliMissing),
+        ];
+        assert_eq!(
+            live_models(&resolved),
+            chosen(&[(Provider::Claude, "claude-opus-5-5")])
+        );
+    }
+
+    fn models_of(entries: &[CatalogEntry], provider: Provider) -> Vec<&str> {
+        entries
+            .iter()
+            .filter(|e| e.provider == provider)
+            .map(|e| e.model.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn live_subset_drops_tiers_above_what_the_account_can_run() {
+        let account = chosen(&[
+            (Provider::Claude, "claude-opus-5-5"),
+            (Provider::Codex, "gpt-6-luna"),
+            (Provider::Gemini, "gemini-4-hydrogen-high"),
+        ]);
+        let subset = live_subset(&catalog::catalog(), &account);
+
+        assert_eq!(
+            models_of(&subset, Provider::Claude),
+            ["claude-opus-5-5", "claude-sonnet-5-5"]
+        );
+        // gpt-6.1-sol is plan-gated for this account → gone
+        assert_eq!(models_of(&subset, Provider::Codex), ["gpt-6-luna"]);
+        assert_eq!(
+            models_of(&subset, Provider::Gemini),
+            ["gemini-4-hydrogen-high", "gemini-3.8-flash-high"]
+        );
+        // grok did not answer → no entry at all
+        assert!(models_of(&subset, Provider::Grok).is_empty());
+    }
+
+    #[test]
+    fn live_subset_keeps_a_provider_that_only_answers_on_its_cli_default() {
+        let account = chosen(&[(Provider::Codex, CLI_DEFAULT_MODEL)]);
+        let subset = live_subset(&catalog::catalog(), &account);
+        assert_eq!(models_of(&subset, Provider::Codex), [CLI_DEFAULT_MODEL]);
+        // it keeps the provider's top role scores, so it still wins its roles
+        let top = catalog::top_model(Provider::Codex).unwrap();
+        assert_eq!(subset[0].scores, top.scores);
     }
 }

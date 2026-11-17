@@ -9,6 +9,7 @@ use crate::catalog::{catalog, CatalogEntry};
 use crate::config::Config;
 use crate::config::RolesConfig;
 use crate::event::Provider;
+use crate::models;
 use crate::quota::QuotaStore;
 use crate::recommend::recommend_roles;
 use dialoguer::{Confirm, Select};
@@ -132,10 +133,22 @@ pub async fn run_init_wizard(quota: &QuotaStore, target: &Path, force: bool) -> 
             "no authenticated providers — run the printed login commands (or `consilium auth`) and try again"
         );
     }
-    let available: Vec<CatalogEntry> = catalog()
-        .into_iter()
-        .filter(|e| ready.contains(&e.provider))
-        .collect();
+    // Signed in is not the same as "can run our top model": plans gate models
+    // (a free ChatGPT plan has no gpt-6.1-sol) and providers retire them. Find
+    // the best model each ready provider actually answers on, and build the
+    // lineup only from models this account can run.
+    println!("\nFinding the best model each provider can run on your plan…");
+    let resolved = models::resolve_top_models_for(&ready, quota).await;
+    let live = models::live_models(&resolved);
+    for (p, model) in &live {
+        println!("  ✓ {:8} {model}", p.as_str());
+    }
+    let available: Vec<CatalogEntry> = models::live_subset(&catalog(), &live);
+    if available.is_empty() {
+        anyhow::bail!(
+            "no provider answered a model probe — run `consilium auth` to see why, then try again"
+        );
+    }
 
     // 6. Resolve roles.
     let roles = if custom {

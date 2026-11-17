@@ -176,35 +176,58 @@ pub struct Config {
     pub budget_secs: Option<u64>,
 }
 
+/// A named model followed by its provider CLI's own default — the last-resort
+/// rung every default ladder ends on (see `recommend::cli_default_rung`).
+fn cli_default(provider: Provider) -> ModelCandidate {
+    ModelCandidate {
+        provider,
+        model: crate::adapters::CLI_DEFAULT_MODEL.into(),
+    }
+}
+
+/// A default role: the named model, then its provider's CLI default.
+fn default_role(provider: Provider, model: &str) -> RoleConfig {
+    RoleConfig {
+        fallbacks: vec![cli_default(provider)],
+        ..RoleConfig::new(provider, model)
+    }
+}
+
+/// The default planner role (conductor/chairman): opus → sonnet → CLI default.
+fn default_planner() -> RoleConfig {
+    RoleConfig {
+        effort: Some("high".into()),
+        fallbacks: vec![
+            ModelCandidate {
+                provider: Provider::Claude,
+                model: "claude-sonnet-5-5".into(),
+            },
+            cli_default(Provider::Claude),
+        ],
+        ..RoleConfig::new(Provider::Claude, "claude-opus-5-5")
+    }
+}
+
 impl Default for Config {
+    /// The curated lineup. It mirrors `recommend_roles(&catalog())` exactly (the
+    /// recommender's keystone test enforces it), so "no config file" and
+    /// "`consilium init` with every provider ready" agree.
     fn default() -> Self {
         Self {
             roles: RolesConfig {
                 conductor: RoleConfig {
-                    effort: Some("high".into()),
                     mode: Some("attached".into()),
-                    fallbacks: vec![ModelCandidate {
-                        provider: Provider::Claude,
-                        model: "claude-sonnet-4-6".into(),
-                    }],
-                    ..RoleConfig::new(Provider::Claude, "claude-opus-4-8")
+                    ..default_planner()
                 },
-                chairman: RoleConfig {
-                    effort: Some("high".into()),
-                    fallbacks: vec![ModelCandidate {
-                        provider: Provider::Claude,
-                        model: "claude-sonnet-4-6".into(),
-                    }],
-                    ..RoleConfig::new(Provider::Claude, "claude-opus-4-8")
-                },
+                chairman: default_planner(),
                 workers: vec![
-                    RoleConfig::new(Provider::Codex, "gpt-5.5"),
-                    RoleConfig::new(Provider::Gemini, "Gemini 3.1 Pro (High)"),
+                    default_role(Provider::Codex, "gpt-6.1-sol"),
+                    default_role(Provider::Gemini, "gemini-4-argon-high"),
                 ],
-                reviewer: RoleConfig::new(Provider::Codex, "gpt-5.5"),
+                reviewer: default_role(Provider::Codex, "gpt-6.1-sol"),
                 supervisor: RoleConfig {
                     intervention_threshold: Some("medium".into()),
-                    ..RoleConfig::new(Provider::Gemini, "Gemini 3.1 Pro (High)")
+                    ..default_role(Provider::Gemini, "gemini-4-argon-high")
                 },
             },
             quota: QuotaConfig::default(),
@@ -356,11 +379,20 @@ mod tests {
     }
 
     #[test]
-    fn default_conductor_has_a_sonnet_fallback() {
+    fn default_conductor_falls_back_to_sonnet_then_the_cli_default() {
         let cfg = Config::default();
-        let ladder = cfg.roles.conductor.ladder();
-        assert!(ladder.len() >= 2, "conductor should fall back below opus");
-        assert_eq!(ladder[0].model, "claude-opus-4-8");
+        let models: Vec<String> = cfg
+            .roles
+            .conductor
+            .ladder()
+            .into_iter()
+            .map(|c| c.model)
+            .collect();
+        assert_eq!(
+            models,
+            ["claude-opus-5-5", "claude-sonnet-5-5", "default"],
+            "conductor should fall back below opus"
+        );
     }
 
     #[test]
@@ -370,13 +402,17 @@ mod tests {
             .to_pretty_json()
             .expect("serialization should succeed");
         let parsed: Config = serde_json::from_str(&json).expect("emitted JSON must be valid");
+        assert_eq!(
+            parsed, original,
+            "the default config must survive a round-trip"
+        );
         let ladder = parsed.roles.conductor.ladder();
         assert_eq!(
             ladder.len(),
-            2,
-            "conductor ladder should have 2 rungs after round-trip"
+            3,
+            "conductor ladder should have 3 rungs after round-trip"
         );
-        assert_eq!(ladder[0].model, "claude-opus-4-8");
+        assert_eq!(ladder[0].model, "claude-opus-5-5");
     }
 
     #[test]

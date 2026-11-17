@@ -61,7 +61,7 @@ pub fn run_doctor() -> Vec<CliStatus> {
 
 // ── Model probing ──────────────────────────────────────────────────────────────
 
-use crate::adapters::{Adapter, FailureKind, RunRequest};
+use crate::adapters::{Adapter, FailureKind, RunRequest, CLI_DEFAULT_MODEL};
 use crate::config::{Config, ModelCandidate};
 use crate::event::Provider;
 use crate::orchestrator::runner::{run_to_completion, RunStatus};
@@ -209,12 +209,50 @@ impl ModelProbeReport {
 #[deprecated(note = "use ModelProbeReport; this alias will be removed after v0.3")]
 pub type PreflightReport = ModelProbeReport;
 
+/// Splits candidates into (named models, CLI-default rungs), order preserved.
+pub(crate) fn split_cli_defaults(
+    candidates: Vec<ModelCandidate>,
+) -> (Vec<ModelCandidate>, Vec<ModelCandidate>) {
+    candidates
+        .into_iter()
+        .partition(|c| c.model != CLI_DEFAULT_MODEL)
+}
+
+/// Whether a provider's CLI-default rung is worth a probe: only when none of
+/// its named models answered, i.e. when the default is what a run would
+/// actually land on. It is a last resort, so probing it on every healthy run
+/// would spend a call per provider (and ~40s for `agy`) for nothing.
+pub(crate) fn needs_cli_default_probe(
+    provider: Provider,
+    probes: &[(ModelCandidate, ModelProbe)],
+) -> bool {
+    !probes
+        .iter()
+        .any(|(candidate, probe)| candidate.provider == provider && probe.ok)
+}
+
+async fn probe_candidate(
+    candidate: ModelCandidate,
+    quota: &QuotaStore,
+) -> (ModelCandidate, ModelProbe) {
+    let adapter = adapter_for(candidate.provider);
+    let probe = probe_model(adapter, &candidate.model, quota).await;
+    (candidate, probe)
+}
+
+/// Probes every distinct configured model: the named ones first, then a
+/// provider's CLI-default rung only if it is needed (see
+/// `needs_cli_default_probe`).
 pub async fn preflight(config: &Config, quota: &QuotaStore) -> ModelProbeReport {
+    let (named, defaults) = split_cli_defaults(collect_distinct_model_pairs(config));
     let mut probes = Vec::new();
-    for candidate in collect_distinct_model_pairs(config) {
-        let adapter = adapter_for(candidate.provider);
-        let probe = probe_model(adapter, &candidate.model, quota).await;
-        probes.push((candidate, probe));
+    for candidate in named {
+        probes.push(probe_candidate(candidate, quota).await);
+    }
+    for candidate in defaults {
+        if needs_cli_default_probe(candidate.provider, &probes) {
+            probes.push(probe_candidate(candidate, quota).await);
+        }
     }
     ModelProbeReport { probes }
 }
@@ -224,7 +262,9 @@ pub async fn preflight(config: &Config, quota: &QuotaStore) -> ModelProbeReport 
 /// no correctness risk in the (necessarily fuzzy) string matching.
 pub(crate) fn remediation_hint(detail: &str) -> &'static str {
     let d = detail.to_ascii_lowercase();
-    if d.contains("outdated") || d.contains("upgrade required") {
+    if d.starts_with(probe_label(FailureKind::ModelUnavailable)) {
+        "this model is not available to your account (retired, or not in your plan) — run `consilium models --write` to switch to one that is"
+    } else if d.contains("outdated") || d.contains("upgrade required") {
         "this CLI version is too old for the provider — update the CLI (its message names the command), then re-run"
     } else if d.contains("no longer supported") || d.contains("ineligible") || d.contains("migrate")
     {
@@ -370,21 +410,27 @@ mod tests {
         // There must be at least one entry per distinct model.
         assert!(!pairs.is_empty(), "should have at least one model pair");
 
-        // claude-opus-4-8 appears as conductor primary AND chairman primary —
+        // claude-opus-5-5 appears as conductor primary AND chairman primary —
         // it should appear only once.
-        let opus_count = pairs
-            .iter()
-            .filter(|c| c.model == "claude-opus-4-8" && c.provider == Provider::Claude)
-            .count();
-        assert_eq!(opus_count, 1, "opus should be deduplicated across roles");
+        let count = |model: &str| {
+            pairs
+                .iter()
+                .filter(|c| c.model == model && c.provider == Provider::Claude)
+                .count()
+        };
+        assert_eq!(
+            count("claude-opus-5-5"),
+            1,
+            "opus should be deduplicated across roles"
+        );
 
-        // claude-sonnet-4-6 is a fallback for both conductor and chairman —
+        // claude-sonnet-5-5 is a fallback for both conductor and chairman —
         // it should also appear only once.
-        let sonnet_count = pairs
-            .iter()
-            .filter(|c| c.model == "claude-sonnet-4-6" && c.provider == Provider::Claude)
-            .count();
-        assert_eq!(sonnet_count, 1, "sonnet fallback should be deduplicated");
+        assert_eq!(
+            count("claude-sonnet-5-5"),
+            1,
+            "sonnet fallback should be deduplicated"
+        );
     }
 
     #[test]
@@ -420,6 +466,58 @@ mod tests {
         assert!(has(Provider::Claude, "opus"));
         assert!(has(Provider::Codex, "gpt-x"));
         assert!(has(Provider::Gemini, "gemini-pro"));
+    }
+
+    #[test]
+    fn remediation_hint_points_an_unavailable_model_at_consilium_models() {
+        // Real codex-cli 0.160.1 refusal for a plan-gated model.
+        let detail = "unavailable: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}";
+        assert!(remediation_hint(detail).contains("consilium models --write"));
+    }
+
+    #[test]
+    fn default_config_preflight_probes_named_models_before_any_cli_default() {
+        let (named, defaults) =
+            split_cli_defaults(collect_distinct_model_pairs(&Config::default()));
+        assert!(named.iter().all(|c| c.model != CLI_DEFAULT_MODEL));
+        // one named model per provider tier in the default lineup — no more
+        // probes than v0.2.0 made
+        let named_models: Vec<&str> = named.iter().map(|c| c.model.as_str()).collect();
+        assert_eq!(
+            named_models,
+            [
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "gpt-6.1-sol",
+                "gemini-4-argon-high"
+            ]
+        );
+        // one CLI-default rung per provider, deduplicated across roles
+        let default_providers: Vec<Provider> = defaults.iter().map(|c| c.provider).collect();
+        assert_eq!(
+            default_providers,
+            [Provider::Claude, Provider::Codex, Provider::Gemini]
+        );
+    }
+
+    #[test]
+    fn cli_default_is_probed_only_when_no_named_model_of_its_provider_answered() {
+        let probes = vec![
+            (
+                candidate(Provider::Claude, "claude-opus-5-5"),
+                probe(Provider::Claude, "claude-opus-5-5", true, "ok"),
+            ),
+            (
+                candidate(Provider::Codex, "gpt-6.1-sol"),
+                probe(Provider::Codex, "gpt-6.1-sol", false, "unavailable"),
+            ),
+        ];
+        // claude answered on a named model → its last-resort rung is not worth a probe
+        assert!(!needs_cli_default_probe(Provider::Claude, &probes));
+        // codex's only named model is dead → the CLI default is what will run
+        assert!(needs_cli_default_probe(Provider::Codex, &probes));
+        // a provider with no named model at all (a `default`-only lineup)
+        assert!(needs_cli_default_probe(Provider::Gemini, &probes));
     }
 
     #[test]

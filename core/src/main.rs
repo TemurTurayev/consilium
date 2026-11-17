@@ -89,11 +89,12 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Check each provider's current top model (probes ~1 token per provider)
-    /// and, with --write, update consilium.config.json so superseded models
-    /// adopt the latest. Run it after a provider ships a newer model.
+    /// Find the best model each provider can run on your account (a few
+    /// ~1-token probes per provider) and, with --write, update
+    /// consilium.config.json so retired or plan-gated models switch to it.
+    /// Run it when a run reports an unavailable model.
     Models {
-        /// Rewrite consilium.config.json to adopt each provider's top live model.
+        /// Rewrite consilium.config.json with the models this account can run.
         #[arg(long)]
         write: bool,
     },
@@ -177,7 +178,7 @@ fn print_staleness_hint(config: &consilium::config::Config) {
             .map(|s| format!("{}/{}", s.provider.as_str(), s.current))
             .collect();
         eprintln!(
-            "ℹ superseded model(s) in config: {} — run `consilium models --write` to adopt the latest.",
+            "ℹ retired model(s) in config: {} — run `consilium models --write` to switch to current ones.",
             names.join(", ")
         );
     }
@@ -270,15 +271,11 @@ async fn main() -> anyhow::Result<()> {
             let config = consilium::config::Config::load(Some(config_path))?;
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
 
-            println!("── available top models ──");
+            println!("── best model each provider can run on this account ──");
             let resolved = models::resolve_top_models(&store).await;
-            let mut chosen: Vec<(Provider, String)> = Vec::new();
             for (p, top) in &resolved {
                 match top {
-                    TopModel::Live(m) => {
-                        println!("  ✓ {:8} {m}", p.as_str());
-                        chosen.push((*p, m.clone()));
-                    }
+                    TopModel::Live(m) => println!("  ✓ {:8} {m}", p.as_str()),
                     TopModel::NoLiveModel => {
                         println!(
                             "  ✗ {:8} no model answered — check `consilium auth`",
@@ -290,49 +287,35 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            let chosen: Vec<(Provider, String)> = models::live_models(&resolved);
 
-            let stale = models::stale_models(&config);
-            if stale.is_empty() {
+            // Retired models whose provider did not answer cannot be moved —
+            // say so instead of silently leaving them.
+            for s in models::stale_models(&config) {
+                if !chosen.iter().any(|(p, _)| *p == s.provider) {
+                    println!(
+                        "\n  ! {}/{} is retired, but {} did not answer — nothing to switch it to yet.",
+                        s.provider.as_str(),
+                        s.current,
+                        s.provider.as_str()
+                    );
+                }
+            }
+
+            let changes = models::planned_changes(&config, &chosen);
+            if changes.is_empty() {
                 println!("\nconsilium.config.json is up to date.");
             } else {
-                println!("\nsuperseded models in consilium.config.json:");
-                for s in &stale {
-                    // Show what `--write` would actually adopt: the live-probed top
-                    // (`chosen`) when available, falling back to the catalog top
-                    // only when the provider has no live model. Keeps the preview
-                    // honest when an account is gated out of the catalog's #1.
-                    let live = chosen
-                        .iter()
-                        .find(|(p, _)| *p == s.provider)
-                        .map(|(_, m)| m.as_str());
-                    match live.or(s.suggested.as_deref()) {
-                        Some(target) => {
-                            println!("  • {}/{} → {target}", s.provider.as_str(), s.current)
-                        }
-                        None => {
-                            println!(
-                                "  • {}/{} (no catalog replacement)",
-                                s.provider.as_str(),
-                                s.current
-                            )
-                        }
-                    }
+                println!("\nmodels to switch (retired, or not available on this account):");
+                for c in &changes {
+                    println!("  • {}/{} → {}", c.provider.as_str(), c.from, c.to);
                 }
                 if write {
                     let upgraded = models::upgrade_config(&config, &chosen);
-                    if upgraded == config {
-                        println!(
-                            "\nnothing written — no live replacement available for the superseded provider(s)."
-                        );
-                    } else {
-                        std::fs::write(config_path, upgraded.to_pretty_json()?)?;
-                        println!(
-                            "\n✓ updated {} to the latest models.",
-                            config_path.display()
-                        );
-                    }
+                    std::fs::write(config_path, upgraded.to_pretty_json()?)?;
+                    println!("\n✓ updated {}.", config_path.display());
                 } else {
-                    println!("\nrun `consilium models --write` to adopt them.");
+                    println!("\nrun `consilium models --write` to apply.");
                 }
             }
         }

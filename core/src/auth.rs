@@ -3,7 +3,7 @@
 //! the I/O shell (`probe_auth`/`auth_report`, added next) reuses `crate::doctor`
 //! and is not unit-tested, mirroring `doctor::probe_model`.
 
-use crate::catalog::catalog;
+use crate::adapters::CLI_DEFAULT_MODEL;
 use crate::doctor;
 use crate::event::Provider;
 use crate::quota::QuotaStore;
@@ -91,33 +91,40 @@ pub fn guidance(p: Provider, status: &ProviderAuth) -> String {
         }
         ProviderAuth::NeedsLogin(_) => format!("{bin}: {}", login_command(p)),
         ProviderAuth::Down(detail) => {
-            format!("{bin}: {detail} — retry, or run `{bin} -p hi` directly to see the error")
+            format!(
+                "{bin}: {detail} — retry, or run `{}` directly to see the error",
+                smoke_command(p)
+            )
         }
     }
 }
 
-/// The model probed to test a provider's auth — its first catalog entry (the
-/// curated primary). Every v1 provider has at least one catalog entry.
-pub fn primary_model(p: Provider) -> Option<String> {
-    catalog()
-        .into_iter()
-        .find(|e| e.provider == p)
-        .map(|e| e.model)
+/// The shortest command that runs one prompt through a provider's CLI, for the
+/// "try it yourself" hint. Each CLI spells its headless mode differently.
+pub fn smoke_command(p: Provider) -> &'static str {
+    match p {
+        Provider::Claude => "claude -p hi",
+        Provider::Codex => "codex exec hi",
+        Provider::Gemini => "agy -p hi",
+        Provider::Grok => "grok -p hi",
+    }
 }
 
 /// Probe one provider's auth state: CLI presence (`doctor::check`) then, if
-/// present, a live liveness probe (`doctor::probe_model`, ~1 token) on its
-/// primary catalog model. I/O — not unit-tested (spawns a real CLI).
+/// present, a live liveness probe (`doctor::probe_model`, ~1 token) on the CLI's
+/// OWN default model. Asking for no particular model keeps this a pure "is the
+/// CLI installed and signed in?" check: it cannot be broken by a model the
+/// provider has retired or one this account's plan does not include (both
+/// happened to every v0.2.0 catalog model within four months). Which models
+/// the account can run is a separate question — `crate::models`. I/O — not
+/// unit-tested (spawns a real CLI).
 pub async fn probe_auth(p: Provider, quota: &QuotaStore) -> ProviderAuth {
     let bin = cli_binary(p);
     if !doctor::check(bin).found {
         return ProviderAuth::CliMissing;
     }
-    let Some(model) = primary_model(p) else {
-        return ProviderAuth::Down(format!("no catalog model for {}", p.as_str()));
-    };
     let adapter = doctor::adapter_for(p);
-    let probe = doctor::probe_model(adapter, &model, quota).await;
+    let probe = doctor::probe_model(adapter, CLI_DEFAULT_MODEL, quota).await;
     classify(true, Some((probe.ok, &probe.detail)))
 }
 
@@ -225,14 +232,30 @@ mod tests {
         );
     }
 
+    /// `codex -p` selects a config profile, not a prompt — the hint used to
+    /// suggest `codex -p hi`, which does not run anything.
     #[test]
-    fn primary_model_is_the_first_catalog_entry_per_provider() {
-        assert_eq!(
-            primary_model(Provider::Claude).as_deref(),
-            Some("claude-opus-4-8")
-        );
-        assert_eq!(primary_model(Provider::Codex).as_deref(), Some("gpt-5.5"));
-        assert!(primary_model(Provider::Gemini).is_some());
-        assert_eq!(primary_model(Provider::Grok).as_deref(), Some("grok-build"));
+    fn guidance_for_down_names_a_command_that_runs_a_prompt() {
+        let g = guidance(Provider::Codex, &ProviderAuth::Down("boom".into()));
+        assert!(g.contains("`codex exec hi`"), "got: {g}");
+        assert!(!g.contains("codex -p"), "got: {g}");
+        let g = guidance(Provider::Gemini, &ProviderAuth::Down("boom".into()));
+        assert!(g.contains("`agy -p hi`"), "got: {g}");
+    }
+
+    #[test]
+    fn smoke_command_starts_with_each_providers_binary() {
+        for p in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::Gemini,
+            Provider::Grok,
+        ] {
+            assert!(
+                smoke_command(p).starts_with(cli_binary(p)),
+                "{}",
+                smoke_command(p)
+            );
+        }
     }
 }
