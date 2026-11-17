@@ -172,17 +172,29 @@ pub struct SuiteReport {
     pub suite_commit: String,
     /// Trials requested per (task, approach) — the N of every per-task cell.
     pub trials: u32,
+    /// Runs the whole matrix calls for (tasks × approaches × trials). When
+    /// `results` holds fewer, the run was stopped early and this report is
+    /// partial: it covers only the trials that finished.
+    pub planned_runs: u32,
     pub results: Vec<TrialResult>,
     pub aggregate: Aggregate,
 }
 
-/// Assemble a schema-v2 report from scored trials. Pure.
-pub fn build_report(meta: ReportMeta, trials: u32, results: Vec<TrialResult>) -> SuiteReport {
+/// Assemble a schema-v2 report from the trials scored so far. `planned_runs`
+/// is the size of the whole matrix, so a report built mid-run says it is
+/// partial. Pure.
+pub fn build_report(
+    meta: ReportMeta,
+    trials: u32,
+    planned_runs: u32,
+    results: Vec<TrialResult>,
+) -> SuiteReport {
     SuiteReport {
         schema_version: EVAL_SCHEMA_VERSION,
         generated_at: meta.generated_at,
         suite_commit: meta.suite_commit,
         trials,
+        planned_runs,
         aggregate: aggregate(&results),
         results,
     }
@@ -306,10 +318,20 @@ pub fn markdown_report(report: &SuiteReport) -> String {
     } else {
         "run-to-run spread: n/a (needs N ≥ 2)"
     };
+    let finished = report.results.len();
+    let coverage = if (finished as u32) < report.planned_runs {
+        format!(
+            "**PARTIAL** — {finished} of {} planned runs finished; the run was stopped early",
+            report.planned_runs
+        )
+    } else {
+        format!("{finished} of {} planned runs", report.planned_runs)
+    };
     let mut s = format!(
         "# Consilium eval results (schema v{})\n\n\
          - Generated: {}\n\
          - Suite commit: {}\n\
+         - Runs: {coverage}\n\
          - Trials per task and approach: N = {} — {}\n",
         report.schema_version, report.generated_at, report.suite_commit, report.trials, spread_note
     );
@@ -477,6 +499,7 @@ mod tests {
                 generated_at: "2026-11-17T12:00:00Z".into(),
                 suite_commit: "abc".into(),
             },
+            1,
             1,
             results,
         );

@@ -935,6 +935,18 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let deps = ConfigEvalDeps { config };
+            let out_path = out.unwrap_or_else(|| {
+                std::path::PathBuf::from("eval/results")
+                    .join(format!("{}-results.json", consilium::quota::unix_now()))
+            });
+            eprintln!("results (saved after every run): {}", out_path.display());
+            // Saved after every trial, so a run that is stopped or dies
+            // part-way keeps what it has already measured and paid for.
+            let mut save_progress = |partial: &eval::SuiteReport| {
+                if let Err(e) = eval::save_report(&out_path, partial) {
+                    eprintln!("warning: could not save partial results: {e:#}");
+                }
+            };
             // Recorded before the first model call: when this run started and
             // which commit of the suite it measured.
             let meta = eval::ReportMeta::capture(&suite);
@@ -945,19 +957,12 @@ async fn main() -> anyhow::Result<()> {
                 &deps,
                 std::time::Duration::from_secs(timeout),
                 meta,
+                &mut save_progress,
             )
             .await?;
 
             println!("{}", eval::markdown_report(&report));
-
-            let out_path = out.unwrap_or_else(|| {
-                std::path::PathBuf::from("eval/results")
-                    .join(format!("{}-results.json", consilium::quota::unix_now()))
-            });
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&out_path, serde_json::to_string_pretty(&report)?)?;
+            eval::save_report(&out_path, &report)?;
             println!("results: {}", out_path.display());
         }
     }

@@ -26,7 +26,9 @@ pub use report::{
     VerificationStatus, EVAL_SCHEMA_VERSION,
 };
 pub use stats::{summarize, MetricSummary};
-pub use workspace::{prepare_trial_repo, score_tree, suite_commit, utc_timestamp, SKIPPED_DIRS};
+pub use workspace::{
+    prepare_trial_repo, save_report, score_tree, suite_commit, utc_timestamp, SKIPPED_DIRS,
+};
 
 use crate::adapters::RunRequest;
 use crate::config::VerifyConfig;
@@ -221,6 +223,11 @@ pub fn dry_run_plan(tasks: &[EvalTask], approaches: &[Approach], trials: u32) ->
 /// Run the full matrix (task × approach × trial). Each trial is isolated (fresh
 /// temp repo + in-memory quota). Spends real quota via `deps`. `meta` records
 /// when the run started and which suite commit it used.
+///
+/// `on_progress` receives a complete, aggregated report of the trials finished
+/// so far after every trial. A live run can take hours and spends real quota,
+/// so the caller saves each one: a run that is stopped or dies part-way keeps
+/// everything it has measured.
 pub async fn run_suite(
     tasks: &[EvalTask],
     approaches: &[Approach],
@@ -228,14 +235,17 @@ pub async fn run_suite(
     deps: &dyn EvalDeps,
     timeout: Duration,
     meta: ReportMeta,
+    on_progress: &mut dyn FnMut(&SuiteReport),
 ) -> anyhow::Result<SuiteReport> {
+    let planned_runs = tasks.len() as u32 * approaches.len() as u32 * trials;
     let mut results = Vec::new();
     for task in tasks {
         for &approach in approaches {
             for trial in 0..trials {
                 let r = run_trial(task, approach, trial, deps, timeout).await?;
                 eprintln!(
-                    "  {} / {} / trial {} → {} ({} tok, {}C, {} ms)",
+                    "  [{}/{planned_runs}] {} / {} / trial {} → {} ({} tok, {}C, {} ms)",
+                    results.len() + 1,
                     r.task,
                     r.approach,
                     r.trial,
@@ -245,10 +255,16 @@ pub async fn run_suite(
                     r.wall_ms,
                 );
                 results.push(r);
+                on_progress(&build_report(
+                    meta.clone(),
+                    trials,
+                    planned_runs,
+                    results.clone(),
+                ));
             }
         }
     }
-    Ok(build_report(meta, trials, results))
+    Ok(build_report(meta, trials, planned_runs, results))
 }
 
 /// One isolated trial: copy the starter repo, run the approach, score externally.

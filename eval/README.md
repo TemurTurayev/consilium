@@ -44,6 +44,10 @@ consilium eval --task parse-kv --approaches solo,conduct --trials 3 --spend-quot
 | `--out <file>` | `eval/results/<unix-time>-results.json` | Where the JSON report goes |
 | `--spend-quota` | off | Actually call models |
 
+The report file is rewritten after every finished trial, so a run that is
+stopped or dies part-way keeps everything it has measured; such a file is
+marked partial (see `planned_runs` below).
+
 A live run reads `consilium.config.json` from the current directory. `solo` is
 the conductor's model alone on the whole task; the `conduct` approaches use the
 full lineup. Results in `eval/results/` are local and git-ignored: publish
@@ -71,6 +75,7 @@ no version field and are not read by any command.
 | `generated_at` | UTC time the run started, e.g. `2026-11-17T12:00:00Z` |
 | `suite_commit` | Commit of the repository holding the suite; `-dirty` is appended if the suite had uncommitted changes; `unknown` outside git |
 | `trials` | N requested per task and approach |
+| `planned_runs` | Runs the whole matrix calls for (tasks × approaches × trials); if `results` holds fewer, the report is partial |
 | `results[]` | One entry per trial (below) |
 | `aggregate` | `per_task_approach`, `per_category_approach`, `per_approach` |
 

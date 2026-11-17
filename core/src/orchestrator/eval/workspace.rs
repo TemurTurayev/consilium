@@ -2,7 +2,7 @@
 //! what an approach leaves behind. Shared by live trials and by the suite's
 //! zero-quota integrity test, so both judge a fixture exactly the same way.
 
-use super::report::{ReportMeta, VerificationStatus};
+use super::report::{ReportMeta, SuiteReport, VerificationStatus};
 use super::EvalTask;
 use crate::orchestrator::verify::run_verify;
 use anyhow::Context;
@@ -158,6 +158,22 @@ pub fn utc_timestamp(unix_seconds: i64) -> String {
         second_of_day % 3_600 / 60,
         second_of_day % 60
     )
+}
+
+/// Write `report` as pretty JSON to `path`, creating its directory. The file
+/// is replaced whole (written beside it, then renamed), so a reader — or a run
+/// killed mid-save — never sees a half-written report.
+pub fn save_report(path: &Path, report: &SuiteReport) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(report).context("serializing the eval report")?;
+    let mut staging = path.as_os_str().to_owned();
+    staging.push(".tmp");
+    let staging = std::path::PathBuf::from(staging);
+    std::fs::write(&staging, json).with_context(|| format!("writing {}", staging.display()))?;
+    std::fs::rename(&staging, path).with_context(|| format!("saving {}", path.display()))
 }
 
 impl ReportMeta {

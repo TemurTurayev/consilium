@@ -83,9 +83,17 @@ async fn run(
     trials: u32,
     deps: &dyn EvalDeps,
 ) -> SuiteReport {
-    eval::run_suite(tasks, approaches, trials, deps, TIMEOUT, meta())
-        .await
-        .unwrap()
+    eval::run_suite(
+        tasks,
+        approaches,
+        trials,
+        deps,
+        TIMEOUT,
+        meta(),
+        &mut |_| {},
+    )
+    .await
+    .unwrap()
 }
 
 /// Solo arm backed by a single scripted worker whose `pre_script` mutates the
@@ -371,7 +379,8 @@ fn trial(
 }
 
 fn fixture_report(results: Vec<TrialResult>) -> SuiteReport {
-    eval::build_report(meta(), 1, results)
+    let planned_runs = results.len() as u32;
+    eval::build_report(meta(), 1, planned_runs, results)
 }
 
 fn find<'a>(rows: &'a serde_json::Value, key: &str, value: &str) -> &'a serde_json::Value {
@@ -586,7 +595,7 @@ fn report_v2_gives_mean_and_sample_spread_from_two_trials() {
         1,
         0,
     );
-    let report = eval::build_report(meta(), 2, vec![fast, slow]);
+    let report = eval::build_report(meta(), 2, 2, vec![fast, slow]);
     let json = serde_json::to_value(&report).unwrap();
     let cell = find(&json["aggregate"]["per_task_approach"], "task", "t");
     assert_eq!(cell["tokens"]["claude"]["n"], 2);
@@ -617,6 +626,124 @@ fn load_suite_rejects_a_manifest_without_category_language_difficulty() {
     let error = format!("{:#}", eval::load_suite(suite.path(), None).unwrap_err());
     assert!(error.contains("category"), "got: {error}");
     assert!(error.contains("task.json"), "got: {error}");
+}
+
+// ── Progress: a run that is stopped early keeps what it has measured ─────────
+
+#[tokio::test]
+async fn every_finished_trial_is_reported_as_a_complete_partial_report() {
+    let suite = make_suite("test -f good.txt");
+    let tasks = eval::load_suite(suite.path(), None).unwrap();
+    let deps = SoloDeps {
+        pre_script: "echo ok > good.txt".into(),
+    };
+
+    // (trials finished, runs planned, passes counted) at each report
+    let mut seen: Vec<(usize, u32, u32)> = Vec::new();
+    let mut on_progress = |partial: &SuiteReport| {
+        seen.push((
+            partial.results.len(),
+            partial.planned_runs,
+            partial.aggregate.per_approach[0].stats.passed,
+        ));
+    };
+    let report = eval::run_suite(
+        &tasks,
+        &[Approach::Solo],
+        3,
+        &deps,
+        TIMEOUT,
+        meta(),
+        &mut on_progress,
+    )
+    .await
+    .unwrap();
+
+    // one report per finished trial, each already aggregated
+    assert_eq!(seen, vec![(1, 3, 1), (2, 3, 2), (3, 3, 3)]);
+    assert_eq!((report.results.len(), report.planned_runs), (3, 3));
+}
+
+#[test]
+fn report_says_how_many_planned_runs_it_covers() {
+    let none = tokens(0, 0, 0, 0);
+    let one = trial(
+        "t",
+        "api",
+        "node",
+        "small",
+        VerificationStatus::Passed,
+        none,
+        1,
+        0,
+    );
+
+    // 1 of 24 planned runs: a run that was stopped early
+    let partial = eval::build_report(meta(), 1, 24, vec![one.clone()]);
+    let json = serde_json::to_value(&partial).unwrap();
+    assert_eq!(json["planned_runs"], 24);
+    let markdown = eval::markdown_report(&partial);
+    assert!(markdown.contains("PARTIAL"), "{markdown}");
+    assert!(markdown.contains("1 of 24"), "{markdown}");
+
+    let complete = eval::build_report(meta(), 1, 1, vec![one]);
+    let markdown = eval::markdown_report(&complete);
+    assert!(!markdown.contains("PARTIAL"), "{markdown}");
+    assert!(markdown.contains("1 of 1"), "{markdown}");
+}
+
+#[test]
+fn save_report_replaces_the_file_whole_and_leaves_nothing_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("results").join("run.json");
+    let none = tokens(0, 0, 0, 0);
+    let first = trial(
+        "a",
+        "api",
+        "node",
+        "small",
+        VerificationStatus::Passed,
+        none,
+        1,
+        0,
+    );
+    let second = trial(
+        "b",
+        "api",
+        "node",
+        "small",
+        VerificationStatus::Failed,
+        none,
+        1,
+        0,
+    );
+
+    // the directory is created; the file is valid JSON after every save
+    eval::save_report(
+        &path,
+        &eval::build_report(meta(), 1, 2, vec![first.clone()]),
+    )
+    .unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["results"].as_array().unwrap().len(), 1);
+
+    eval::save_report(
+        &path,
+        &eval::build_report(meta(), 1, 2, vec![first, second]),
+    )
+    .unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["results"].as_array().unwrap().len(), 2);
+    assert_eq!(saved["schema_version"], 2);
+
+    // no temporary file is left next to it
+    let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["run.json"]);
 }
 
 // ── Attempts and fallbacks: recorded, never part of the score ────────────────
