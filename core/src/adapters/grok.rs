@@ -128,7 +128,7 @@ impl Adapter for GrokAdapter {
             .arg(&req.prompt)
             .arg("--output-format")
             .arg("streaming-json");
-        if let Some(model) = &req.model {
+        if let Some(model) = req.explicit_model() {
             cmd.arg("--model").arg(model);
         }
         // Worker (write:true) auto-approves file edits only — least privilege,

@@ -52,7 +52,7 @@ impl Adapter for GeminiAdapter {
         let mut cmd = Command::new(self.cli_binary());
         // `agy -p` runs a single prompt non-interactively and prints the answer.
         cmd.arg("-p").arg(&req.prompt);
-        if let Some(model) = &req.model {
+        if let Some(model) = req.explicit_model() {
             cmd.arg("--model").arg(model);
         }
         // Worker (write:true): auto-approve the agent's file edits so it runs

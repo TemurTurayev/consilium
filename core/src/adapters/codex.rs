@@ -25,7 +25,7 @@ impl Adapter for CodexAdapter {
         if req.write {
             cmd.arg("--sandbox").arg("workspace-write");
         }
-        if let Some(model) = &req.model {
+        if let Some(model) = req.explicit_model() {
             cmd.arg("-m").arg(model);
         }
         cmd.arg(&req.prompt);

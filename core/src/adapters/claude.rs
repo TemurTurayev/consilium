@@ -21,7 +21,7 @@ impl Adapter for ClaudeAdapter {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose");
-        if let Some(model) = &req.model {
+        if let Some(model) = req.explicit_model() {
             cmd.arg("--model").arg(model);
         }
         // `advisory` has no per-flag effect for this CLI (no codex-style
