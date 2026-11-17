@@ -29,8 +29,15 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running consilium desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while running consilium desktop app")
+        .run(|_app, event| {
+            // Quitting the app must not leave provider CLIs (or the helpers
+            // they started) running in the background.
+            if let tauri::RunEvent::Exit = event {
+                consilium::reaper::kill_all();
+            }
+        });
 }
 
 /// On launch, read `~/.consilium/desktop.json`. If it names a workspace that

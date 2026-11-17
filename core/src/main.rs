@@ -184,8 +184,37 @@ fn print_staleness_hint(config: &consilium::config::Config) {
     }
 }
 
+/// Provider CLIs run in process groups of their own (see `consilium::reaper`),
+/// so a Ctrl-C in the terminal — or a `kill`, or the terminal closing — reaches
+/// only consilium. Stop every provider run still in flight before exiting, with
+/// the exit code a shell reports for that signal.
+#[cfg(unix)]
+fn stop_providers_when_signalled() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let signals = [
+        (SignalKind::interrupt(), 130),
+        (SignalKind::terminate(), 143),
+        (SignalKind::hangup(), 129),
+    ];
+    for (kind, exit_code) in signals {
+        let Ok(mut received) = signal(kind) else {
+            continue;
+        };
+        tokio::spawn(async move {
+            if received.recv().await.is_some() {
+                consilium::reaper::kill_all();
+                std::process::exit(exit_code);
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_providers_when_signalled() {}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    stop_providers_when_signalled();
     // Logs go to stderr so they never corrupt the MCP server's stdout JSON-RPC
     // framing (`consilium mcp`); benign for every other subcommand.
     tracing_subscriber::fmt()

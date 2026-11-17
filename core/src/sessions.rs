@@ -1,5 +1,6 @@
 use crate::adapters::{Adapter, RunRequest};
 use crate::event::AgentEvent;
+use crate::reaper::Reaper;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -104,6 +105,9 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
     let id = next_session_id(adapter.provider().as_str());
 
     let mut cmd = adapter.build_command(&req);
+    // Fence the run: its own process group plus a session tag, so that nothing
+    // the CLI starts (an MCP server, say) can outlive it — see `crate::reaper`.
+    let mut reaper = Reaper::fence(&mut cmd);
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
@@ -113,12 +117,16 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", adapter.cli_binary()))?;
+    reaper.watch(child.id());
     let stdout = child.stdout.take().expect("stdout piped above");
     let stderr = child.stderr.take().expect("stderr piped above");
     tracing::info!(session = %id, provider = adapter.provider().as_str(), "session spawned");
 
     let task_id = id.clone();
     let task = tokio::spawn(async move {
+        // Owned by this task: if it is aborted (timeout, cancel) or returns
+        // early, dropping the reaper kills the CLI and everything it started.
+        let reaper = reaper;
         let stderr_task = tokio::spawn(drain_stderr(stderr));
         let mut full_output = String::new();
         let mut lines = BufReader::new(stdout).lines();
@@ -161,6 +169,9 @@ pub fn spawn(adapter: Arc<dyn Adapter>, req: RunRequest) -> anyhow::Result<Sessi
                 return;
             }
         }
+        // The CLI has exited. Whatever it left running is asked to stop and
+        // killed if it does not; the session ends only once that is done.
+        reaper.finish().await;
     });
 
     Ok(SessionHandle {

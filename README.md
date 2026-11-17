@@ -197,6 +197,9 @@ fits your plan, so the generated ladders end with it.
   them to its own service as part of a run.
 - Build and test commands execute on your machine. Review configuration before
   running a repository you do not trust.
+- A provider CLI may start helpers of its own, such as MCP servers. Consilium
+  stops everything a run started when the run ends, is cancelled or times out,
+  and when Consilium itself is interrupted.
 - Coding agents can make mistakes. Review the diff and test the result before
   merging or deploying it.
 
