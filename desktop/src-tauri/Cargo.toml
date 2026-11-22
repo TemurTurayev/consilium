@@ -1,6 +1,6 @@
 [package]
 name = "consilium-desktop"
-version = "0.2.2"
+version = "0.2.3"
 description = "Consilium desktop app"
 edition = "2021"
 license = "MIT"
