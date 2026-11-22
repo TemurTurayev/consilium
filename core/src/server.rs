@@ -449,6 +449,7 @@ fn build_conduct_deps(config: &Config) -> ConductDeps {
         verify: config.verify.clone(),
         memory: config.conductor_memory.clone().unwrap_or_default(),
         cross_family_review: config.cross_family_review,
+        cross_examine: config.cross_examine,
         max_replans: config.max_replans,
         budget: config.budget_secs.map(std::time::Duration::from_secs),
     }

@@ -18,6 +18,7 @@ pub mod safety;
 pub mod secrets;
 pub mod server;
 pub mod sessions;
+pub mod standings;
 mod text;
 pub mod tokenizer;
 pub mod wizard;

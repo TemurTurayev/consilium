@@ -17,6 +17,16 @@ pub enum Severity {
     Minor,
 }
 
+impl Severity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Critical => "critical",
+            Severity::Important => "important",
+            Severity::Minor => "minor",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Finding {
     #[serde(default, deserialize_with = "lenient_severity")]
@@ -111,17 +121,22 @@ pub async fn run_review(
 }
 
 /// Review using a failover ladder. Wraps `run_with_failover` and parses the
-/// verdict. The old `run_review` (single adapter+model) is kept as-is so the
+/// verdict. `task`, when given, is what the diff was meant to do: the reviewer
+/// is then also asked whether it does. The old `run_review` (single adapter+model) is kept as-is so the
 /// M2a review CLI and its tests are unchanged.
 pub async fn run_review_ladder(
     diff: &str,
+    task: Option<&str>,
     ladder: &[Rung],
     health: &ModelHealth,
     quota: &QuotaStore,
     cwd: PathBuf,
     timeout: Duration,
 ) -> anyhow::Result<(ReviewResult, Vec<super::resilience::Fallback>)> {
-    let prompt = prompts::diff_review(diff);
+    let prompt = match task.map(str::trim).filter(|task| !task.is_empty()) {
+        Some(task) => prompts::diff_review_of_task(diff, task),
+        None => prompts::diff_review(diff),
+    };
     let fo = run_with_failover(
         ladder,
         "reviewer",

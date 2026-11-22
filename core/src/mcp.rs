@@ -20,7 +20,10 @@
 //! verifier's build/test commands) at an arbitrary directory.
 
 mod digest;
+mod examined;
 mod types;
+
+use examined::{Circumstances, Examination};
 
 pub use types::*;
 
@@ -30,11 +33,12 @@ use crate::event::Provider;
 use crate::family::ModelFamily;
 use crate::orchestrator::changes::{capture_changes, repository_root, TreeSnapshots};
 use crate::orchestrator::council::{run_council, CouncilMember};
+use crate::orchestrator::cross_examine::{any_blocks, examine_review, Parties};
 use crate::orchestrator::cross_family::cross_family_ladder;
 use crate::orchestrator::resilience::{
     run_with_failover, Fallback, ModelHealth, RetryConfig, Rung,
 };
-use crate::orchestrator::review::{run_review_ladder, Severity};
+use crate::orchestrator::review::{run_review_ladder, Finding};
 use crate::orchestrator::transcript::TranscriptStore;
 use crate::orchestrator::{roles, verify};
 use crate::quota::{unix_now, QuotaStore};
@@ -185,6 +189,23 @@ impl McpServer {
     }
 
     #[tool(
+        name = "standings",
+        description = "How each model has done so far, counted from the saved runs: council \
+                       answers as the other members scored them, review findings as a second \
+                       model ruled on them (confirmed or refuted), the rulings each model gave, \
+                       and worker subtasks accepted on the first try — plus who stands out, \
+                       where there is enough to go on. Use it to choose whom to delegate to and \
+                       whom to trust as reviewer. It is for you and the user: never quote a \
+                       ranking to a worker, a reviewer or a council."
+    )]
+    pub async fn standings(
+        &self,
+        Parameters(p): Parameters<StandingsParams>,
+    ) -> Json<crate::standings::Standings> {
+        Json(self.standings_inner(p))
+    }
+
+    #[tool(
         name = "run_worker",
         description = "Route a self-contained subtask to a configured worker (Codex/Gemini/Claude/Grok), \
                        which edits files in `cwd`, then return the captured diff and build/test \
@@ -212,12 +233,22 @@ impl McpServer {
         description = "Send a unified diff to the council's configured reviewer for a read-only \
                        audit, returning structured findings with severities. `ok` only means a \
                        reviewer ran — it is NOT a pass; a clean pass is `ok && parse_ok && \
-                       !has_critical`. Treat `parse_ok:false` as an unusable review (fail closed) \
-                       even when `ok:true`, and `has_critical:true` as a blocking verdict. Pass \
-                       `author_model` (a `run_worker` result's `model_used`) for a worker's diff: \
-                       a reviewer of a different model family than the author is tried first, \
-                       `cross_family` says whether one existed, and `model_used` reports who \
-                       reviewed. Without it the diff is taken to be your own."
+                       !blocking`. Treat `parse_ok:false` as an unusable review (fail closed) \
+                       even when `ok:true`. A second model of another family then rules on each \
+                       critical and important finding — `ruling` is confirmed, refuted or \
+                       unclear, with its `ruling_reason` — so act on the confirmed ones, read the \
+                       reason before dropping a refuted one, and decide the unclear ones \
+                       yourself. `blocking` is true while a critical finding stands — only a \
+                       refutation by a model independent of both the author and the reviewer \
+                       (`examiner_independence: independent`) lifts it — and when the review \
+                       could not be parsed; `has_critical` is \
+                       what the reviewer first reported. `cross_examination` says whether rulings \
+                       were had at all. Always pass `author_model`: a `run_worker` result's \
+                       `model_used` for a worker's diff, your own model for a diff you wrote. A \
+                       reviewer of a different model family than the author is tried first \
+                       (`cross_family` says whether one existed, `model_used` who reviewed). \
+                       Without it the diff is reviewed as if it were yours, and no refutation \
+                       lifts a block: nobody can be shown independent of an unnamed author."
     )]
     pub async fn review_diff(
         &self,
@@ -392,6 +423,43 @@ impl McpServer {
     /// Saves a run where `search_recall` and `page_in` look for it, returning
     /// its id. Recall is a convenience: a transcript that cannot be written
     /// must not fail the run it describes.
+    /// The standings counted from this server's saved runs.
+    pub fn standings_inner(&self, p: StandingsParams) -> crate::standings::Standings {
+        const DAY_SECS: u64 = 24 * 60 * 60;
+        let within = p
+            .days
+            .filter(|days| *days > 0)
+            .map(|days| Duration::from_secs(days.saturating_mul(DAY_SECS)));
+        crate::standings::tally(&crate::standings::load(&self.transcript_base, within))
+    }
+
+    /// Has another model rule on a review's findings. Never fails the review:
+    /// an examination that cannot be had is reported as unavailable.
+    async fn cross_examine(
+        &self,
+        diff: &str,
+        findings: &[Finding],
+        parties: &Parties<'_>,
+        cwd: PathBuf,
+        timeout: Duration,
+    ) -> Examination {
+        let examined = examine_review(
+            diff,
+            findings,
+            parties,
+            &call_health(),
+            self.quota.as_ref(),
+            cwd,
+            timeout,
+        )
+        .await;
+        match examined {
+            Ok(Some(examined)) => Examination::Examined(examined),
+            Ok(None) => Examination::NothingToExamine,
+            Err(e) => Examination::Unavailable(e.to_string()),
+        }
+    }
+
     fn save_transcript(&self, kind: &str, payload: &serde_json::Value) -> Option<String> {
         let store = TranscriptStore::new(self.transcript_base.clone());
         match store.save(kind, payload) {
@@ -567,9 +635,11 @@ impl McpServer {
             _ => "applied",
         };
 
+        let examiner_cwd = cwd.clone();
         // advisory:true, write:false is baked into run_review_ladder — read-only.
         let reviewed = run_review_ladder(
             &p.diff,
+            p.task.as_deref(),
             &ladder,
             &call_health(),
             self.quota.as_ref(),
@@ -577,37 +647,73 @@ impl McpServer {
             timeout,
         )
         .await;
-        let (result, _fallbacks) = match reviewed {
+        let (result, reviewer_fallbacks) = match reviewed {
             Ok(reviewed) => reviewed,
             Err(e) => return ReviewDiffOutput::failed(e.to_string()),
         };
 
-        let transcript_id = self.save_transcript("review", &result.transcript);
-        let parse_ok = result.verdict.is_some();
-        let has_critical = result.verdict.as_ref().is_some_and(|v| v.has_critical());
-        let findings = result
+        // Neither the reviewer nor the author gets the last word on a finding
+        // worth acting on: a model of another family rules on each.
+        let reported: &[Finding] = result
             .verdict
-            .map(|v| {
-                v.findings
-                    .into_iter()
-                    .map(|f| FindingOut {
-                        severity: severity_str(&f.severity).into(),
-                        file: f.file,
-                        description: f.description,
-                    })
-                    .collect()
-            })
+            .as_ref()
+            .map(|verdict| verdict.findings.as_slice())
             .unwrap_or_default();
+        let examination = if p.cross_examine == Some(false) {
+            Examination::Off
+        } else {
+            let parties = Parties {
+                reviewer_ladder: &self.reviewer,
+                workers: &self.workers,
+                reviewer_model: result.model_used.as_deref(),
+                author: author.unwrap_or(CONDUCTOR_FAMILY),
+                // The conductor reads every ruling and the examiner's standing.
+                independent_only: false,
+                task: p.task.as_deref(),
+            };
+            self.cross_examine(&p.diff, reported, &parties, examiner_cwd, timeout)
+                .await
+        };
+        let findings = examined::findings_out(reported, examination.examined());
+        let fallbacks: Vec<String> = reviewer_fallbacks
+            .iter()
+            .chain(examination.examined().iter().flat_map(|e| &e.fallbacks))
+            .map(describe_fallback)
+            .collect();
+        // No examiner can be shown independent of an author that was not
+        // named, or was named and cannot be placed: the rulings are reported,
+        // but lift nothing. ("Taken to be yours" is good enough for choosing
+        // who reviews first — not for waving a critical finding through.)
+        let author_known = author.is_some();
+        let lifting = examination.examined().filter(|_| author_known);
+        let circumstances = Circumstances {
+            author_model: named_author,
+            cross_family,
+            fallbacks: &fallbacks,
+            author_known,
+        };
+        let transcript_id = self.save_transcript(
+            "review",
+            &examined::record(&result.transcript, reported, &circumstances, &examination),
+        );
         ReviewDiffOutput {
             ok: true,
             model_used: result.model_used,
-            parse_ok,
-            has_critical,
+            parse_ok: result.verdict.is_some(),
+            has_critical: result.verdict.as_ref().is_some_and(|v| v.has_critical()),
+            // Fail closed: a review that could not be read is not a clean one.
+            blocking: result.verdict.is_none() || any_blocks(reported, lifting),
             findings,
             raw_review: Some(result.raw_review),
             error: None,
             transcript_id,
             cross_family: Some(cross_family.to_string()),
+            cross_examination: Some(examination.status()),
+            examined_by: examination.examined().map(|e| e.examiner.clone()),
+            fallbacks,
+            examiner_independence: examination
+                .examined()
+                .map(|e| examined::standing(e, author_known).to_string()),
         }
     }
 
@@ -721,14 +827,6 @@ fn describe_fallback(fallback: &Fallback) -> String {
     format!("{} → {} ({})", fallback.from, fallback.to, fallback.reason)
 }
 
-fn severity_str(s: &Severity) -> &'static str {
-    match s {
-        Severity::Critical => "critical",
-        Severity::Important => "important",
-        Severity::Minor => "minor",
-    }
-}
-
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
@@ -743,7 +841,9 @@ impl ServerHandler for McpServer {
              by the configured reviewer, `council_run` for a read-only worker-council \
              synthesis by the configured chairman, `search_recall` to query past runs, and \
              `page_in` to load a past run by id. Configured workers (`worker_label` values): {}. \
-             `lineup` shows each worker's models, the chairman and the reviewer.",
+             `lineup` shows each worker's models, the chairman and the reviewer; `standings` \
+             shows how each model has done so far — for choosing whom to delegate to, never \
+             for quoting to a worker.",
             self.worker_labels()
         ));
         info

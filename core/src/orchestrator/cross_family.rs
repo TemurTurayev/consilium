@@ -56,6 +56,76 @@ pub(crate) fn author_family(worker: &CouncilMember, rung_used: Option<usize>) ->
         .unwrap_or(ModelFamily::Anthropic)
 }
 
+/// How far an examiner stands from the two parties it rules between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Independence {
+    /// A family that neither wrote the diff nor reviewed it.
+    Independent,
+    /// The author's family: inclined to defend the diff.
+    AuthorsFamily,
+    /// The reviewer's family: inclined to agree with the findings.
+    ReviewersFamily,
+}
+
+impl Independence {
+    /// Where a model of `family` stands between a reviewer and an author.
+    pub fn of(family: ModelFamily, reviewer: ModelFamily, author: ModelFamily) -> Self {
+        if family == reviewer {
+            Independence::ReviewersFamily
+        } else if family == author {
+            Independence::AuthorsFamily
+        } else {
+            Independence::Independent
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Independence::Independent => "independent",
+            Independence::AuthorsFamily => "authors_family",
+            Independence::ReviewersFamily => "reviewers_family",
+        }
+    }
+}
+
+/// The ladder for cross-examining a reviewer's findings: every model the
+/// lineup has for reviewing (`role_ladder`, then each worker's primary), each
+/// once, ordered by how independent it is — a family that neither wrote the
+/// diff nor reviewed it first, then the author's, and the reviewer's last.
+/// Returns the ladder and the standing of the model at its front.
+pub(crate) fn examiner_ladder(
+    role_ladder: &[Rung],
+    workers: &[CouncilMember],
+    reviewer: ModelFamily,
+    author: ModelFamily,
+) -> (Vec<Rung>, Independence) {
+    let standing = |rung: &Rung| Independence::of(rung_family(rung), reviewer, author);
+    let pool = role_ladder
+        .iter()
+        .chain(workers.iter().filter_map(|worker| worker.ladder.first()));
+    let distinct = pool.fold(Vec::<&Rung>::new(), |seen, rung| {
+        if seen.iter().any(|kept| kept.candidate == rung.candidate) {
+            seen
+        } else {
+            seen.into_iter().chain(std::iter::once(rung)).collect()
+        }
+    });
+    let ladder: Vec<Rung> = [
+        Independence::Independent,
+        Independence::AuthorsFamily,
+        Independence::ReviewersFamily,
+    ]
+    .into_iter()
+    .flat_map(|wanted| distinct.iter().filter(move |rung| standing(rung) == wanted))
+    .map(|rung| (*rung).clone())
+    .collect();
+    let front = ladder
+        .first()
+        .map(&standing)
+        .unwrap_or(Independence::ReviewersFamily);
+    (ladder, front)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,6 +274,111 @@ mod tests {
             l.last().unwrap().candidate.provider,
             Provider::Codex,
             "same-family appended last (fail-open)"
+        );
+    }
+
+    fn models(ladder: &[Rung]) -> Vec<String> {
+        ladder
+            .iter()
+            .map(|rung| {
+                format!(
+                    "{}/{}",
+                    rung.candidate.provider.as_str(),
+                    rung.candidate.model
+                )
+            })
+            .collect()
+    }
+
+    fn worker(p: crate::event::Provider, model: &str) -> CouncilMember {
+        CouncilMember {
+            label: model.into(),
+            ladder: vec![cf_rung(p, model)],
+        }
+    }
+
+    /// Codex reviewed a diff Claude wrote: Gemini has no stake in either.
+    #[test]
+    fn the_examiner_is_a_family_that_neither_wrote_nor_reviewed() {
+        use crate::event::Provider;
+        let reviewer = [
+            cf_rung(Provider::Codex, "gpt-6-luna"),
+            cf_rung(Provider::Gemini, "gemini-4-argon-high"),
+        ];
+        let workers = [
+            worker(Provider::Claude, "claude-fable-5-2"),
+            worker(Provider::Gemini, "claude-opus-5-5-high"),
+            worker(Provider::Gemini, "gemini-4-hydrogen-high"),
+        ];
+        let (ladder, standing) = examiner_ladder(
+            &reviewer,
+            &workers,
+            ModelFamily::OpenAi,
+            ModelFamily::Anthropic,
+        );
+        assert_eq!(standing, Independence::Independent);
+        assert_eq!(
+            models(&ladder),
+            [
+                "gemini/gemini-4-argon-high",
+                "gemini/gemini-4-hydrogen-high",
+                "claude/claude-fable-5-2",
+                "gemini/claude-opus-5-5-high",
+                "codex/gpt-6-luna",
+            ],
+            "independent first, then the author's family, the reviewer's last"
+        );
+    }
+
+    /// With only two families in the lineup, the author's side still beats
+    /// the reviewer agreeing with itself — and the result says which it was.
+    #[test]
+    fn without_a_third_family_the_authors_examines_and_says_so() {
+        use crate::event::Provider;
+        let reviewer = [cf_rung(Provider::Codex, "gpt-6-luna")];
+        let workers = [worker(Provider::Gemini, "gemini-4-argon-high")];
+        let (ladder, standing) = examiner_ladder(
+            &reviewer,
+            &workers,
+            ModelFamily::OpenAi,
+            ModelFamily::Google,
+        );
+        assert_eq!(standing, Independence::AuthorsFamily);
+        assert_eq!(models(&ladder)[0], "gemini/gemini-4-argon-high");
+    }
+
+    #[test]
+    fn a_lineup_of_one_family_examines_itself_and_says_so() {
+        use crate::event::Provider;
+        let reviewer = [
+            cf_rung(Provider::Codex, "gpt-6-luna"),
+            cf_rung(Provider::Codex, "default"),
+        ];
+        let (ladder, standing) =
+            examiner_ladder(&reviewer, &[], ModelFamily::OpenAi, ModelFamily::Anthropic);
+        assert_eq!(standing, Independence::ReviewersFamily);
+        assert_eq!(ladder.len(), 2);
+    }
+
+    /// A model that is both the reviewer's fallback and a worker is one
+    /// examiner, not two rungs retried in a row.
+    #[test]
+    fn a_model_listed_twice_examines_once() {
+        use crate::event::Provider;
+        let reviewer = [
+            cf_rung(Provider::Codex, "gpt-6-luna"),
+            cf_rung(Provider::Gemini, "gemini-4-argon-high"),
+        ];
+        let workers = [worker(Provider::Gemini, "gemini-4-argon-high")];
+        let (ladder, _) = examiner_ladder(
+            &reviewer,
+            &workers,
+            ModelFamily::OpenAi,
+            ModelFamily::Anthropic,
+        );
+        assert_eq!(
+            models(&ladder),
+            ["gemini/gemini-4-argon-high", "codex/gpt-6-luna"]
         );
     }
 }

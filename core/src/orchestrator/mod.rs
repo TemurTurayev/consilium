@@ -2,6 +2,7 @@ pub mod auto;
 pub mod changes;
 pub mod conduct;
 pub mod council;
+pub mod cross_examine;
 pub(crate) mod cross_family;
 pub mod eval;
 pub(crate) mod json_extract;

@@ -92,6 +92,8 @@ fn review_params(diff: &str, cwd: &std::path::Path) -> ReviewDiffParams {
         cwd: Some(cwd.to_string_lossy().into_owned()),
         timeout_secs: Some(30),
         author_model: None,
+        task: None,
+        cross_examine: None,
     }
 }
 
@@ -1013,6 +1015,8 @@ async fn review_diff_default_cwd_is_launch_root_and_allowed() {
             cwd: None,
             timeout_secs: Some(30),
             author_model: None,
+            task: None,
+            cross_examine: None,
         })
         .await;
 
@@ -1511,4 +1515,403 @@ async fn write_workers_in_one_repository_take_turns() {
         std::fs::read_to_string(&log).unwrap(),
         "start\nend\nstart\nend\n"
     );
+}
+
+// ─── cross-examination of a review's findings ───────────────────────────────
+
+const CRITICAL_AND_IMPORTANT: &str = r#"{"findings":[{"severity":"critical","file":"avg.rs","description":"divides by zero"},{"severity":"important","file":"avg.rs","description":"misleading name"}]}"#;
+
+const CRITICAL_REFUTED: &str = r#"{"rulings":[{"finding":1,"ruling":"refuted","reason":"n is checked two lines above"},{"finding":2,"ruling":"confirmed","reason":"it returns the median"}]}"#;
+
+const CRITICAL_CONFIRMED: &str = r#"{"rulings":[{"finding":1,"ruling":"confirmed","reason":"an empty slice gives n = 0"},{"finding":2,"ruling":"unclear","reason":"a matter of taste"}]}"#;
+
+/// Codex reviews and reports a critical and an important finding; Gemini is
+/// there to rule on them and answers `examiner_reply`. Returns the server,
+/// the prompts Gemini was given, and where the server saves its runs.
+fn examined_review_server(
+    examiner_reply: &str,
+    root: &std::path::Path,
+) -> (McpServer, CallLog, std::path::PathBuf) {
+    let examiner_calls: CallLog = Arc::default();
+    let examiner = RecordingAdapter::new(
+        ScriptedAdapter::ok_with_text(Provider::Gemini, examiner_reply),
+        examiner_calls.clone(),
+    );
+    let transcript_base = scratch_transcripts();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![CouncilMember {
+            label: "gemini".into(),
+            ladder: vec![rung(
+                Provider::Gemini,
+                "gemini-4-argon-high",
+                Arc::new(examiner),
+            )],
+        }],
+        reviewer: vec![rung(
+            Provider::Codex,
+            "gpt-6-luna",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                CRITICAL_AND_IMPORTANT,
+            )),
+        )],
+        chairman: Vec::new(),
+        transcript_base: transcript_base.clone(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(root.to_path_buf());
+    (server, examiner_calls, transcript_base)
+}
+
+fn rulings_of(out: &consilium::mcp::ReviewDiffOutput) -> Vec<Option<&str>> {
+    out.findings.iter().map(|f| f.ruling.as_deref()).collect()
+}
+
+/// A reviewer told to hunt for problems also reports some that are not
+/// there. Its findings no longer reach the conductor unchecked: a model with
+/// no stake in the review rules on each one worth acting on.
+#[tokio::test]
+async fn review_diff_has_a_second_model_rule_on_the_findings() {
+    let repo = temp_repo();
+    let (server, examiner_calls, _) = examined_review_server(CRITICAL_REFUTED, repo.path());
+
+    let out = server
+        .review_diff_inner(review_by(Some("claude/claude-fable-5-2"), repo.path()))
+        .await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert_eq!(rulings_of(&out), [Some("refuted"), Some("confirmed")]);
+    assert_eq!(
+        out.findings[0].ruling_reason.as_deref(),
+        Some("n is checked two lines above")
+    );
+    assert_eq!(out.cross_examination.as_deref(), Some("examined"));
+    assert_eq!(
+        out.examined_by.as_deref(),
+        Some("gemini/gemini-4-argon-high")
+    );
+    assert_eq!(out.examiner_independence.as_deref(), Some("independent"));
+    assert_eq!(examiner_calls.lock().unwrap().len(), 1);
+}
+
+/// A false alarm marked critical used to cost a rework round. Refuted by a
+/// model with no stake, it is still reported — but it no longer blocks.
+#[tokio::test]
+async fn a_critical_finding_blocks_only_while_it_stands() {
+    let repo = temp_repo();
+
+    let (refuting, _, _) = examined_review_server(CRITICAL_REFUTED, repo.path());
+    let refuted = refuting
+        .review_diff_inner(review_by(Some("claude/claude-fable-5-2"), repo.path()))
+        .await;
+    assert!(refuted.has_critical, "the reviewer did report a critical");
+    assert!(!refuted.blocking);
+
+    let (confirming, _, _) = examined_review_server(CRITICAL_CONFIRMED, repo.path());
+    let confirmed = confirming
+        .review_diff_inner(review_by(Some("claude/claude-fable-5-2"), repo.path()))
+        .await;
+    assert!(confirmed.has_critical);
+    assert!(confirmed.blocking);
+}
+
+#[tokio::test]
+async fn review_diff_skips_the_cross_examination_when_told_to() {
+    let repo = temp_repo();
+    let (server, examiner_calls, _) = examined_review_server(CRITICAL_REFUTED, repo.path());
+    let params = ReviewDiffParams {
+        cross_examine: Some(false),
+        ..review_by(None, repo.path())
+    };
+
+    let out = server.review_diff_inner(params).await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert_eq!(rulings_of(&out), [None, None]);
+    assert_eq!(out.cross_examination.as_deref(), Some("off"));
+    assert!(out.blocking, "an unexamined critical blocks");
+    assert!(examiner_calls.lock().unwrap().is_empty());
+}
+
+/// An examination that cannot be had costs nothing but itself: the review is
+/// returned as the reviewer wrote it, and says why no one ruled on it.
+#[tokio::test]
+async fn a_failed_cross_examination_leaves_the_review_standing() {
+    let repo = temp_repo();
+    let (server, _, _) = examined_review_server("They all look plausible.", repo.path());
+
+    let out = server.review_diff_inner(review_by(None, repo.path())).await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert_eq!(out.findings.len(), 2);
+    assert_eq!(rulings_of(&out), [None, None]);
+    let status = out.cross_examination.as_deref().unwrap_or_default();
+    assert!(status.starts_with("unavailable: "), "{status}");
+    assert!(out.blocking);
+}
+
+#[tokio::test]
+async fn a_clean_review_reports_nothing_to_examine() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![rung(
+            Provider::Codex,
+            "gpt-6-luna",
+            clean_reviewer(Provider::Codex),
+        )],
+        Vec::new(),
+        repo.path(),
+    );
+
+    let out = server.review_diff_inner(review_by(None, repo.path())).await;
+
+    assert_eq!(out.cross_examination.as_deref(), Some("nothing_to_examine"));
+    assert!(!out.blocking);
+}
+
+/// What `standings` counts from: the saved review names who wrote the diff,
+/// who reviewed it, who ruled, and each finding with its ruling.
+#[tokio::test]
+async fn the_saved_review_names_the_parties_and_each_ruling() {
+    let repo = temp_repo();
+    let (server, _, transcript_base) = examined_review_server(CRITICAL_REFUTED, repo.path());
+
+    let out = server
+        .review_diff_inner(review_by(Some("claude/claude-fable-5-2"), repo.path()))
+        .await;
+
+    let id = out.transcript_id.expect("the review is saved");
+    let saved = consilium::orchestrator::transcript::TranscriptStore::new(transcript_base)
+        .load_by_id(&id)
+        .expect("the saved review loads");
+    assert_eq!(saved["author_model"], "claude/claude-fable-5-2");
+    assert_eq!(saved["model_used"], "codex/gpt-6-luna");
+    assert_eq!(saved["examined_by"], "gemini/gemini-4-argon-high");
+    assert_eq!(saved["examiner_independence"], "independent");
+    assert_eq!(saved["cross_family"], "applied");
+    assert_eq!(saved["findings"][0]["severity"], "critical");
+    assert_eq!(saved["findings"][0]["ruling"], "refuted");
+    assert_eq!(saved["findings"][1]["ruling"], "confirmed");
+}
+
+// ─── standings ──────────────────────────────────────────────────────────────
+
+/// The scoreboard is counted from what the tools themselves saved: after one
+/// cross-examined review, the reviewer has a confirmed finding and a refuted
+/// one to its name, and the examiner two rulings.
+#[tokio::test]
+async fn standings_are_counted_from_the_runs_the_server_saved() {
+    let repo = temp_repo();
+    let (server, _, _) = examined_review_server(CRITICAL_REFUTED, repo.path());
+    server
+        .review_diff_inner(review_by(Some("claude/claude-fable-5-2"), repo.path()))
+        .await;
+
+    let standings = server.standings_inner(consilium::mcp::StandingsParams::default());
+
+    assert_eq!(standings.runs, 1);
+    let reviewer = &standings.reviewers[0];
+    assert_eq!(reviewer.model, "codex/gpt-6-luna");
+    assert_eq!(
+        (reviewer.reviews, reviewer.confirmed, reviewer.refuted),
+        (1, 1, 1)
+    );
+    let examiner = &standings.examiners[0];
+    assert_eq!(examiner.model, "gemini/gemini-4-argon-high");
+    assert_eq!(examiner.examinations, 1);
+}
+
+#[tokio::test]
+async fn standings_can_be_limited_to_recent_runs() {
+    let repo = temp_repo();
+    let (server, _, transcript_base) = examined_review_server(CRITICAL_REFUTED, repo.path());
+    let runs = transcript_base.join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    // a review saved long ago: the file name carries the time it was saved
+    std::fs::write(
+        runs.join("1000000000000000000-0000-review.json"),
+        r#"{"kind":"review","model_used":"codex/gpt-5.5"}"#,
+    )
+    .unwrap();
+
+    let recent = server.standings_inner(consilium::mcp::StandingsParams { days: Some(30) });
+    let all = server.standings_inner(consilium::mcp::StandingsParams { days: None });
+
+    assert_eq!(recent.runs, 0);
+    assert_eq!(all.runs, 1);
+    assert_eq!(all.reviewers[0].model, "codex/gpt-5.5");
+}
+
+/// A diff can be flawless and still not be what was asked for. A reviewer
+/// that is told the task can say so.
+#[tokio::test]
+async fn review_diff_tells_the_reviewer_what_the_diff_was_for() {
+    let repo = temp_repo();
+    let reviewer_prompts: CallLog = Arc::default();
+    let reviewer = RecordingAdapter::new(
+        ScriptedAdapter::ok_with_text(Provider::Codex, CLEAN_VERDICT),
+        reviewer_prompts.clone(),
+    );
+    let server = review_server(
+        vec![rung(Provider::Codex, "gpt-6-luna", Arc::new(reviewer))],
+        Vec::new(),
+        repo.path(),
+    );
+    let params = ReviewDiffParams {
+        task: Some("add a retry budget to fetch()".into()),
+        ..review_by(None, repo.path())
+    };
+
+    let out = server.review_diff_inner(params).await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    let prompts = reviewer_prompts.lock().unwrap();
+    assert!(
+        prompts[0]
+            .0
+            .contains("<task>\nadd a retry budget to fetch()\n</task>"),
+        "{}",
+        prompts[0].0
+    );
+}
+
+/// The review said who ruled but not that the model first in line had been
+/// passed over, or why — so an examiner of the author's own family could
+/// stand in for an independent one without a word.
+#[tokio::test]
+async fn review_diff_names_every_model_it_passed_over() {
+    let repo = temp_repo();
+    let member = |label: &str, rung: Rung| CouncilMember {
+        label: label.into(),
+        ladder: vec![rung],
+    };
+    let server = review_server(
+        vec![rung(
+            Provider::Codex,
+            "gpt-6-luna",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                CRITICAL_AND_IMPORTANT,
+            )),
+        )],
+        vec![
+            member(
+                "gemini",
+                rung(
+                    Provider::Gemini,
+                    "gemini-retired",
+                    Arc::new(ScriptedAdapter::failing(
+                        Provider::Gemini,
+                        "invalid model selection",
+                    )),
+                ),
+            ),
+            member(
+                "claude",
+                rung(
+                    Provider::Claude,
+                    "claude-fable-5-2",
+                    Arc::new(ScriptedAdapter::ok_with_text(
+                        Provider::Claude,
+                        CRITICAL_CONFIRMED,
+                    )),
+                ),
+            ),
+        ],
+        repo.path(),
+    );
+
+    let out = server
+        .review_diff_inner(review_by(Some("claude/claude-fable-5-2"), repo.path()))
+        .await;
+
+    assert_eq!(out.examined_by.as_deref(), Some("claude/claude-fable-5-2"));
+    assert_eq!(out.examiner_independence.as_deref(), Some("authors_family"));
+    assert_eq!(out.fallbacks.len(), 1, "{:?}", out.fallbacks);
+    assert!(
+        out.fallbacks[0].starts_with("gemini/gemini-retired → claude/claude-fable-5-2"),
+        "{:?}",
+        out.fallbacks
+    );
+}
+
+/// An author the server cannot place is no author to be independent of: the
+/// examiner may be on the author's side for all anyone knows, so its
+/// refutation is reported but lifts nothing.
+#[tokio::test]
+async fn a_refutation_lifts_nothing_when_the_author_is_unknown() {
+    let repo = temp_repo();
+    let (server, _, _) = examined_review_server(CRITICAL_REFUTED, repo.path());
+
+    let out = server
+        .review_diff_inner(review_by(Some("mystery-model"), repo.path()))
+        .await;
+
+    assert_eq!(out.cross_family.as_deref(), Some("unknown_author"));
+    assert_eq!(rulings_of(&out), [Some("refuted"), Some("confirmed")]);
+    assert!(out.blocking, "the critical finding stands");
+    assert_eq!(out.examiner_independence.as_deref(), Some("unknown_author"));
+}
+
+/// `blocking` alone must be safe to act on: a review that could not be read
+/// is not a clean one.
+#[tokio::test]
+async fn an_unreadable_review_blocks() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![rung(
+            Provider::Codex,
+            "gpt-6-luna",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                "Looks risky to me.",
+            )),
+        )],
+        Vec::new(),
+        repo.path(),
+    );
+
+    let out = server.review_diff_inner(review_by(None, repo.path())).await;
+
+    assert!(out.ok && !out.parse_ok);
+    assert!(out.blocking);
+}
+
+/// The examiner rules on a finding about the task only if it knows the task.
+#[tokio::test]
+async fn review_diff_tells_the_examiner_what_the_diff_was_for() {
+    let repo = temp_repo();
+    let (server, examiner_calls, _) = examined_review_server(CRITICAL_REFUTED, repo.path());
+    let params = ReviewDiffParams {
+        task: Some("add a retry budget to fetch()".into()),
+        ..review_by(None, repo.path())
+    };
+
+    server.review_diff_inner(params).await;
+
+    let calls = examiner_calls.lock().unwrap();
+    assert!(
+        calls[0]
+            .0
+            .contains("<task>\nadd a retry budget to fetch()\n</task>"),
+        "{}",
+        calls[0].0
+    );
+}
+
+/// "Taken to be your own" was a fair guess for choosing who reviews first.
+/// It is not good enough for waving a critical finding through: a worker's
+/// diff sent without its author would have its own family pass for an
+/// independent examiner. Unless the author is named, nothing is lifted.
+#[tokio::test]
+async fn a_refutation_lifts_nothing_unless_the_author_is_named() {
+    let repo = temp_repo();
+    let (server, _, _) = examined_review_server(CRITICAL_REFUTED, repo.path());
+
+    let out = server.review_diff_inner(review_by(None, repo.path())).await;
+
+    assert_eq!(rulings_of(&out), [Some("refuted"), Some("confirmed")]);
+    assert!(out.blocking, "no author was named, so the finding stands");
+    assert_eq!(out.examiner_independence.as_deref(), Some("unknown_author"));
 }

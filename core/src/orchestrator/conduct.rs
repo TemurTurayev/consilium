@@ -6,10 +6,14 @@ use crate::event::AgentEvent;
 use crate::family::ModelFamily;
 use crate::orchestrator::changes::{capture_changed_files, capture_changes};
 use crate::orchestrator::council::CouncilMember;
+use crate::orchestrator::cross_examine::{
+    any_blocks, examine_review, findings_record, rework_findings, CrossExamined, Parties,
+};
 use crate::orchestrator::cross_family::{author_family, cross_family_ladder};
 use crate::orchestrator::operator;
 use crate::orchestrator::progress;
 use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
+use crate::orchestrator::review::Finding;
 use crate::orchestrator::routing::pick_worker_by_provider;
 use crate::orchestrator::stagnation;
 use crate::orchestrator::topology;
@@ -191,6 +195,9 @@ pub struct ConductDeps {
     /// route a subtask's diff to a reviewer of a DIFFERENT family than the
     /// worker that produced it. `Default`/false reproduces today's behavior.
     pub cross_family_review: bool,
+    /// Have a model with no stake rule on a critical finding before it costs
+    /// a rework round (see `cross_examine`).
+    pub cross_examine: bool,
     /// Max times the conductor may regenerate the plan after a subtask failure;
     /// `0` = never replan (current behavior).
     pub max_replans: u32,
@@ -247,6 +254,7 @@ pub async fn run_conduct(
     let ledger_cap = deps.memory.ledger_char_cap;
     let hist_cap = deps.memory.attempt_history_char_cap;
     let cross_family = deps.cross_family_review;
+    let cross_examine = deps.cross_examine;
     let max_replans = deps.max_replans;
     let budget = deps.budget;
     // Whole-run wall-clock start for the budget governor — captured before
@@ -414,6 +422,10 @@ pub async fn run_conduct(
                 }
 
                 let mut attempts: Vec<serde_json::Value> = Vec::new();
+                // The family of every model that has worked on this subtask: a
+                // rework can fall through to another rung, and the diff then
+                // holds the work of both.
+                let mut subtask_authors: Vec<ModelFamily> = Vec::new();
                 let mut supervisor_entries: Vec<serde_json::Value> = Vec::new();
 
                 let original_prompt = subtask.prompt.clone();
@@ -472,6 +484,9 @@ pub async fn run_conduct(
                         }
                         Err(e) => (String::new(), Some(e.to_string()), None),
                     };
+                    if worker_rung.is_some() {
+                        subtask_authors.push(author_family(worker, worker_rung));
+                    }
 
                     if let Some(err_msg) = worker_failed_msg {
                         // All worker rungs failed — counts as a rework attempt.
@@ -715,7 +730,11 @@ pub async fn run_conduct(
                                         subtask,
                                         rev,
                                         arbiter.as_ref(),
-                                        cross_family,
+                                        ReviewPolicy {
+                                            cross_family,
+                                            cross_examine,
+                                            all_authors: &subtask_authors,
+                                        },
                                         &workers,
                                         author_family(worker, worker_rung),
                                         attempt_num,
@@ -1050,6 +1069,49 @@ fn patch_review_status(
     }
 }
 
+/// How the review gate picks who reviews and whether findings are ruled on.
+#[derive(Clone, Copy)]
+struct ReviewPolicy<'a> {
+    /// Put a reviewer of another family than the diff's author first.
+    cross_family: bool,
+    /// Have a model with no stake rule on a critical finding before it
+    /// costs a rework round.
+    cross_examine: bool,
+    /// The family of every model that has worked on the subtask so far. An
+    /// examiner of any of them has a stake in the diff.
+    all_authors: &'a [ModelFamily],
+}
+
+/// Records on the last attempt who reviewed it, what they found, and what a
+/// second model ruled — what `crate::standings` counts from.
+fn patch_review_details(
+    attempts: &mut [serde_json::Value],
+    reviewer_model: Option<&str>,
+    findings: &[Finding],
+    examined: Option<&CrossExamined>,
+) {
+    let Some(attempt) = attempts.last_mut().and_then(|a| a.as_object_mut()) else {
+        return;
+    };
+    let details = [
+        ("reviewer_model", serde_json::json!(reviewer_model)),
+        ("findings", findings_record(findings, examined)),
+        (
+            "examined_by",
+            serde_json::json!(examined.map(|e| e.examiner.as_str())),
+        ),
+        (
+            "examiner_independence",
+            serde_json::json!(examined.map(|e| e.independence.as_str())),
+        ),
+    ];
+    attempt.extend(
+        details
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value)),
+    );
+}
+
 /// The review gate (plus the arbiter on rework exhaustion) for an accepted
 /// subtask. Advisory: a transient reviewer failure degrades to Accept; a
 /// transient arbiter failure fails closed. Returns the decision for the loop to
@@ -1060,7 +1122,7 @@ async fn run_review_gate(
     subtask: &Subtask,
     reviewer: &RoleHandle,
     arbiter: Option<&RoleHandle>,
-    cross_family: bool,
+    policy: ReviewPolicy<'_>,
     workers: &[CouncilMember],
     author: ModelFamily,
     attempt_num: usize,
@@ -1074,6 +1136,7 @@ async fn run_review_gate(
     cwd: &std::path::Path,
     timeout: Duration,
 ) -> GateDecision {
+    let cross_family = policy.cross_family;
     // Cross-family review (Finding 7): front the reviewer with a different family
     // than the worker that produced the diff.
     let (review_ladder, cf_marker): (Vec<Rung>, Option<&str>) = if cross_family {
@@ -1092,6 +1155,7 @@ async fn run_review_gate(
 
     let (review_result, rev_fallbacks) = match super::review::run_review_ladder(
         changes,
+        Some(&subtask.prompt),
         &review_ladder,
         health,
         quota,
@@ -1111,29 +1175,76 @@ async fn run_review_gate(
     };
     all_fallbacks.extend(rev_fallbacks);
 
+    // A critical finding is about to cost a rework round. A model with no
+    // stake in the review rules on it first; without one, or without a
+    // usable ruling, the finding stands as the reviewer wrote it.
+    let reported: &[Finding] = review_result
+        .verdict
+        .as_ref()
+        .map(|verdict| verdict.findings.as_slice())
+        .unwrap_or_default();
+    let examined = if policy.cross_examine && any_blocks(reported, None) {
+        let parties = Parties {
+            reviewer_ladder: &reviewer.ladder,
+            workers,
+            reviewer_model: review_result.model_used.as_deref(),
+            author,
+            // Only a refutation changes what happens next, and only a model
+            // with no stake can give one that counts.
+            independent_only: true,
+            task: Some(&subtask.prompt),
+        };
+        examine_review(
+            changes,
+            reported,
+            &parties,
+            health,
+            quota,
+            cwd.to_path_buf(),
+            timeout,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::info!(error = %e, "the reviewer's findings were not cross-examined");
+            None
+        })
+        .map(|examined| examined.judged_against(policy.all_authors))
+    } else {
+        None
+    };
+    all_fallbacks.extend(examined.iter().flat_map(|e| e.fallbacks.iter().cloned()));
+
     let review_blocks = match &review_result.verdict {
-        Some(v) => v.has_critical(),
+        Some(_) => any_blocks(reported, examined.as_ref()),
         None => true, // unparseable → fail-closed
     };
+    // The worker is handed what it has to fix; whoever decides once reworks
+    // run out — the arbiter — judges on everything the review said.
     let findings_text = match &review_result.verdict {
-        Some(v) => serde_json::to_string(&serde_json::json!({
-            "findings": v.findings.iter().map(|f| serde_json::json!({
-                "severity": format!("{:?}", f.severity).to_lowercase(),
-                "file": f.file,
-                "description": f.description,
-            })).collect::<Vec<_>>()
-        }))
-        .unwrap_or_else(|_| review_result.raw_review.clone()),
+        Some(_) => rework_findings(reported, examined.as_ref()).to_string(),
+        None => "reviewer output unparseable".to_string(),
+    };
+    let every_finding = match &review_result.verdict {
+        Some(_) => serde_json::json!({ "findings": findings_record(reported, examined.as_ref()) })
+            .to_string(),
         None => "reviewer output unparseable".to_string(),
     };
     let review_status = if review_result.verdict.is_none() {
         "unparseable"
     } else if review_blocks {
         "critical"
+    } else if any_blocks(reported, None) {
+        "refuted" // a critical was reported, and a second model refuted it
     } else {
         "clean"
     };
     patch_review_status(attempts, review_status, cf_marker);
+    patch_review_details(
+        attempts,
+        review_result.model_used.as_deref(),
+        reported,
+        examined.as_ref(),
+    );
 
     if !review_blocks {
         return GateDecision::Accept;
@@ -1149,7 +1260,7 @@ async fn run_review_gate(
         return GateDecision::Fail {
             reason: format!(
                 "subtask {} exhausted {} rework attempts (review gate): {}",
-                subtask.id, MAX_REWORKS, findings_text
+                subtask.id, MAX_REWORKS, every_finding
             ),
             arbiter_entry: None,
         };
@@ -1166,7 +1277,7 @@ async fn run_review_gate(
         let prompt = super::prompts::arbiter_decide(
             &subtask.prompt,
             changes,
-            &findings_text,
+            &every_finding,
             ledger,
             arb_history.as_deref(),
         );

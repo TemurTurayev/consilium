@@ -55,10 +55,20 @@ pub struct ReviewDiffParams {
     /// Per-attempt timeout in seconds (default 900).
     pub timeout_secs: Option<u64>,
     /// Who wrote the diff — a `run_worker` result's `model_used`
-    /// ("provider/model"), or that worker's label. A reviewer of a different
-    /// model family is tried first. Leave it out for a diff you (the
-    /// conductor) wrote yourself.
+    /// ("provider/model"), that worker's label, or your own model for a diff
+    /// you wrote. A reviewer of a different model family is tried first.
+    /// Leave it out and the diff is reviewed as if it were yours — but then
+    /// no refutation lifts a block, since no examiner can be shown to be
+    /// independent of an author nobody named.
     pub author_model: Option<String>,
+    /// What the diff was meant to do — the subtask you gave the worker, say.
+    /// With it the reviewer also reports what the diff fails to do, which it
+    /// cannot tell from the diff alone.
+    pub task: Option<String>,
+    /// Whether a second model rules on the findings worth acting on (critical
+    /// and important ones) — default true. One more model call, made only
+    /// when the review has such findings.
+    pub cross_examine: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -67,6 +77,12 @@ pub struct FindingOut {
     pub severity: String,
     pub file: String,
     pub description: String,
+    /// What a second model ruled on this finding: "confirmed", "refuted" or
+    /// "unclear". Absent when the finding was not examined (minor findings
+    /// are not, and see `cross_examination`).
+    pub ruling: Option<String>,
+    /// The second model's reason for its ruling.
+    pub ruling_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
@@ -79,8 +95,13 @@ pub struct ReviewDiffOutput {
     /// Whether the reviewer's output parsed into structured findings. Treat
     /// `false` as an unusable review — fail closed.
     pub parse_ok: bool,
-    /// True iff a parsed verdict contains a Critical finding (a blocking verdict).
+    /// True iff the reviewer reported a Critical finding — before any ruling.
     pub has_critical: bool,
+    /// True iff a Critical finding still stands — it was not examined, was
+    /// ruled confirmed or unclear, or was refuted by a model that is not
+    /// independent of both sides — or the review could not be parsed. This is
+    /// the blocking verdict.
+    pub blocking: bool,
     /// Structured findings (empty when clean or unparsed).
     pub findings: Vec<FindingOut>,
     /// The reviewer's raw text (the fallback when `parse_ok` is false).
@@ -96,6 +117,24 @@ pub struct ReviewDiffOutput {
     /// this server knows, so the diff was reviewed as if it were yours).
     /// `model_used` names who actually reviewed.
     pub cross_family: Option<String>,
+    /// What became of the cross-examination: "examined", "nothing_to_examine"
+    /// (no critical or important finding), "off" (you asked for none), or
+    /// "unavailable: <why>" — then the findings stand as the reviewer wrote
+    /// them.
+    pub cross_examination: Option<String>,
+    /// "provider/model" that ruled on the findings.
+    pub examined_by: Option<String>,
+    /// Every model that was passed over for the review or for the rulings,
+    /// and why — "from → to (reason)". Empty when the reviewer and the
+    /// examiner first in line both answered.
+    pub fallbacks: Vec<String>,
+    /// Where the examiner stands: "independent" (its family neither wrote the
+    /// diff nor reviewed it — the only standing whose refutation lifts a
+    /// block), "authors_family" (inclined to defend the diff),
+    /// "reviewers_family" (often the reviewer under another name) or
+    /// "unknown_author" (`author_model` was left out or could not be placed,
+    /// so no examiner can be shown independent of the author).
+    pub examiner_independence: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -231,3 +270,10 @@ macro_rules! failed_constructor {
 }
 
 failed_constructor!(RunWorkerOutput, ReviewDiffOutput, CouncilRunOutput);
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct StandingsParams {
+    /// Count only runs saved in the last this many days. Leave it out, or
+    /// pass 0, to count every saved run.
+    pub days: Option<u64>,
+}

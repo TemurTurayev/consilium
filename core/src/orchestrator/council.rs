@@ -158,11 +158,16 @@ pub async fn run_council(
     let review_results = futures::future::join_all(review_futures).await;
 
     let mut reviews: Vec<String> = Vec::new();
-    let mut scores: Vec<(String, Option<Vec<Score>>)> = Vec::new();
+    // (member, the model its review ran on, the scores it gave)
+    let mut scores: Vec<(String, String, Option<Vec<Score>>)> = Vec::new();
     for (m, result) in surviving_members.iter().zip(review_results) {
         if let Ok(fo) = result {
             all_fallbacks.extend(fo.fallbacks);
-            scores.push((m.label.clone(), parse_scores(&fo.outcome.final_text)));
+            scores.push((
+                m.label.clone(),
+                fo.model_used,
+                parse_scores(&fo.outcome.final_text),
+            ));
             reviews.push(fo.outcome.final_text);
         }
     }
@@ -204,8 +209,9 @@ pub async fn run_council(
         })).collect::<Vec<_>>(),
         "failed_members": failed_members,
         "reviews": reviews,
-        "scores": scores.iter().map(|(member, s)| serde_json::json!({
+        "scores": scores.iter().map(|(member, model_used, s)| serde_json::json!({
             "member": member,
+            "model_used": model_used,
             "parsed": s.as_ref().map(|v| v.iter().map(|sc| serde_json::json!({
                 "agent": sc.agent, "score": sc.score, "justification": sc.justification
             })).collect::<Vec<_>>()),

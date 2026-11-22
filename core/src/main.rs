@@ -52,8 +52,25 @@ enum Command {
         /// Read the diff from a file instead of running git
         #[arg(long)]
         diff_file: Option<std::path::PathBuf>,
+        /// Who wrote the diff ("provider/model"). Needed for a refutation to
+        /// lift a critical finding: nobody can be shown independent of an
+        /// author that was not named.
+        #[arg(long)]
+        author_model: Option<String>,
+        /// Do not have a second model rule on the findings
+        #[arg(long)]
+        no_cross_examine: bool,
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+    },
+    /// How each model has done so far, counted from the saved runs
+    Standings {
+        /// Count only runs saved in the last N days (0 = every saved run)
+        #[arg(long, default_value_t = 90)]
+        days: u64,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
     },
     /// Conduct a coding task: conductor decomposes → workers execute → review gate
     Conduct {
@@ -169,6 +186,12 @@ fn quota_db_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(home)
         .join(".consilium")
         .join("usage.db"))
+}
+
+/// `base` with the keys of `added` laid over it.
+fn merged(base: &serde_json::Value, added: &serde_json::Value) -> serde_json::Value {
+    let fields = |value: &serde_json::Value| value.as_object().cloned().unwrap_or_default();
+    serde_json::Value::Object(fields(base).into_iter().chain(fields(added)).collect())
 }
 
 /// Print a one-line, free (no-probe) hint on stderr if the config pins any model
@@ -502,8 +525,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Review {
             staged,
             diff_file,
+            author_model,
+            no_cross_examine,
             timeout,
         } => {
+            use consilium::family::ModelFamily;
+            use consilium::orchestrator::cross_examine::{
+                any_blocks, examine_review, findings_record, Parties,
+            };
             use consilium::orchestrator::resilience::{ModelHealth, RetryConfig};
             use consilium::orchestrator::{review, roles, transcript::TranscriptStore};
 
@@ -527,6 +556,17 @@ async fn main() -> anyhow::Result<()> {
             if diff.trim().is_empty() {
                 anyhow::bail!("nothing to review: the diff is empty");
             }
+            // Guessing an author that cannot be read would let the author's
+            // own family pass for an independent examiner.
+            let author = match author_model.as_deref() {
+                None => ModelFamily::Anthropic,
+                Some(name) => ModelFamily::of_author(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--author-model {name}: cannot tell which model family that is — \
+                         write it as provider/model, e.g. codex/gpt-6-luna"
+                    )
+                })?,
+            };
 
             let config = consilium::config_files::load_effective()?;
             print_staleness_hint(&config);
@@ -538,42 +578,111 @@ async fn main() -> anyhow::Result<()> {
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
 
+            let timeout = std::time::Duration::from_secs(timeout);
             let (result, fallbacks) = review::run_review_ladder(
                 &diff,
+                None,
                 &ladder,
                 &health,
                 &store,
-                cwd,
-                std::time::Duration::from_secs(timeout),
+                cwd.clone(),
+                timeout,
             )
             .await?;
-            let path = transcripts.save("review", &result.transcript)?;
             if let Some(model) = &result.model_used {
                 println!("reviewed by {model}");
             }
             for fb in &fallbacks {
                 println!("  ↳ {} → {} ({})", fb.from, fb.to, fb.reason);
             }
+            let Some(verdict) = &result.verdict else {
+                let path = transcripts.save("review", &result.transcript)?;
+                println!("(reviewer output was not structured JSON — raw review below)\n");
+                println!("{}", result.raw_review);
+                println!("\ntranscript: {}", path.display());
+                // An unparseable security review must fail CLOSED: CI can
+                // distinguish "critical found" (2) from "review unusable" (3).
+                std::process::exit(3);
+            };
 
-            match &result.verdict {
-                Some(v) if v.findings.is_empty() => println!("✓ clean — no findings"),
-                Some(v) => {
-                    for f in &v.findings {
-                        println!("[{:?}] {} — {}", f.severity, f.file, f.description);
-                    }
-                }
-                None => {
-                    println!("(reviewer output was not structured JSON — raw review below)\n");
-                    println!("{}", result.raw_review);
-                    println!("\ntranscript: {}", path.display());
-                    // An unparseable security review must fail CLOSED: CI can
-                    // distinguish "critical found" (2) from "review unusable" (3).
-                    std::process::exit(3);
+            // Neither the reviewer nor the author gets the last word on a
+            // finding worth acting on: a model of another family rules on it.
+            let workers = roles::resolve_workers(&config.roles.workers);
+            let examined = if no_cross_examine {
+                None
+            } else {
+                let parties = Parties {
+                    reviewer_ladder: &ladder,
+                    workers: &workers,
+                    reviewer_model: result.model_used.as_deref(),
+                    author,
+                    independent_only: false,
+                    task: None,
+                };
+                examine_review(
+                    &diff,
+                    &verdict.findings,
+                    &parties,
+                    &health,
+                    &store,
+                    cwd,
+                    timeout,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    println!("findings not cross-examined: {e}");
+                    None
+                })
+            };
+            if let Some(examined) = &examined {
+                println!(
+                    "cross-examined by {} ({})",
+                    examined.examiner,
+                    examined.independence.as_str()
+                );
+            }
+
+            if verdict.findings.is_empty() {
+                println!("✓ clean — no findings");
+            }
+            for (index, f) in verdict.findings.iter().enumerate() {
+                println!("[{:?}] {} — {}", f.severity, f.file, f.description);
+                if let Some((ruled, _)) = examined.as_ref().and_then(|e| e.on(index)) {
+                    println!("    ↳ {}: {}", ruled.ruling.as_str(), ruled.reason);
                 }
             }
+
+            let record = serde_json::json!({
+                "author_model": author_model,
+                "findings": findings_record(&verdict.findings, examined.as_ref()),
+                "examined_by": examined.as_ref().map(|e| e.examiner.as_str()),
+                "examiner_independence": examined.as_ref().map(|e| e.independence.as_str()),
+            });
+            let path = transcripts.save("review", &merged(&result.transcript, &record))?;
             println!("\ntranscript: {}", path.display());
-            if result.verdict.as_ref().is_some_and(|v| v.has_critical()) {
+            // Exit 2 while a critical finding stands. Only a refutation by a
+            // model independent of the reviewer and of a NAMED author lifts it.
+            let lifting = examined.as_ref().filter(|_| author_model.is_some());
+            if examined.is_some() && lifting.is_none() {
+                println!(
+                    "(no --author-model: the rulings are shown, but none lifts a critical finding)"
+                );
+            }
+            if any_blocks(&verdict.findings, lifting) {
                 std::process::exit(2);
+            }
+        }
+        Command::Standings { days, json } => {
+            use consilium::orchestrator::transcript::TranscriptStore;
+            const DAY_SECS: u64 = 24 * 60 * 60;
+            let within =
+                (days > 0).then(|| std::time::Duration::from_secs(days.saturating_mul(DAY_SECS)));
+            let runs = consilium::standings::load(&TranscriptStore::default_base()?, within);
+            let standings = consilium::standings::tally(&runs);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&standings)?);
+            } else {
+                print!("{}", consilium::standings::render(&standings));
             }
         }
         Command::Conduct {
@@ -632,6 +741,7 @@ async fn main() -> anyhow::Result<()> {
                 verify: config.verify.clone(),
                 memory: config.conductor_memory.clone().unwrap_or_default(),
                 cross_family_review: config.cross_family_review,
+                cross_examine: config.cross_examine,
                 max_replans: config.max_replans,
                 budget: config.budget_secs.map(std::time::Duration::from_secs),
             };
@@ -738,6 +848,7 @@ async fn main() -> anyhow::Result<()> {
                     verify: config.verify.clone(),
                     memory: config.conductor_memory.clone().unwrap_or_default(),
                     cross_family_review: config.cross_family_review,
+                    cross_examine: config.cross_examine,
                     max_replans: config.max_replans,
                     budget: config.budget_secs.map(std::time::Duration::from_secs),
                 },
@@ -935,6 +1046,7 @@ async fn main() -> anyhow::Result<()> {
                         verify,
                         memory: self.config.conductor_memory.clone().unwrap_or_default(),
                         cross_family_review: cross_family,
+                        cross_examine: self.config.cross_examine,
                         max_replans: 0,
                         budget: None,
                     }

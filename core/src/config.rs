@@ -10,6 +10,11 @@ pub struct ModelCandidate {
     pub model: String,
 }
 
+/// The serde default of a setting that is on unless turned off.
+fn enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleConfig {
@@ -161,10 +166,16 @@ pub struct Config {
     pub conductor_memory: Option<ConductorMemoryConfig>,
     /// Cross-family review (Finding 7): route a subtask's diff to a reviewer /
     /// arbiter of a DIFFERENT model family than the worker that produced it
-    /// (kills self-preference bias). Default off — enabling it changes which
-    /// model reviews on the stock config; flip on after validating in practice.
-    #[serde(default)]
+    /// (kills self-preference bias). On unless a configuration turns it off:
+    /// with it off, the stock lineup has a model review its own diff.
+    #[serde(default = "enabled")]
     pub cross_family_review: bool,
+    /// Cross-examination: before a reviewer's critical finding costs a rework
+    /// round, a model of a family that neither wrote the diff nor reviewed it
+    /// rules on it; refuted, the subtask is accepted. One more model call,
+    /// made only when a critical finding is reported and such a model exists.
+    #[serde(default = "enabled")]
+    pub cross_examine: bool,
     /// Max times the conductor regenerates the plan after a subtask failure
     /// (M4 P1.4 replan). `0` = never replan (default).
     #[serde(default)]
@@ -233,7 +244,8 @@ impl Default for Config {
             quota: QuotaConfig::default(),
             verify: None,
             conductor_memory: Some(ConductorMemoryConfig::default()),
-            cross_family_review: false,
+            cross_family_review: true,
+            cross_examine: true,
             max_replans: 0,
             budget_secs: None,
         }
@@ -455,16 +467,32 @@ mod tests {
         assert!(cfg.conductor_memory.unwrap_or_default().enabled);
     }
 
+    /// A model reviewing its own diff shares its own blind spots: a reviewer
+    /// of another family goes first unless the configuration says otherwise.
     #[test]
-    fn cross_family_review_defaults_off_and_parses() {
-        assert!(!Config::default().cross_family_review);
-        let json = r#"{"roles":{"conductor":{"provider":"claude","model":"m"},
+    fn cross_family_review_is_on_unless_turned_off() {
+        assert!(Config::default().cross_family_review);
+        let roles = r#""roles":{"conductor":{"provider":"claude","model":"m"},
             "chairman":{"provider":"claude","model":"m"},"workers":[],
             "reviewer":{"provider":"codex","model":"m"},
-            "supervisor":{"provider":"gemini","model":"m"}},
-            "crossFamilyReview":true}"#;
-        let cfg: Config = serde_json::from_str(json).unwrap();
-        assert!(cfg.cross_family_review);
+            "supervisor":{"provider":"gemini","model":"m"}}"#;
+        let unset: Config = serde_json::from_str(&format!("{{{roles}}}")).unwrap();
+        assert!(unset.cross_family_review, "a file that does not say is on");
+        let off: Config =
+            serde_json::from_str(&format!("{{{roles},\"crossFamilyReview\":false}}")).unwrap();
+        assert!(!off.cross_family_review);
+    }
+
+    #[test]
+    fn cross_examination_is_on_unless_turned_off() {
+        assert!(Config::default().cross_examine);
+        let config: Config = serde_json::from_str(
+            &serde_json::to_string(&Config::default())
+                .unwrap()
+                .replace("\"crossExamine\":true", "\"crossExamine\":false"),
+        )
+        .unwrap();
+        assert!(!config.cross_examine);
     }
 
     #[test]

@@ -201,6 +201,7 @@ async fn happy_path_single_subtask() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -284,6 +285,7 @@ async fn rework_then_accept() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -367,6 +369,7 @@ async fn rework_exhaustion_fails() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -433,6 +436,7 @@ async fn rework_stall_breaks_early() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -514,6 +518,7 @@ async fn replan_rescues_a_failed_run() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 1,
         budget: None,
     };
@@ -597,6 +602,7 @@ async fn replan_with_cross_plan_depends_on_succeeds() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 1,
         budget: None,
     };
@@ -667,6 +673,7 @@ async fn replan_disabled_by_default_still_fails() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -722,6 +729,7 @@ async fn budget_trip_is_terminal_even_with_replans() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         budget: Some(Duration::from_millis(0)),
         max_replans: 1,
     };
@@ -790,6 +798,7 @@ async fn supervisor_halt_aborts() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -887,6 +896,7 @@ async fn worker_failure_counts_as_attempt() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -954,6 +964,7 @@ async fn capture_failure_propagates_as_error() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1027,6 +1038,7 @@ async fn two_subtasks_complete_in_order() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1099,6 +1111,7 @@ async fn budget_exceeded_stops_at_subtask_boundary() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: Some(Duration::from_millis(0)),
     };
@@ -1174,6 +1187,7 @@ async fn budget_preserves_completed_subtasks_on_trip() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: Some(Duration::from_millis(200)),
     };
@@ -1256,6 +1270,7 @@ async fn generous_budget_runs_all_subtasks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: Some(Duration::from_secs(3600)),
     };
@@ -1319,6 +1334,7 @@ async fn supervisor_failure_degrades_instead_of_killing_the_run() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1400,6 +1416,7 @@ async fn fail_on_second_preserves_first() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1496,6 +1513,7 @@ async fn critical_review_forces_rework() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1570,6 +1588,7 @@ async fn reviewer_failure_degrades_to_accept() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1648,6 +1667,7 @@ async fn arbiter_ships_on_exhaustion() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1730,6 +1750,7 @@ async fn arbiter_fails_on_exhaustion() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1800,6 +1821,7 @@ async fn arbiter_failure_at_exhaustion_fails_closed() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1867,6 +1889,7 @@ async fn supervisor_ok_does_not_interfere() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -1987,6 +2010,7 @@ async fn supervisor_concern_threads_note_into_evaluation() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2051,6 +2075,7 @@ async fn decompose_session_failure_surfaces_real_error() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2135,6 +2160,7 @@ async fn conduct_worker_falls_back() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2222,6 +2248,7 @@ async fn failing_tests_force_rework_even_if_conductor_would_accept() {
         verify: Some(verify),
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2287,6 +2314,7 @@ async fn no_verifier_is_recorded_as_unverified() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2351,6 +2379,7 @@ async fn attempt_history_threads_prior_feedback() {
         verify: None,
         memory: Default::default(), // enabled
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2432,6 +2461,7 @@ async fn plan_ledger_threads_prior_subtasks() {
         verify: None,
         memory: Default::default(), // enabled
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2526,6 +2556,7 @@ async fn grounding_override_recorded_in_history() {
         verify: Some(verify),
         memory: Default::default(), // enabled
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2603,6 +2634,7 @@ async fn memory_disabled_is_byte_identical() {
             attempt_history_char_cap: 800,
         },
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2674,6 +2706,7 @@ async fn supervisor_receives_plan_ledger() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2760,6 +2793,7 @@ async fn arbiter_receives_memory_blocks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2847,6 +2881,7 @@ async fn multi_rework_history_accumulates() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -2928,6 +2963,7 @@ async fn blackboard_threads_prior_subtasks_to_worker() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3034,6 +3070,7 @@ async fn blackboard_accumulates_across_three_subtasks() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3123,6 +3160,7 @@ async fn blackboard_disabled_is_byte_identical() {
             attempt_history_char_cap: 800,
         },
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3202,6 +3240,7 @@ async fn cross_family_review_routes_to_a_different_family() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3265,6 +3304,7 @@ async fn cross_family_degrades_same_family_when_no_other_family() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3330,6 +3370,7 @@ async fn cross_family_arbiter_runs_and_ships() {
         verify: None,
         memory: Default::default(),
         cross_family_review: true,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3404,6 +3445,7 @@ async fn independent_subtask_runs_despite_an_earlier_failure() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3475,6 +3517,7 @@ async fn dependent_subtask_is_skipped_when_prerequisite_fails() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3547,6 +3590,7 @@ async fn cross_family_off_emits_no_marker() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3609,6 +3653,7 @@ async fn no_operator_handle_installed_is_byte_identical() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3690,6 +3735,7 @@ async fn operator_interject_reaches_evaluation_not_decompose_or_worker() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3805,6 +3851,7 @@ async fn operator_interject_reaches_replan_prompt() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 1,
         budget: None,
     };
@@ -3901,6 +3948,7 @@ async fn operator_pause_parks_between_subtasks_then_resume_completes_run() {
         verify: None,
         memory: Default::default(),
         cross_family_review: false,
+        cross_examine: true,
         max_replans: 0,
         budget: None,
     };
@@ -3950,4 +3998,689 @@ async fn operator_pause_parks_between_subtasks_then_resume_completes_run() {
         .count();
     assert_eq!(paused_count, 1, "got: {recorded:?}");
     assert_eq!(resumed_count, 1, "got: {recorded:?}");
+}
+
+// ─── cross-examination in the review gate ───────────────────────────────────
+
+/// A reviewer role whose ladder holds the reviewer and, behind it, a model of
+/// a third family — the one that will rule on the reviewer's findings.
+fn reviewer_with_examiner(
+    reviewer: Arc<dyn consilium::adapters::Adapter>,
+    examiner_reply: &str,
+) -> RoleHandle {
+    let rung = |provider, model: &str, adapter| Rung {
+        candidate: ModelCandidate {
+            provider,
+            model: model.into(),
+        },
+        adapter,
+    };
+    RoleHandle {
+        ladder: vec![
+            rung(Provider::Claude, "model", reviewer),
+            rung(
+                Provider::Gemini,
+                "gemini-x",
+                Arc::new(ScriptedAdapter::ok_with_text(
+                    Provider::Gemini,
+                    examiner_reply,
+                )),
+            ),
+        ],
+    }
+}
+
+fn examined_deps(
+    conductor: Arc<dyn consilium::adapters::Adapter>,
+    worker: Arc<dyn consilium::adapters::Adapter>,
+    reviewer: RoleHandle,
+) -> ConductDeps {
+    ConductDeps {
+        conductor: solo_role_handle(Provider::Claude, "model", conductor),
+        workers: vec![solo_worker(
+            "codex-worker",
+            Provider::Codex,
+            "gpt-4",
+            worker,
+        )],
+        supervisor: None,
+        reviewer: Some(reviewer),
+        arbiter: None,
+        verify: None,
+        memory: Default::default(),
+        cross_family_review: false,
+        cross_examine: true,
+        max_replans: 0,
+        budget: None,
+    }
+}
+
+/// A reviewer's false alarm marked critical used to cost a whole rework
+/// round: the worker, the checks and the review, all over again. A model with
+/// no stake in the review now rules on it first. Refuted, the subtask is
+/// accepted as it stands — and the attempt records who said what.
+#[tokio::test]
+async fn a_refuted_critical_finding_costs_no_rework() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'v1' > work.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+    });
+    let reviewer = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &review_critical_json("work.txt", "sql injection"),
+    ));
+    let examiner_reply =
+        r#"{"rulings":[{"finding":1,"ruling":"refuted","reason":"the query is parameterised"}]}"#;
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        examined_deps(
+            conductor,
+            worker,
+            reviewer_with_examiner(reviewer, examiner_reply),
+        ),
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        attempts.len(),
+        1,
+        "a refuted finding must not force a rework"
+    );
+    assert_eq!(attempts[0]["review"], "refuted");
+    assert_eq!(attempts[0]["reviewer_model"], "claude/model");
+    assert_eq!(attempts[0]["examined_by"], "gemini/gemini-x");
+    assert_eq!(attempts[0]["findings"][0]["ruling"], "refuted");
+    assert_eq!(
+        attempts[0]["findings"][0]["reason"],
+        "the query is parameterised"
+    );
+}
+
+/// A critical finding the examiner confirms is reworked as before — but the
+/// worker is handed only what stands: not the finding that was refuted, and
+/// not the minor one nobody examined.
+#[tokio::test]
+async fn a_confirmed_critical_finding_is_reworked_with_only_what_stands() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker_prompts: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::default();
+    let worker = Arc::new(RecordingSequenced::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'v1' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'v2' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v2")
+            },
+        ],
+        worker_prompts.clone(),
+    ));
+    let three_findings = r#"{"findings":[{"severity":"critical","file":"work.txt","description":"sql injection in query()"},{"severity":"important","file":"work.txt","description":"the retry loop never ends"},{"severity":"minor","file":"work.txt","description":"typo in a comment"}]}"#;
+    let reviewer = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(Provider::Claude, three_findings),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &review_clean_json()),
+        ],
+    ));
+    let examiner_reply = r#"{"rulings":[{"finding":1,"ruling":"confirmed","reason":"the id is concatenated into the query"},{"finding":2,"ruling":"refuted","reason":"bounded by MAX_TRIES"}]}"#;
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        examined_deps(
+            conductor,
+            worker,
+            reviewer_with_examiner(reviewer, examiner_reply),
+        ),
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 2, "a confirmed critical is reworked");
+    assert_eq!(attempts[0]["review"], "critical");
+    assert_eq!(attempts[0]["findings"][0]["ruling"], "confirmed");
+
+    let prompts = worker_prompts.lock().unwrap();
+    let rework = &prompts[1].0;
+    assert!(rework.contains("sql injection in query()"), "{rework}");
+    assert!(
+        rework.contains("the id is concatenated into the query"),
+        "{rework}"
+    );
+    assert!(!rework.contains("the retry loop never ends"), "{rework}");
+    assert!(!rework.contains("typo in a comment"), "{rework}");
+}
+
+/// The review gate's reviewer saw only the diff, so it could not tell a
+/// correct change from a correct change to the wrong thing. It is now told
+/// what the subtask asked for.
+#[tokio::test]
+async fn the_gates_reviewer_is_told_what_the_subtask_asked_for() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "retry budget", "add a retry budget to fetch()")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'v1' > work.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+    });
+    let reviewer_prompts: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::default();
+    let reviewer = Arc::new(RecordingAdapter::new(
+        ScriptedAdapter::ok_with_text(Provider::Claude, &review_clean_json()),
+        reviewer_prompts.clone(),
+    ));
+
+    let outcome = run_conduct(
+        "retry budget",
+        "",
+        examined_deps(
+            conductor,
+            worker,
+            solo_role_handle(Provider::Claude, "model", reviewer),
+        ),
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let prompts = reviewer_prompts.lock().unwrap();
+    assert!(
+        prompts[0]
+            .0
+            .contains("<task>\nadd a retry budget to fetch()\n</task>"),
+        "{}",
+        prompts[0].0
+    );
+}
+
+/// The stock lineup's reviewer has a second rung, `codex/default` — in
+/// practice the reviewing model under another name. Asked about its own
+/// finding it may well take it back, and that must not pass for a second
+/// opinion: with no model outside both sides, a critical finding stands and
+/// is reworked, exactly as before there was any cross-examination.
+#[tokio::test]
+async fn the_reviewers_other_rung_cannot_take_a_critical_finding_back() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Gemini,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'v1' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Gemini, "wrote v1")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'v2' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Gemini, "wrote v2")
+            },
+        ],
+    ));
+    let reviewer = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                &review_critical_json("work.txt", "sql injection"),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Codex, &review_clean_json()),
+        ],
+    ));
+    let same_model_calls: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::default();
+    let same_model = Arc::new(RecordingAdapter::new(
+        ScriptedAdapter::ok_with_text(
+            Provider::Codex,
+            r#"{"rulings":[{"finding":1,"ruling":"refuted","reason":"on reflection, fine"}]}"#,
+        ),
+        same_model_calls.clone(),
+    ));
+    let rung = |model: &str, adapter: Arc<dyn consilium::adapters::Adapter>| Rung {
+        candidate: ModelCandidate {
+            provider: Provider::Codex,
+            model: model.into(),
+        },
+        adapter,
+    };
+    let deps = ConductDeps {
+        workers: vec![solo_worker(
+            "gemini-worker",
+            Provider::Gemini,
+            "gemini-x",
+            worker,
+        )],
+        reviewer: Some(RoleHandle {
+            ladder: vec![rung("gpt-x", reviewer), rung("default", same_model)],
+        }),
+        ..examined_deps(
+            conductor,
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "unused")),
+            solo_role_handle(
+                Provider::Codex,
+                "unused",
+                Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "unused")),
+            ),
+        )
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.completed, vec![1]);
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 2, "the critical finding must be reworked");
+    assert_eq!(attempts[0]["review"], "critical");
+    assert!(
+        same_model_calls.lock().unwrap().is_empty(),
+        "the reviewer's own side is not asked"
+    );
+}
+
+/// An examiner that answers without ruling settles nothing: the finding
+/// stands and is reworked.
+#[tokio::test]
+async fn an_examiner_that_rules_on_nothing_lifts_nothing() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'v1' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'v2' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v2")
+            },
+        ],
+    ));
+    let reviewer = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &review_critical_json("work.txt", "sql injection"),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &review_clean_json()),
+        ],
+    ));
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        examined_deps(
+            conductor,
+            worker,
+            reviewer_with_examiner(reviewer, "Hard to say either way."),
+        ),
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["review"], "critical");
+    assert!(attempts[0]["examined_by"].is_null());
+}
+
+/// A ruling belongs to the finding it was given for, whatever the review
+/// listed before it: the minor finding is not examined, so the examiner's
+/// "finding 1" is the review's second.
+#[tokio::test]
+async fn a_ruling_lands_on_its_own_finding_when_a_minor_one_comes_first() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'v1' > work.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+    });
+    let minor_then_critical = r#"{"findings":[{"severity":"minor","file":"work.txt","description":"typo"},{"severity":"critical","file":"work.txt","description":"sql injection"}]}"#;
+    let reviewer = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        minor_then_critical,
+    ));
+    let examiner_reply =
+        r#"{"rulings":[{"finding":1,"ruling":"refuted","reason":"the query is parameterised"}]}"#;
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        examined_deps(
+            conductor,
+            worker,
+            reviewer_with_examiner(reviewer, examiner_reply),
+        ),
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["review"], "refuted");
+    assert!(
+        attempts[0]["findings"][0]["ruling"].is_null(),
+        "the minor one"
+    );
+    assert_eq!(attempts[0]["findings"][1]["ruling"], "refuted");
+}
+
+/// `crossExamine: false` is the gate as it was: a critical finding is
+/// reworked and no second model is asked.
+#[tokio::test]
+async fn with_cross_examination_off_a_critical_finding_is_simply_reworked() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter {
+                pre_script: "echo 'v1' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+            },
+            ScriptedAdapter {
+                pre_script: "echo 'v2' > work.txt".into(),
+                ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v2")
+            },
+        ],
+    ));
+    let reviewer = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &review_critical_json("work.txt", "sql injection"),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &review_clean_json()),
+        ],
+    ));
+    let would_refute =
+        r#"{"rulings":[{"finding":1,"ruling":"refuted","reason":"the query is parameterised"}]}"#;
+    let deps = ConductDeps {
+        cross_examine: false,
+        ..examined_deps(
+            conductor,
+            worker,
+            reviewer_with_examiner(reviewer, would_refute),
+        )
+    };
+
+    let outcome = run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let attempts = outcome.transcript["subtasks"][0]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 2, "no one was asked, so the finding stands");
+    assert_eq!(attempts[0]["review"], "critical");
+    assert!(attempts[0]["examined_by"].is_null());
+}
+
+/// The examiner rules on a finding about the task only if it knows the task.
+#[tokio::test]
+async fn the_gates_examiner_is_told_what_the_subtask_asked_for() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "retry budget", "add a retry budget to fetch()")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let worker = Arc::new(ScriptedAdapter {
+        pre_script: "echo 'v1' > work.txt".into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote v1")
+    });
+    let reviewer: Arc<dyn consilium::adapters::Adapter> = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        &review_critical_json("work.txt", "no retry budget was added"),
+    ));
+    let examiner_prompts: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::default();
+    let examiner = Arc::new(RecordingAdapter::new(
+        ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            r#"{"rulings":[{"finding":1,"ruling":"refuted","reason":"fetch() now takes a budget"}]}"#,
+        ),
+        examiner_prompts.clone(),
+    ));
+    let rung = |provider, model: &str, adapter| Rung {
+        candidate: ModelCandidate {
+            provider,
+            model: model.into(),
+        },
+        adapter,
+    };
+    let reviewer_role = RoleHandle {
+        ladder: vec![
+            rung(Provider::Claude, "model", reviewer),
+            rung(Provider::Gemini, "gemini-x", examiner),
+        ],
+    };
+
+    run_conduct(
+        "retry budget",
+        "",
+        examined_deps(conductor, worker, reviewer_role),
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let prompts = examiner_prompts.lock().unwrap();
+    assert!(
+        prompts[0]
+            .0
+            .contains("<task>\nadd a retry budget to fetch()\n</task>"),
+        "{}",
+        prompts[0].0
+    );
+}
+
+/// When reworks run out the arbiter decides ship or fail. It must judge on
+/// everything the review said and what the second model made of it — not on
+/// the shortened list the worker was handed.
+#[tokio::test]
+async fn the_arbiter_sees_every_finding_and_its_ruling() {
+    let repo = temp_repo();
+    let quota = store();
+    let conductor = Arc::new(SequencedAdapter::new(
+        Provider::Claude,
+        vec![
+            ScriptedAdapter::ok_with_text(
+                Provider::Claude,
+                &plan_json(&[(1, "do thing", "do it")]),
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+            ScriptedAdapter::ok_with_text(Provider::Claude, &accept_json()),
+        ],
+    ));
+    let version = |n: u32| ScriptedAdapter {
+        pre_script: format!("echo 'v{n}' > work.txt"),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "wrote it")
+    };
+    let worker = Arc::new(SequencedAdapter::new(
+        Provider::Codex,
+        vec![version(1), version(2), version(3)],
+    ));
+    let two_findings = r#"{"findings":[{"severity":"critical","file":"work.txt","description":"sql injection in query()"},{"severity":"important","file":"work.txt","description":"the retry loop never ends"}]}"#;
+    let reviewer: Arc<dyn consilium::adapters::Adapter> = Arc::new(ScriptedAdapter::ok_with_text(
+        Provider::Claude,
+        two_findings,
+    ));
+    let examiner_reply = r#"{"rulings":[{"finding":1,"ruling":"confirmed","reason":"the id is concatenated"},{"finding":2,"ruling":"refuted","reason":"bounded by MAX_TRIES"}]}"#;
+    let arbiter_prompts: Arc<Mutex<Vec<(String, bool, bool)>>> = Arc::default();
+    let arbiter = Arc::new(RecordingAdapter::new(
+        ScriptedAdapter::ok_with_text(Provider::Claude, &arbiter_ship_json("acceptable")),
+        arbiter_prompts.clone(),
+    ));
+    let deps = ConductDeps {
+        arbiter: Some(solo_role_handle(Provider::Claude, "arbiter", arbiter)),
+        ..examined_deps(
+            conductor,
+            worker,
+            reviewer_with_examiner(reviewer, examiner_reply),
+        )
+    };
+
+    run_conduct(
+        "do thing",
+        "",
+        deps,
+        &quota,
+        repo.path().to_path_buf(),
+        TIMEOUT,
+        &health(),
+    )
+    .await
+    .unwrap();
+
+    let prompts = arbiter_prompts.lock().unwrap();
+    assert_eq!(
+        prompts.len(),
+        1,
+        "the arbiter is asked once reworks run out"
+    );
+    let prompt = &prompts[0].0;
+    assert!(prompt.contains("sql injection in query()"), "{prompt}");
+    assert!(prompt.contains("the retry loop never ends"), "{prompt}");
+    assert!(prompt.contains("bounded by MAX_TRIES"), "{prompt}");
 }
