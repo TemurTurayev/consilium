@@ -18,7 +18,8 @@ and works with the CLI subscriptions you already pay for.
 ## Try it in two minutes
 
 You need macOS or Linux and at least one supported agent CLI already installed
-and signed in: `claude`, `codex`, `agy` (Gemini), or experimental `grok`.
+and signed in: `claude`, `codex`, `agy` (Gemini), or experimental `grok`
+(Grok CLI 1.0.13 or newer — xAI refuses older ones; `grok update`).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/TemurTurayev/consilium/main/install.sh | sh
@@ -144,7 +145,7 @@ On Windows, use WSL. Native Windows is not supported yet.
 
 | Command | Purpose |
 |---|---|
-| `consilium init` | Detect providers and create a configuration |
+| `consilium init` | Detect providers and create a configuration (`--global` writes your own council for every directory) |
 | `consilium doctor` | Check that the provider CLIs are installed (`--models` also probes every configured model) |
 | `consilium auth` | Show provider authentication state and next steps |
 | `consilium run --provider codex "..."` | Send one prompt to one provider |
@@ -176,6 +177,19 @@ The snippet above is one section of the generated file, not a complete
 configuration. Start with the wizard's defaults and customize roles only when
 you need to.
 
+Configuration is read in layers, each overriding the one before it:
+
+1. the built-in lineup;
+2. `~/.consilium/consilium.config.json` — your own council, which follows you
+   into every directory (`consilium init --global` writes it);
+3. `./consilium.config.json` — what one project changes. It can be a whole
+   configuration or only the keys that differ, such as the `verify` section
+   above; inside `roles` it overrides role by role.
+
+Every key layers this way, not only `roles`: a `verify` in your own file would
+run in every project, so keep build and test commands in the project's file.
+`consilium doctor --models` prints which files were read.
+
 Each role names a provider and a model, plus optional `fallbacks` tried in
 order when the model is unavailable or rate-limited. The model name `default`
 means "let the provider's CLI choose": it never goes out of date and always
@@ -192,7 +206,14 @@ fits your plan, so the generated ladders end with it.
 ## Safety and privacy
 
 - Provider credentials stay with the official provider CLIs; Consilium does not
-  ask for API keys.
+  ask for API keys. The one thing it reads is `~/.consilium/secrets.env`: the
+  headless Claude CLI signs in with the token from `claude setup-token`, and a
+  line `export CLAUDE_CODE_OAUTH_TOKEN=<token>` there reaches it wherever
+  Consilium runs — including under a desktop app, which never loads your shell
+  profile. Keep that file private (`chmod 600`).
+- A provider CLI that is not signed in is never waited on: the run fails at
+  once, that provider is skipped for the rest of it, and `consilium auth`
+  says how to sign in. Consilium does not open a browser sign-in for you.
 - Prompts, transcripts and diffs stay local unless a provider CLI transmits
   them to its own service as part of a run.
 - Build and test commands execute on your machine. Review configuration before

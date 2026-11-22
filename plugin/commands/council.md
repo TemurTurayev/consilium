@@ -9,4 +9,4 @@ $ARGUMENTS
 
 Use the `council_run` MCP tool from the consilium server. If the consilium tools are not available, run `which consilium`; if the binary is missing, tell the user to install it (https://github.com/TemurTurayev/consilium#install) and stop.
 
-Otherwise, pass the question to `council_run`, then present, in order: the chairman's synthesis, each member's key points, and any point of disagreement worth the user's attention.
+Otherwise, pass the question to `council_run`, then present, in order: the chairman's synthesis, each member's key points, and any point of disagreement worth the user's attention. If `failed_members` or `fallbacks` is not empty, say which members did not answer or answered on a fallback model.
