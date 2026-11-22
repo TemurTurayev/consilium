@@ -68,9 +68,21 @@ chairman combines the strongest parts into one response.
 git diff | consilium review --diff-file /dev/stdin
 ```
 
-The reviewer focuses on concrete problems in the diff. The command returns a
-non-zero exit code for critical findings or an unparseable review, so it can be
-used in scripts and CI.
+The reviewer focuses on concrete problems in the diff. A second model of
+another family then rules on each critical and important finding — confirmed,
+refuted or unclear, with its reason — so a false alarm does not cost you a fix.
+A critical finding stops blocking only when a model with no stake refutes it:
+one whose family neither wrote the code nor reviewed it. Say who wrote it with
+`--author-model provider/model` — nobody can be shown independent of an author
+that was not named, so without it the rulings are printed but lift nothing
+(`--no-cross-examine` skips the second opinion altogether). The command exits
+non-zero while a critical finding stands, or when the review cannot be parsed,
+so it can be used in scripts and CI.
+
+`consilium conduct` does the same inside its review gate: a critical finding
+that an independent model refutes no longer costs a rework round, and a rework
+is handed only what still stands. Set `"crossExamine": false` in the
+configuration to have every critical finding reworked without a second opinion.
 
 ### Delegate a coding task
 
@@ -154,6 +166,7 @@ On Windows, use WSL. Native Windows is not supported yet.
 | `consilium conduct "..."` | Split, implement, verify and review a coding task |
 | `consilium auto "..." --check "..."` | Run the complete automated pipeline |
 | `consilium quota` | Show local provider usage counters |
+| `consilium standings` | How each model has done so far, counted from your saved runs |
 | `consilium models` | Find the best model each provider can run on your account (`--write` updates the configuration) |
 | `consilium serve` | Start the localhost server for the web interface |
 | `consilium mcp` | Run the MCP server for an attached conductor |
@@ -202,6 +215,25 @@ fits your plan, so the generated ladders end with it.
   "fallbacks": [{ "provider": "codex", "model": "default" }]
 }
 ```
+
+## Standings
+
+```sh
+consilium standings            # the last 90 days; --days 0 for everything
+```
+
+Every run is saved under `~/.consilium/runs`, and `standings` counts from
+them how each model has done: council answers as the *other* members scored
+them, review findings as a second model ruled on them, the rulings each model
+gave, and worker subtasks accepted on the first try. Where there is enough to
+go on, it names who stands out.
+
+It is a scoreboard for you, to choose the lineup — not for the models.
+Consilium never puts a ranking into a prompt: a model shown a ranking learns
+which number to raise, and every number here that could be raised by saying
+more (findings reported, ideas offered) is deliberately not counted. What
+keeps a reviewer honest is being checked: it is told that each finding is
+cross-examined by a different model and that refuted ones are recorded.
 
 ## Safety and privacy
 
