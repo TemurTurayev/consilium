@@ -10,6 +10,10 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// How much of what a run was about a search hit repeats. A hit points at a
+/// run (`page_in` loads it); a council's question can run to pages.
+const HIT_TASK_CHARS: usize = 200;
+
 /// Human-readable JSON transcripts under `<base>/runs/<unix_nanos>-<kind>.json`.
 /// Files, not SQLite: transcripts are for humans to read and diff; the M3
 /// server can index them later.
@@ -85,27 +89,26 @@ impl TranscriptStore {
                 continue;
             };
 
-            // Extract text fields leniently
-            let id = val
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let kind = val
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let task = val
-                .get("task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let summary = val
-                .get("summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            // Extract text fields leniently. Each kind of run names what it was
+            // about and what came of it differently: conduct/auto/worker runs
+            // have a `task` and a `summary`, a council a `question` and a
+            // `synthesis`, a review the start of its diff and the `raw_review`.
+            let texts = |keys: &[&str]| -> Vec<String> {
+                keys.iter()
+                    .filter_map(|key| val.get(*key).and_then(|v| v.as_str()))
+                    .filter(|text| !text.is_empty())
+                    .map(String::from)
+                    .collect()
+            };
+            let id = texts(&["id"]).join("");
+            let kind = texts(&["kind"]).join("");
+            let about = texts(&["task", "question", "diff_preview"]);
+            let task = about
+                .first()
+                .map(|text| crate::text::one_line(text, HIT_TASK_CHARS))
+                .unwrap_or_default();
+            let about = about.join(" ");
+            let summary = texts(&["summary", "synthesis", "raw_review"]).join(" ");
 
             // Real transcript subtasks carry `title` + `summary` (not `text`).
             let subtasks = val
@@ -123,7 +126,7 @@ impl TranscriptStore {
                 })
                 .unwrap_or_default();
 
-            let text_to_search = format!("{kind} {task} {summary} {subtasks}");
+            let text_to_search = format!("{kind} {about} {summary} {subtasks}");
             let text_lower = text_to_search.to_lowercase();
             if let Some(idx) = text_lower.find(&query_lower) {
                 // To be safe with char boundaries, we work with chars.
@@ -325,6 +328,89 @@ mod tests {
 
         let hits_empty_query = store.search("   ", 10);
         assert!(hits_empty_query.is_empty());
+    }
+
+    /// A council transcript has no `task` or `summary` — it has a `question`
+    /// and a `synthesis` — so recall could not find a council by anything it
+    /// was about. Shape as `council::run_council` writes it.
+    #[test]
+    fn finds_a_council_by_its_question_or_its_synthesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::new(dir.path().to_path_buf());
+        store
+            .save(
+                "council",
+                &serde_json::json!({
+                    "kind": "council",
+                    "question": "Should the cache use a mutex or an RwLock?",
+                    "answers": [{"anon_label": "A", "member": "codex-gpt", "text": "RwLock."}],
+                    "synthesis": "Prefer an RwLock for read-heavy workloads.",
+                }),
+            )
+            .unwrap();
+
+        let by_question = store.search("mutex", 10);
+        assert_eq!(by_question.len(), 1);
+        assert_eq!(by_question[0].kind, "council");
+        // what the run was about, in the field a hit reports it in
+        assert_eq!(
+            by_question[0].task,
+            "Should the cache use a mutex or an RwLock?"
+        );
+
+        let by_synthesis = store.search("read-heavy", 10);
+        assert_eq!(by_synthesis.len(), 1);
+        assert!(by_synthesis[0].snippet.contains("read-heavy"));
+    }
+
+    /// A council's question can run to pages and a review keeps 32 KiB of its
+    /// diff. A hit is a pointer to a run, not the run: several of them must
+    /// fit in the conductor's context.
+    #[test]
+    fn a_hit_names_what_the_run_was_about_in_one_short_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::new(dir.path().to_path_buf());
+        let question = "Should we adopt the hyperdrive?\nBackground: lots.\n".repeat(400);
+        store
+            .save(
+                "council",
+                &serde_json::json!({"kind": "council", "question": question}),
+            )
+            .unwrap();
+
+        let hits = store.search("hyperdrive", 10);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].task.starts_with("Should we adopt the hyperdrive?"));
+        assert!(!hits[0].task.contains('\n'));
+        assert!(
+            hits[0].task.chars().count() <= 200,
+            "{}",
+            hits[0].task.len()
+        );
+    }
+
+    /// Shape as `review::run_review` writes it.
+    #[test]
+    fn finds_a_review_by_what_the_reviewer_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::new(dir.path().to_path_buf());
+        store
+            .save(
+                "review",
+                &serde_json::json!({
+                    "kind": "review",
+                    "diff_bytes": 120,
+                    "diff_preview": "diff --git a/src/parser.rs b/src/parser.rs",
+                    "parse_ok": true,
+                    "raw_review": "The tokenizer drops the final newline.",
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(store.search("tokenizer", 10).len(), 1);
+        let by_file = store.search("parser.rs", 10);
+        assert_eq!(by_file.len(), 1);
+        assert_eq!(by_file[0].kind, "review");
     }
 
     #[test]

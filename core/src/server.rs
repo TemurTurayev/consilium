@@ -13,7 +13,6 @@ use crate::config::Config;
 use crate::confine::cwd_within_root;
 use crate::event::{AgentEvent, Provider};
 use crate::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
-use crate::orchestrator::council::CouncilMember;
 use crate::orchestrator::operator::{OperatorHandle, OPERATOR_CONTROLS};
 use crate::orchestrator::progress::{ProgressSink, PROGRESS_SINK};
 use crate::orchestrator::resilience::ModelHealth;
@@ -432,15 +431,7 @@ async fn handle_session(socket: WebSocket, state: ServerState) {
 
 /// Resolve `ConductDeps` from config (same wiring as `consilium conduct`).
 fn build_conduct_deps(config: &Config) -> ConductDeps {
-    let workers: Vec<CouncilMember> = config
-        .roles
-        .workers
-        .iter()
-        .map(|role| CouncilMember {
-            label: format!("{}-{}", role.provider.as_str(), role.model),
-            ladder: roles::resolve_ladder(role),
-        })
-        .collect();
+    let workers = roles::resolve_workers(&config.roles.workers);
     ConductDeps {
         conductor: RoleHandle {
             ladder: roles::resolve_ladder(&config.roles.conductor),

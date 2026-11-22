@@ -19,9 +19,11 @@
 use crate::adapters::{FailureKind, CLI_DEFAULT_MODEL};
 use crate::catalog::{self, CatalogEntry};
 use crate::config::{Config, ModelCandidate, RoleConfig, RolesConfig};
+use crate::config_files::ConfigFiles;
 use crate::doctor;
 use crate::event::Provider;
 use crate::quota::QuotaStore;
+use std::path::PathBuf;
 
 /// A configured model that has been retired, together with the catalog model
 /// that replaces it.
@@ -81,7 +83,9 @@ pub(crate) fn walk_step(probe: &doctor::ModelProbe) -> Walk {
     match probe.kind {
         None => Walk::Found,
         Some(FailureKind::ModelUnavailable) => Walk::NextTier,
-        Some(FailureKind::RateLimited | FailureKind::Transient) => Walk::Stop,
+        Some(FailureKind::RateLimited | FailureKind::Transient | FailureKind::Unauthenticated) => {
+            Walk::Stop
+        }
     }
 }
 
@@ -286,9 +290,190 @@ pub fn upgrade_config(config: &Config, chosen: &[(Provider, String)]) -> Config 
     }
 }
 
+/// Applies `upgrade_config`'s swaps to every configuration file that exists,
+/// each in place: a file keeps the roles (and everything else) it had, so the
+/// user's council stays in the user's file and a project file that only sets
+/// `verify` keeps to that. A role that no file names runs the built-in lineup;
+/// when that needs a swap, the role is written into the most general file
+/// there is — the user's if it exists, else the project's. Returns the files
+/// that changed.
+pub fn upgrade_files(
+    files: &ConfigFiles,
+    chosen: &[(Provider, String)],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut changed = Vec::new();
+    for file in files.existing() {
+        let raw = read_config_file(file)?;
+        let upgraded = crate::config_files::rewrite_roles(&raw, |role| upgrade_role(role, chosen))
+            .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+        if write_if_changed(file, &raw, &upgraded)? {
+            changed.push(file.to_path_buf());
+        }
+    }
+
+    // Every role a file names is current now, so whatever would still change
+    // comes from the built-in lineup.
+    let unnamed = unnamed_role_swaps(&files.load()?, chosen)?;
+    if let (false, Some(file)) = (unnamed.is_empty(), files.existing().first().copied()) {
+        let raw = read_config_file(file)?;
+        let pinned = crate::config_files::set_roles(&raw, unnamed)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+        if write_if_changed(file, &raw, &pinned)? && !changed.iter().any(|c| c == file) {
+            changed.push(file.to_path_buf());
+        }
+    }
+    Ok(changed)
+}
+
+/// The roles of `config` that `upgrade_config` would change, upgraded, by
+/// role name.
+fn unnamed_role_swaps(
+    config: &Config,
+    chosen: &[(Provider, String)],
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let roles = |config: &Config| -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+        match serde_json::to_value(&config.roles)? {
+            serde_json::Value::Object(roles) => Ok(roles),
+            _ => anyhow::bail!("roles do not serialize to a JSON object"),
+        }
+    };
+    let current = roles(config)?;
+    Ok(roles(&upgrade_config(config, chosen))?
+        .into_iter()
+        .filter(|(name, role)| current.get(name) != Some(role))
+        .collect())
+}
+
+fn read_config_file(file: &std::path::Path) -> anyhow::Result<String> {
+    std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))
+}
+
+/// Writes `updated` over `file` if it says something different from `raw`.
+/// What the two *say* is compared, not their text: a rewrite re-formats, and
+/// a file whose meaning is unchanged must be left exactly as it is.
+fn write_if_changed(file: &std::path::Path, raw: &str, updated: &str) -> anyhow::Result<bool> {
+    let parse = |text: &str| -> anyhow::Result<serde_json::Value> {
+        serde_json::from_str(text).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))
+    };
+    if parse(raw)? == parse(updated)? {
+        return Ok(false);
+    }
+    std::fs::write(file, updated)
+        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", file.display()))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `consilium models --write` used to write the whole effective config into
+    /// the project directory. With a council kept in the user's file that
+    /// would leave the stale model where it is and pin a copy in the project.
+    #[test]
+    fn upgrade_files_fixes_each_file_where_it_is() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user_file = home.path().join("consilium.config.json");
+        let project_file = project
+            .path()
+            .join(crate::config_files::PROJECT_CONFIG_FILE);
+        std::fs::write(
+            &user_file,
+            r#"{ "roles": { "reviewer": { "provider": "codex", "model": "gpt-5.5" } } }"#,
+        )
+        .unwrap();
+        let project_text = r#"{ "verify": { "test": "cargo test" } }"#;
+        std::fs::write(&project_file, project_text).unwrap();
+        let files = ConfigFiles::locate_with_user_file(project.path(), Some(user_file.clone()));
+
+        let changed = upgrade_files(&files, &top_tier_account()).unwrap();
+
+        assert_eq!(changed, std::slice::from_ref(&user_file));
+        let user: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&user_file).unwrap()).unwrap();
+        assert_eq!(user["roles"]["reviewer"]["model"], "gpt-6.1-sol");
+        assert_eq!(
+            std::fs::read_to_string(&project_file).unwrap(),
+            project_text
+        );
+        assert_eq!(files.load().unwrap().roles.reviewer.model, "gpt-6.1-sol");
+    }
+
+    /// A role no file names runs the built-in lineup. If the account cannot
+    /// run that, the swap must be written somewhere — `models --write` listed
+    /// it as a change and then wrote nothing.
+    #[test]
+    fn upgrade_files_pins_a_role_that_no_file_names() {
+        let project = tempfile::tempdir().unwrap();
+        let project_file = project
+            .path()
+            .join(crate::config_files::PROJECT_CONFIG_FILE);
+        std::fs::write(&project_file, r#"{ "verify": { "test": "cargo test" } }"#).unwrap();
+        let files = ConfigFiles::locate_with_user_file(project.path(), None);
+        // a free ChatGPT plan: the built-in gpt-6.1-sol is out of reach
+        let account = chosen(&[(Provider::Codex, "gpt-6-luna")]);
+        assert!(!planned_changes(&files.load().unwrap(), &account).is_empty());
+
+        let changed = upgrade_files(&files, &account).unwrap();
+
+        assert_eq!(changed, std::slice::from_ref(&project_file));
+        let loaded = files.load().unwrap();
+        assert_eq!(loaded.roles.reviewer.model, "gpt-6-luna");
+        assert_eq!(loaded.roles.workers[0].model, "gpt-6-luna");
+        assert!(planned_changes(&loaded, &account).is_empty());
+        assert_eq!(loaded.verify.unwrap().test.as_deref(), Some("cargo test"));
+        // only what had to change was written: the conductor still comes
+        // from the built-in lineup
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&project_file).unwrap()).unwrap();
+        assert!(written["roles"].get("conductor").is_none(), "{written}");
+    }
+
+    /// The built-in lineup is the user's council until they say otherwise, so
+    /// its fix belongs in the user's file when there is one.
+    #[test]
+    fn upgrade_files_pins_an_unnamed_role_in_the_users_file_when_there_is_one() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user_file = home.path().join("consilium.config.json");
+        let project_file = project
+            .path()
+            .join(crate::config_files::PROJECT_CONFIG_FILE);
+        std::fs::write(&user_file, r#"{ "maxReplans": 1 }"#).unwrap();
+        let project_text = r#"{ "verify": { "test": "cargo test" } }"#;
+        std::fs::write(&project_file, project_text).unwrap();
+        let files = ConfigFiles::locate_with_user_file(project.path(), Some(user_file.clone()));
+        let account = chosen(&[(Provider::Codex, "gpt-6-luna")]);
+
+        let changed = upgrade_files(&files, &account).unwrap();
+
+        assert_eq!(changed, std::slice::from_ref(&user_file));
+        assert_eq!(
+            std::fs::read_to_string(&project_file).unwrap(),
+            project_text
+        );
+        let loaded = files.load().unwrap();
+        assert_eq!(loaded.roles.reviewer.model, "gpt-6-luna");
+        assert_eq!(loaded.max_replans, 1);
+    }
+
+    #[test]
+    fn upgrade_files_leaves_current_files_untouched() {
+        let project = tempfile::tempdir().unwrap();
+        let project_file = project
+            .path()
+            .join(crate::config_files::PROJECT_CONFIG_FILE);
+        let text = r#"{"roles":{"reviewer":{"provider":"codex","model":"gpt-6.1-sol"}}}"#;
+        std::fs::write(&project_file, text).unwrap();
+        let files = ConfigFiles::locate_with_user_file(project.path(), None);
+
+        assert!(upgrade_files(&files, &top_tier_account())
+            .unwrap()
+            .is_empty());
+        assert_eq!(std::fs::read_to_string(&project_file).unwrap(), text);
+    }
 
     fn chosen(pairs: &[(Provider, &str)]) -> Vec<(Provider, String)> {
         pairs.iter().map(|(p, m)| (*p, m.to_string())).collect()
@@ -451,6 +636,10 @@ mod tests {
             Walk::Stop
         );
         assert_eq!(walk_step(&failed_probe(FailureKind::Transient)), Walk::Stop);
+        assert_eq!(
+            walk_step(&failed_probe(FailureKind::Unauthenticated)),
+            Walk::Stop
+        );
         let alive = doctor::ModelProbe {
             ok: true,
             kind: None,

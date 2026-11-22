@@ -91,6 +91,7 @@ fn review_params(diff: &str, cwd: &std::path::Path) -> ReviewDiffParams {
         diff: diff.into(),
         cwd: Some(cwd.to_string_lossy().into_owned()),
         timeout_secs: Some(30),
+        author_model: None,
     }
 }
 
@@ -102,7 +103,243 @@ fn council_params(question: &str, cwd: &std::path::Path) -> CouncilRunParams {
     }
 }
 
+/// A throwaway transcript directory. The tools save their runs, so no test
+/// may point them at a shared place.
+fn scratch_transcripts() -> std::path::PathBuf {
+    tempfile::tempdir().unwrap().keep()
+}
+
+fn rung(provider: Provider, model: &str, adapter: Arc<dyn consilium::adapters::Adapter>) -> Rung {
+    Rung {
+        candidate: ModelCandidate {
+            provider,
+            model: model.into(),
+        },
+        adapter,
+    }
+}
+
+fn recall(server: &McpServer, query: &str) -> Vec<consilium::orchestrator::transcript::SearchHit> {
+    server
+        .search_recall_inner(consilium::mcp::SearchRecallParams {
+            query: query.into(),
+            limit: None,
+        })
+        .hits
+}
+
+fn digest_of(server: &McpServer, id: &str) -> String {
+    server
+        .page_in_inner(consilium::mcp::PageInParams { id: id.into() })
+        .digest
+        .unwrap_or_default()
+}
+
 // ─── tests ──────────────────────────────────────────────────────────────────
+
+/// `run_worker` wants an exact label, and the conductor had no way to learn
+/// one short of provoking the "unknown worker_label" error.
+#[tokio::test]
+async fn lineup_names_the_workers_run_worker_accepts() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok = |provider| Arc::new(ScriptedAdapter::ok_with_text(provider, "unused"));
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![
+            CouncilMember {
+                label: "gemini-claude-opus-5-5-high".into(),
+                ladder: vec![
+                    rung(
+                        Provider::Gemini,
+                        "claude-opus-5-5-high",
+                        ok(Provider::Gemini),
+                    ),
+                    rung(Provider::Claude, "claude-opus-5-5", ok(Provider::Claude)),
+                ],
+            },
+            worker("codex-gpt", ok(Provider::Codex)),
+        ],
+        reviewer: reviewer_ladder(ok(Provider::Gemini)),
+        chairman: chairman_ladder(ok(Provider::Claude)),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(dir.path().to_path_buf())
+    .with_config_source(Some("/home/u/.consilium/consilium.config.json".into()));
+
+    let out = server.lineup_inner();
+
+    let labels: Vec<&str> = out.workers.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["gemini-claude-opus-5-5-high", "codex-gpt"]);
+    assert_eq!(
+        out.workers[0].models,
+        ["gemini/claude-opus-5-5-high", "claude/claude-opus-5-5"]
+    );
+    assert_eq!(out.chairman, ["claude/chair"]);
+    assert_eq!(out.reviewer, ["gemini/g"]);
+    assert_eq!(
+        out.config.as_deref(),
+        Some("/home/u/.consilium/consilium.config.json")
+    );
+    assert_eq!(out.launch_root, dir.path().to_string_lossy());
+}
+
+/// Attached-mode runs were never saved, so `search_recall` and `page_in` —
+/// tools of this same server — could not recall anything it had done.
+#[tokio::test]
+async fn council_run_is_saved_where_recall_finds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker(
+            "codex-gpt",
+            Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "answer one")),
+        )],
+        reviewer: Vec::new(),
+        chairman: chairman_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            "combined answer",
+        ))),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(dir.path().to_path_buf());
+
+    let out = server
+        .council_run_inner(council_params("which hyperdrive option?", dir.path()))
+        .await;
+
+    let id = out.transcript_id.expect("the run is saved");
+    let hits = recall(&server, "hyperdrive");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, id);
+    assert_eq!(hits[0].kind, "council");
+
+    let digest = digest_of(&server, &id);
+    assert!(digest.contains("which hyperdrive option?"), "{digest}");
+    assert!(digest.contains("combined answer"), "{digest}");
+    assert!(digest.contains("codex-gpt"), "{digest}");
+}
+
+/// A council that only got its answer after a member fell back is a degraded
+/// council; the conductor must be able to see that.
+#[tokio::test]
+async fn council_run_reports_the_fallbacks_it_took() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![CouncilMember {
+            label: "codex-a".into(),
+            ladder: vec![
+                rung(
+                    Provider::Codex,
+                    "a",
+                    Arc::new(ScriptedAdapter::failing(
+                        Provider::Codex,
+                        "upstream exploded",
+                    )),
+                ),
+                rung(
+                    Provider::Codex,
+                    "b",
+                    Arc::new(ScriptedAdapter::ok_with_text(Provider::Codex, "answer")),
+                ),
+            ],
+        }],
+        reviewer: Vec::new(),
+        chairman: chairman_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Claude,
+            "combined answer",
+        ))),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(dir.path().to_path_buf());
+
+    let out = server
+        .council_run_inner(council_params("which option?", dir.path()))
+        .await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert!(
+        out.fallbacks.iter().any(|f| f.contains("codex/a")
+            && f.contains("codex/b")
+            && f.contains("upstream exploded")),
+        "{:?}",
+        out.fallbacks
+    );
+}
+
+#[tokio::test]
+async fn review_diff_is_saved_where_recall_finds_it() {
+    let repo = temp_repo();
+    let verdict = r#"```json
+{"findings":[{"severity":"important","file":"src/parser.rs","description":"the tokenizer drops the final newline"}]}
+```"#;
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![],
+        reviewer: reviewer_ladder(Arc::new(ScriptedAdapter::ok_with_text(
+            Provider::Gemini,
+            verdict,
+        ))),
+        chairman: Vec::new(),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(repo.path().to_path_buf());
+
+    let out = server
+        .review_diff_inner(review_params(
+            "diff --git a/src/parser.rs b/src/parser.rs\n+x",
+            repo.path(),
+        ))
+        .await;
+
+    let id = out.transcript_id.expect("the review is saved");
+    let hits = recall(&server, "tokenizer");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, id);
+    assert_eq!(hits[0].kind, "review");
+    let digest = digest_of(&server, &id);
+    assert!(digest.contains("tokenizer"), "{digest}");
+    assert!(digest.contains("gemini/g"), "who reviewed: {digest}");
+}
+
+#[tokio::test]
+async fn run_worker_is_saved_where_recall_finds_it() {
+    let repo = temp_repo();
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker(
+            "codex-gpt",
+            Arc::new(ScriptedAdapter::ok_with_text(
+                Provider::Codex,
+                "added the flux capacitor",
+            )),
+        )],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(repo.path().to_path_buf());
+
+    let out = server
+        .run_worker_inner(params("codex-gpt", repo.path()))
+        .await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    let id = out.transcript_id.expect("the run is saved");
+    // found by the task it was given and by what the worker reported
+    assert_eq!(recall(&server, "do the thing")[0].id, id);
+    let hits = recall(&server, "flux capacitor");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].kind, "worker");
+    let digest = digest_of(&server, &id);
+    assert!(digest.contains("codex-gpt"), "{digest}");
+    assert!(digest.contains("codex/gpt"), "which model ran: {digest}");
+}
 
 #[tokio::test]
 async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
@@ -117,7 +354,7 @@ async fn run_worker_routes_writes_captures_and_uses_scoped_flags() {
         workers: vec![worker("codex-gpt", rec)],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -158,7 +395,7 @@ async fn run_worker_unknown_label_returns_structured_error() {
         )],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -195,7 +432,7 @@ async fn run_worker_runs_the_configured_verifier() {
         workers: vec![worker("codex-gpt", Arc::new(inner))],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: Some(verify),
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -219,7 +456,7 @@ async fn quota_status_reports_recorded_totals() {
         workers: vec![],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota,
     });
@@ -243,7 +480,7 @@ async fn run_worker_all_rungs_fail_returns_structured_error() {
         )],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -270,7 +507,7 @@ async fn run_worker_non_git_cwd_degrades_changes_to_none() {
         )],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -358,6 +595,10 @@ fn mcp_stdio_server_lists_all_tools() {
         stdout.contains("\"page_in\""),
         "tools/list must include page_in; got:\n{stdout}"
     );
+    assert!(
+        stdout.contains("\"lineup\""),
+        "tools/list must include lineup; got:\n{stdout}"
+    );
 }
 
 // ─── review_diff ──────────────────────────────────────────────────────────────
@@ -373,7 +614,7 @@ async fn review_diff_parses_verdict_and_flags_critical() {
             verdict,
         ))),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -409,7 +650,7 @@ async fn review_diff_important_only_is_not_critical_but_findings_surface() {
             verdict,
         ))),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -439,7 +680,7 @@ async fn review_diff_clean_verdict_has_no_findings() {
             r#"{"findings":[]}"#,
         ))),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -466,7 +707,7 @@ async fn review_diff_unparseable_output_fails_closed() {
             "looks fine to me, shipping it",
         ))),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -491,7 +732,7 @@ async fn review_diff_empty_diff_returns_error() {
         workers: vec![],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     });
@@ -514,7 +755,7 @@ async fn review_diff_all_rungs_fail_returns_error() {
             "reviewer down",
         ))),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -551,7 +792,7 @@ async fn council_run_returns_synthesis_and_answers() {
             Provider::Claude,
             "combined answer",
         ))),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -572,7 +813,7 @@ async fn council_run_empty_question_returns_error() {
         workers: vec![],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     });
@@ -600,7 +841,7 @@ fn single_worker_server(log: &CallLog, launch_root: &std::path::Path) -> McpServ
         workers: vec![worker("codex-gpt", rec)],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -680,7 +921,7 @@ async fn run_worker_cwd_subdir_of_launch_root_is_allowed() {
         )],
         reviewer: Vec::new(),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -702,7 +943,7 @@ async fn review_diff_cwd_outside_launch_root_is_rejected() {
             r#"{"findings":[]}"#,
         ))),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -732,7 +973,7 @@ async fn council_run_cwd_outside_launch_root_is_rejected() {
             Provider::Claude,
             "synthesis",
         ))),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -760,7 +1001,7 @@ async fn review_diff_default_cwd_is_launch_root_and_allowed() {
             r#"{"findings":[]}"#,
         ))),
         chairman: Vec::new(),
-        transcript_base: std::path::PathBuf::from("/tmp"),
+        transcript_base: scratch_transcripts(),
         verify: None,
         quota: QuotaStore::open_in_memory().unwrap(),
     })
@@ -771,6 +1012,7 @@ async fn review_diff_default_cwd_is_launch_root_and_allowed() {
             diff: "some diff".into(),
             cwd: None,
             timeout_secs: Some(30),
+            author_model: None,
         })
         .await;
 
@@ -872,4 +1114,401 @@ fn page_in_loads_run_by_id_and_digests_it() {
 
     let empty = server.page_in_inner(consilium::mcp::PageInParams { id: "  ".into() });
     assert!(!empty.ok);
+}
+
+// ─── failure memory ───────────────────────────────────────────────────────────
+
+/// The server lives for hours. What made a model unusable an hour ago — a
+/// plan change, a sign-out, a throttle — may be fixed by now, and a model the
+/// server once saw fail must not stay skipped until the server is restarted.
+#[tokio::test]
+async fn a_model_that_failed_is_tried_again_on_the_next_call() {
+    let repo = temp_repo();
+    // codex-cli's real refusal for a model the plan does not include: the
+    // failover marks such a model dead for the rest of the run.
+    let flaky = common::SequencedAdapter::new(
+        Provider::Codex,
+        vec![
+            ScriptedAdapter::failing(
+                Provider::Codex,
+                "The 'gpt' model is not supported when using Codex with a ChatGPT account.",
+            ),
+            ScriptedAdapter::ok_with_text(Provider::Codex, "works now"),
+        ],
+    );
+    let server = McpServer::from_parts(McpServerDeps {
+        workers: vec![worker("codex-gpt", Arc::new(flaky))],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(repo.path().to_path_buf());
+
+    let first = server
+        .run_worker_inner(params("codex-gpt", repo.path()))
+        .await;
+    assert!(!first.ok, "the first call fails");
+
+    let second = server
+        .run_worker_inner(params("codex-gpt", repo.path()))
+        .await;
+    assert!(second.ok, "error={:?}", second.error);
+    assert_eq!(second.worker_report.as_deref(), Some("works now"));
+}
+
+// ─── cross-family review ──────────────────────────────────────────────────────
+
+const CLEAN_VERDICT: &str = "```json\n{\"findings\":[]}\n```";
+
+fn clean_reviewer(provider: Provider) -> Arc<dyn consilium::adapters::Adapter> {
+    Arc::new(ScriptedAdapter::ok_with_text(provider, CLEAN_VERDICT))
+}
+
+fn review_server(
+    reviewer: Vec<Rung>,
+    workers: Vec<CouncilMember>,
+    root: &std::path::Path,
+) -> McpServer {
+    McpServer::from_parts(McpServerDeps {
+        workers,
+        reviewer,
+        chairman: Vec::new(),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(root.to_path_buf())
+}
+
+fn review_by(author_model: Option<&str>, cwd: &std::path::Path) -> ReviewDiffParams {
+    ReviewDiffParams {
+        author_model: author_model.map(String::from),
+        ..review_params("diff --git a/x b/x\n+x", cwd)
+    }
+}
+
+/// `/consilium:review` promises "a reviewer of a different model family". The
+/// tool ran the reviewer ladder exactly as configured, whoever wrote the diff.
+#[tokio::test]
+async fn review_diff_puts_a_different_family_than_the_author_first() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![
+            rung(
+                Provider::Codex,
+                "gpt-6-luna",
+                clean_reviewer(Provider::Codex),
+            ),
+            rung(
+                Provider::Gemini,
+                "gemini-4-argon-high",
+                clean_reviewer(Provider::Gemini),
+            ),
+        ],
+        Vec::new(),
+        repo.path(),
+    );
+
+    let out = server
+        .review_diff_inner(review_by(Some("codex/gpt-6.1-sol"), repo.path()))
+        .await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert_eq!(
+        out.model_used.as_deref(),
+        Some("gemini/gemini-4-argon-high")
+    );
+    assert_eq!(out.cross_family.as_deref(), Some("applied"));
+}
+
+/// Claude served through Antigravity is still Claude.
+#[tokio::test]
+async fn review_diff_sees_the_authors_family_through_a_gateway() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![
+            rung(
+                Provider::Claude,
+                "claude-opus-5-5",
+                clean_reviewer(Provider::Claude),
+            ),
+            rung(
+                Provider::Codex,
+                "gpt-6-luna",
+                clean_reviewer(Provider::Codex),
+            ),
+        ],
+        Vec::new(),
+        repo.path(),
+    );
+
+    let out = server
+        .review_diff_inner(review_by(Some("gemini/claude-opus-5-5-high"), repo.path()))
+        .await;
+
+    assert_eq!(out.model_used.as_deref(), Some("codex/gpt-6-luna"));
+}
+
+/// The attached conductor is a Claude session: a diff nobody is named for is
+/// its own work, and must not be reviewed by Claude first either.
+#[tokio::test]
+async fn review_diff_takes_an_unattributed_diff_for_the_conductors_own() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![
+            rung(
+                Provider::Claude,
+                "claude-opus-5-5",
+                clean_reviewer(Provider::Claude),
+            ),
+            rung(
+                Provider::Codex,
+                "gpt-6-luna",
+                clean_reviewer(Provider::Codex),
+            ),
+        ],
+        Vec::new(),
+        repo.path(),
+    );
+
+    let out = server.review_diff_inner(review_by(None, repo.path())).await;
+
+    assert_eq!(out.model_used.as_deref(), Some("codex/gpt-6-luna"));
+    assert_eq!(out.cross_family.as_deref(), Some("applied"));
+}
+
+/// The conductor has a worker's label at hand as readily as its model. A
+/// label that names no family ("codex-default") used to be read as "no
+/// author", and Codex reviewed a Codex diff under `cross_family: applied`.
+#[tokio::test]
+async fn review_diff_reads_a_worker_label_as_the_author() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![
+            rung(
+                Provider::Codex,
+                "gpt-6-luna",
+                clean_reviewer(Provider::Codex),
+            ),
+            rung(
+                Provider::Gemini,
+                "gemini-4-argon-high",
+                clean_reviewer(Provider::Gemini),
+            ),
+        ],
+        vec![CouncilMember {
+            label: "codex-default".into(),
+            ladder: vec![rung(
+                Provider::Codex,
+                "default",
+                clean_reviewer(Provider::Codex),
+            )],
+        }],
+        repo.path(),
+    );
+
+    let out = server
+        .review_diff_inner(review_by(Some("codex-default"), repo.path()))
+        .await;
+
+    assert_eq!(
+        out.model_used.as_deref(),
+        Some("gemini/gemini-4-argon-high")
+    );
+    assert_eq!(out.cross_family.as_deref(), Some("applied"));
+}
+
+/// An author the server cannot place must not be passed off as checked.
+#[tokio::test]
+async fn review_diff_says_when_it_cannot_tell_who_the_author_is() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![rung(
+            Provider::Codex,
+            "gpt-6-luna",
+            clean_reviewer(Provider::Codex),
+        )],
+        Vec::new(),
+        repo.path(),
+    );
+
+    let out = server
+        .review_diff_inner(review_by(Some("mystery-model"), repo.path()))
+        .await;
+
+    assert!(out.ok, "the review still runs: {:?}", out.error);
+    assert_eq!(out.cross_family.as_deref(), Some("unknown_author"));
+}
+
+/// With no other family in the lineup the review still runs — and says so.
+#[tokio::test]
+async fn review_diff_says_when_only_the_authors_family_could_review() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![rung(
+            Provider::Claude,
+            "claude-opus-5-5",
+            clean_reviewer(Provider::Claude),
+        )],
+        Vec::new(),
+        repo.path(),
+    );
+
+    let out = server.review_diff_inner(review_by(None, repo.path())).await;
+
+    assert!(out.ok, "error={:?}", out.error);
+    assert_eq!(out.model_used.as_deref(), Some("claude/claude-opus-5-5"));
+    assert_eq!(out.cross_family.as_deref(), Some("degraded_same_family"));
+}
+
+/// A single same-family reviewer borrows a worker of another family, as the
+/// `conduct` review gate does.
+#[tokio::test]
+async fn review_diff_borrows_a_worker_of_another_family() {
+    let repo = temp_repo();
+    let server = review_server(
+        vec![rung(
+            Provider::Claude,
+            "claude-opus-5-5",
+            clean_reviewer(Provider::Claude),
+        )],
+        vec![CouncilMember {
+            label: "gemini-gemini-4-argon-high".into(),
+            ladder: vec![rung(
+                Provider::Gemini,
+                "gemini-4-argon-high",
+                clean_reviewer(Provider::Gemini),
+            )],
+        }],
+        repo.path(),
+    );
+
+    let out = server.review_diff_inner(review_by(None, repo.path())).await;
+
+    assert_eq!(
+        out.model_used.as_deref(),
+        Some("gemini/gemini-4-argon-high")
+    );
+    assert_eq!(out.cross_family.as_deref(), Some("applied"));
+}
+
+// ─── a worker's own changes ───────────────────────────────────────────────────
+
+/// A repository whose tree is already dirty when the worker starts: one
+/// tracked file edited and one new file, neither committed — the conductor's
+/// own work in progress.
+fn repo_with_conductor_edits() -> tempfile::TempDir {
+    let repo = temp_repo();
+    std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+    git(repo.path(), &["add", "base.txt"]);
+    git(repo.path(), &["commit", "-qm", "base"]);
+    std::fs::write(repo.path().join("base.txt"), "conductor edit\n").unwrap();
+    std::fs::write(repo.path().join("conductor-notes.txt"), "mine\n").unwrap();
+    repo
+}
+
+fn scripted_worker_server(pre_script: &str, root: &std::path::Path) -> McpServer {
+    let adapter = ScriptedAdapter {
+        pre_script: pre_script.into(),
+        ..ScriptedAdapter::ok_with_text(Provider::Codex, "done")
+    };
+    McpServer::from_parts(McpServerDeps {
+        workers: vec![worker("codex-gpt", Arc::new(adapter))],
+        reviewer: Vec::new(),
+        chairman: Vec::new(),
+        transcript_base: scratch_transcripts(),
+        verify: None,
+        quota: QuotaStore::open_in_memory().unwrap(),
+    })
+    .with_launch_root(root.to_path_buf())
+}
+
+/// `changes` used to be everything uncommitted in the tree. From the second
+/// call on that mixed the conductor's own edits and earlier workers' edits
+/// into what this worker was said to have done.
+#[tokio::test]
+async fn run_worker_reports_only_what_the_worker_changed() {
+    let repo = repo_with_conductor_edits();
+    let server = scripted_worker_server(
+        "echo 'fn worker() {}' > worker.rs; echo 'worker line' >> base.txt",
+        repo.path(),
+    );
+
+    let out = server
+        .run_worker_inner(params("codex-gpt", repo.path()))
+        .await;
+
+    let changes = out.changes.expect("a git repository yields changes");
+    assert!(changes.contains("worker.rs"), "{changes}");
+    assert!(
+        changes.contains("+fn worker() {}"),
+        "a new file's content: {changes}"
+    );
+    assert!(changes.contains("+worker line"), "{changes}");
+    // what was already there before the worker ran is not the worker's
+    assert!(!changes.contains("conductor-notes.txt"), "{changes}");
+    assert!(!changes.contains("+conductor edit"), "{changes}");
+}
+
+#[tokio::test]
+async fn run_worker_that_edits_nothing_reports_no_changes_in_a_dirty_tree() {
+    let repo = repo_with_conductor_edits();
+    let server = scripted_worker_server("true", repo.path());
+
+    let out = server
+        .run_worker_inner(params("codex-gpt", repo.path()))
+        .await;
+
+    assert_eq!(out.changes.as_deref(), Some("(no changes)"));
+}
+
+/// Taking the snapshots must leave the repository as it was: nothing staged,
+/// the conductor's files untouched.
+#[tokio::test]
+async fn run_worker_leaves_the_index_alone() {
+    let repo = repo_with_conductor_edits();
+    let status = |repo: &tempfile::TempDir| {
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let before = status(&repo);
+    let server = scripted_worker_server("true", repo.path());
+
+    server
+        .run_worker_inner(params("codex-gpt", repo.path()))
+        .await;
+
+    assert_eq!(status(&repo), before);
+    assert_eq!(before, " M base.txt\n?? conductor-notes.txt\n");
+}
+
+/// Two write workers in one directory edit one tree: run together, each would
+/// be shown the other's half-made changes and verify a tree in motion.
+#[tokio::test]
+async fn write_workers_in_one_repository_take_turns() {
+    let repo = temp_repo();
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_dir.path().join("turns.log");
+    let script = format!(
+        "echo start >> '{log}'; sleep 1; echo end >> '{log}'",
+        log = log.display()
+    );
+    let server = scripted_worker_server(&script, repo.path());
+
+    let (a, b) = tokio::join!(
+        server.run_worker_inner(params("codex-gpt", repo.path())),
+        server.run_worker_inner(params("codex-gpt", repo.path())),
+    );
+
+    assert!(a.ok && b.ok, "a={:?} b={:?}", a.error, b.error);
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "start\nend\nstart\nend\n"
+    );
 }

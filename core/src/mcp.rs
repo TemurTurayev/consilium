@@ -19,21 +19,30 @@
 //! would let a prompt injection point write-enabled workers (and the auto-run
 //! verifier's build/test commands) at an arbitrary directory.
 
+mod digest;
+mod types;
+
+pub use types::*;
+
 use crate::adapters::RunRequest;
 use crate::config::{Config, VerifyConfig};
 use crate::event::Provider;
-use crate::orchestrator::changes::capture_changes;
+use crate::family::ModelFamily;
+use crate::orchestrator::changes::{capture_changes, repository_root, TreeSnapshots};
 use crate::orchestrator::council::{run_council, CouncilMember};
-use crate::orchestrator::resilience::{run_with_failover, ModelHealth, RetryConfig, Rung};
+use crate::orchestrator::cross_family::cross_family_ladder;
+use crate::orchestrator::resilience::{
+    run_with_failover, Fallback, ModelHealth, RetryConfig, Rung,
+};
 use crate::orchestrator::review::{run_review_ladder, Severity};
+use crate::orchestrator::transcript::TranscriptStore;
 use crate::orchestrator::{roles, verify};
 use crate::quota::{unix_now, QuotaStore};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,12 +50,12 @@ use std::time::Duration;
 /// Sliding window for quota reporting, from the canonical
 /// [`crate::quota::WINDOW_SECS`] (shared with the server's `/api/quota`).
 const QUOTA_WINDOW_SECS: i64 = crate::quota::WINDOW_SECS;
+/// The family of the attached conductor: this server is driven by a live
+/// Claude Code session, so a diff with no named author is Claude's.
+const CONDUCTOR_FAMILY: ModelFamily = ModelFamily::Anthropic;
 const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
 const DEFAULT_COUNCIL_TIMEOUT_SECS: u64 = 900;
-/// Max chars of a `page_in` digest — keeps a huge transcript from flooding the
-/// conductor's context.
-const PAGE_IN_DIGEST_CAP: usize = 4000;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -60,7 +69,11 @@ pub struct McpServer {
     /// Chairman failover ladder for `council_run` (the configured chairman role).
     chairman: Arc<Vec<Rung>>,
     transcript_base: PathBuf,
-    health: ModelHealth,
+    /// The configuration file(s) the lineup was read from, for `lineup`.
+    config_source: Option<String>,
+    /// One lock per repository: write workers in it run one at a time (see
+    /// `write_turn`).
+    write_turns: Arc<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
     /// Shared quota store (internally `Sync`); reads/writes serialize on its
     /// own mutex, so concurrent tool calls are safe.
     quota: Arc<QuotaStore>,
@@ -81,184 +94,12 @@ pub struct McpServerDeps {
     pub quota: QuotaStore,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RunWorkerParams {
-    /// The full, self-contained instruction for the worker.
-    pub prompt: String,
-    /// Which configured worker to route to, as "provider-model"
-    /// (e.g. "codex-gpt-6.1-sol"); see the workers in consilium.config.json.
-    pub worker_label: String,
-    /// Absolute path to the repository/working directory the worker edits.
-    /// Must be inside the directory the MCP server was launched in.
-    pub cwd: String,
-    /// Per-attempt timeout in seconds (default 600).
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct VerifyReport {
-    pub ran: bool,
-    pub passed: bool,
-    pub summary: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RunWorkerOutput {
-    /// True when a worker rung produced a result (NOT a verify verdict).
-    pub ok: bool,
-    /// "provider/model" that produced the result, if any.
-    pub model_used: Option<String>,
-    /// The worker's final report text.
-    pub worker_report: Option<String>,
-    /// Captured diff + new files after the worker ran.
-    pub changes: Option<String>,
-    /// Build/test/lint result when a verifier was configured/detected.
-    pub verify: Option<VerifyReport>,
-    /// Set when all worker rungs failed (the run never panics).
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReviewDiffParams {
-    /// The unified diff to review (e.g. `git diff` output).
-    pub diff: String,
-    /// Absolute path the reviewer process runs in (read-only). Defaults to the
-    /// directory the MCP server was launched in and must be inside it.
-    pub cwd: Option<String>,
-    /// Per-attempt timeout in seconds (default 900).
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FindingOut {
-    /// "critical" | "important" | "minor".
-    pub severity: String,
-    pub file: String,
-    pub description: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReviewDiffOutput {
-    /// True when a reviewer rung produced a result (NOT a clean verdict — see the
-    /// tool description: a clean pass is `ok && parse_ok && !has_critical`).
-    pub ok: bool,
-    /// "provider/model" that produced the review, if any (the cross-family signal).
-    pub model_used: Option<String>,
-    /// Whether the reviewer's output parsed into structured findings. Treat
-    /// `false` as an unusable review — fail closed.
-    pub parse_ok: bool,
-    /// True iff a parsed verdict contains a Critical finding (a blocking verdict).
-    pub has_critical: bool,
-    /// Structured findings (empty when clean or unparsed).
-    pub findings: Vec<FindingOut>,
-    /// The reviewer's raw text (the fallback when `parse_ok` is false).
-    pub raw_review: Option<String>,
-    /// Set when all reviewer rungs failed (the call never panics).
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CouncilRunParams {
-    /// The question to send through the configured worker council.
-    pub question: String,
-    /// Absolute path the council runs in (read-only). Defaults to the
-    /// directory the MCP server was launched in and must be inside it.
-    pub cwd: Option<String>,
-    /// Per-attempt timeout in seconds (default 900).
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AnswerOut {
-    pub member: String,
-    pub answer: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CouncilRunOutput {
-    /// True when the council produced a synthesis.
-    pub ok: bool,
-    /// The chairman's synthesis when the council succeeded.
-    pub synthesis: Option<String>,
-    /// Member answers surfaced with de-anonymized member labels.
-    pub answers: Vec<AnswerOut>,
-    /// Members that failed to produce an answer.
-    pub failed_members: Vec<String>,
-    /// Set when validation failed or the council run failed (the call never panics).
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SearchRecallParams {
-    /// The query string to search for across past transcript runs.
-    pub query: String,
-    /// Maximum number of recent transcripts to return (default 10).
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SearchRecallOutput {
-    /// True when the search completed successfully.
-    pub ok: bool,
-    /// The matching transcripts, if any.
-    pub hits: Vec<crate::orchestrator::transcript::SearchHit>,
-    /// Set when the search fails (e.g., empty query).
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct PageInParams {
-    /// The run id to load (e.g. a `search_recall` hit's `id`).
-    pub id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PageInOutput {
-    /// True when a transcript was found and loaded.
-    pub ok: bool,
-    /// The resolved run id (echoed back).
-    pub id: Option<String>,
-    /// The run kind (conduct/council/review/…), if present.
-    pub kind: Option<String>,
-    /// A compact, size-capped digest of the run (task, outcome, per-subtask
-    /// titles + summaries) — enough to recall context without the full raw JSON.
-    pub digest: Option<String>,
-    /// Set on an empty id or when no transcript matches.
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ProviderQuota {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    /// True when these tokens are heuristic estimates (the provider's CLI reports
-    /// no usage, e.g. Gemini via agy) rather than CLI-measured.
-    pub estimated: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct QuotaStatusOutput {
-    pub window_secs: i64,
-    pub claude: ProviderQuota,
-    pub codex: ProviderQuota,
-    pub gemini: ProviderQuota,
-    pub grok: ProviderQuota,
-}
-
 #[tool_router(router = tool_router)]
 impl McpServer {
     /// Build from config: resolve each configured worker into a label + failover
     /// ladder (real CLI adapters), matching how `consilium conduct` wires workers.
     pub fn new(config: Config, quota: QuotaStore) -> Self {
-        let workers: Vec<CouncilMember> = config
-            .roles
-            .workers
-            .iter()
-            .map(|role| CouncilMember {
-                label: format!("{}-{}", role.provider.as_str(), role.model),
-                ladder: roles::resolve_ladder(role),
-            })
-            .collect();
+        let workers = roles::resolve_workers(&config.roles.workers);
         let reviewer = roles::resolve_ladder(&config.roles.reviewer);
         let chairman = roles::resolve_ladder(&config.roles.chairman);
         let transcript_base = crate::orchestrator::transcript::TranscriptStore::default_base()
@@ -292,7 +133,8 @@ impl McpServer {
             chairman: Arc::new(chairman),
             transcript_base,
             verify,
-            health: ModelHealth::with_retry(RetryConfig::prod()),
+            config_source: None,
+            write_turns: Arc::default(),
             quota: Arc::new(quota),
             launch_root: Arc::new(std::env::current_dir().unwrap_or_default()),
             tool_router: Self::tool_router(),
@@ -303,6 +145,43 @@ impl McpServer {
     pub fn with_launch_root(mut self, root: PathBuf) -> Self {
         self.launch_root = Arc::new(root);
         self
+    }
+
+    /// Record which configuration file(s) the lineup was read from, for `lineup`.
+    pub fn with_config_source(mut self, source: Option<String>) -> Self {
+        self.config_source = source;
+        self
+    }
+
+    /// The configured council. Public for tests (the `lineup` tool is a thin
+    /// wrapper over this).
+    pub fn lineup_inner(&self) -> LineupOutput {
+        LineupOutput {
+            workers: self
+                .workers
+                .iter()
+                .map(|worker| WorkerLineup {
+                    label: worker.label.clone(),
+                    models: ladder_models(&worker.ladder),
+                })
+                .collect(),
+            chairman: ladder_models(&self.chairman),
+            reviewer: ladder_models(&self.reviewer),
+            config: self.config_source.clone(),
+            launch_root: self.launch_root.display().to_string(),
+        }
+    }
+
+    #[tool(
+        name = "lineup",
+        description = "List the configured council: the worker labels `run_worker` accepts \
+                       (each with its models, tried in order), the chairman and the reviewer, \
+                       the configuration file(s) it was read from, and the directory every \
+                       `cwd` must be inside. The lineup is read once, when the server starts: \
+                       a configuration edit shows up after the session is restarted."
+    )]
+    pub async fn lineup(&self) -> Json<LineupOutput> {
+        Json(self.lineup_inner())
     }
 
     #[tool(
@@ -334,9 +213,11 @@ impl McpServer {
                        audit, returning structured findings with severities. `ok` only means a \
                        reviewer ran — it is NOT a pass; a clean pass is `ok && parse_ok && \
                        !has_critical`. Treat `parse_ok:false` as an unusable review (fail closed) \
-                       even when `ok:true`, and `has_critical:true` as a blocking verdict. For a \
-                       true cross-family check, configure a reviewer of a different model family \
-                       than the worker that wrote the diff; `model_used` reports who reviewed."
+                       even when `ok:true`, and `has_critical:true` as a blocking verdict. Pass \
+                       `author_model` (a `run_worker` result's `model_used`) for a worker's diff: \
+                       a reviewer of a different model family than the author is tried first, \
+                       `cross_family` says whether one existed, and `model_used` reports who \
+                       reviewed. Without it the diff is taken to be your own."
     )]
     pub async fn review_diff(
         &self,
@@ -435,7 +316,7 @@ impl McpServer {
             ok: true,
             id: Some(id.to_string()),
             kind,
-            digest: Some(digest_transcript(&val)),
+            digest: Some(digest::digest_transcript(&val)),
             error: None,
         }
     }
@@ -462,6 +343,42 @@ impl McpServer {
         }
     }
 
+    /// The lock a write worker holds while it works in `cwd`'s repository (or
+    /// in `cwd` itself outside one). Workers there edit one tree: run
+    /// together, each would report the other's half-made changes as its own
+    /// and build and test a tree that is still moving.
+    fn write_turn(&self, cwd: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+        let tree = repository_root(cwd)
+            .or_else(|| cwd.canonicalize().ok())
+            .unwrap_or_else(|| cwd.to_path_buf());
+        let mut turns = self
+            .write_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        turns.entry(tree).or_default().clone()
+    }
+
+    /// The family of a diff's author as the conductor names it: a configured
+    /// worker's label (its primary model's family), or what a run reports as
+    /// `model_used`. `None` when it is neither.
+    fn family_of_author(&self, author: &str) -> Option<ModelFamily> {
+        self.workers
+            .iter()
+            .find(|worker| worker.label == author)
+            .and_then(|worker| worker.ladder.first())
+            .map(|rung| ModelFamily::of(rung.candidate.provider, &rung.candidate.model))
+            .or_else(|| ModelFamily::of_author(author))
+    }
+
+    /// The configured worker labels, comma-separated, for messages.
+    fn worker_labels(&self) -> String {
+        if self.workers.is_empty() {
+            return "none".to_string();
+        }
+        let labels: Vec<&str> = self.workers.iter().map(|w| w.label.as_str()).collect();
+        labels.join(", ")
+    }
+
     /// Format the refusal for a `cwd` that failed confinement. One message for
     /// every cwd-taking tool, so the conductor gets consistent feedback.
     fn cwd_refusal(&self, requested: &std::path::Path) -> String {
@@ -470,6 +387,23 @@ impl McpServer {
             requested.display(),
             self.launch_root.display(),
         )
+    }
+
+    /// Saves a run where `search_recall` and `page_in` look for it, returning
+    /// its id. Recall is a convenience: a transcript that cannot be written
+    /// must not fail the run it describes.
+    fn save_transcript(&self, kind: &str, payload: &serde_json::Value) -> Option<String> {
+        let store = TranscriptStore::new(self.transcript_base.clone());
+        match store.save(kind, payload) {
+            Ok(path) => path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(String::from),
+            Err(e) => {
+                tracing::warn!(error = %e, kind, "could not save the run's transcript");
+                None
+            }
+        }
     }
 
     /// Route a subtask to the named worker, run it, capture changes + verify.
@@ -481,41 +415,41 @@ impl McpServer {
         // `run_verify` executes build/test commands here.
         let cwd = PathBuf::from(&p.cwd);
         if !crate::confine::cwd_within_root(&cwd, &self.launch_root) {
-            return RunWorkerOutput {
-                ok: false,
-                model_used: None,
-                worker_report: None,
-                changes: None,
-                verify: None,
-                error: Some(self.cwd_refusal(&cwd)),
-            };
+            return RunWorkerOutput::failed(self.cwd_refusal(&cwd));
         }
 
         // Resolve the named worker (label = "provider-model").
         let Some(worker) = self.workers.iter().find(|w| w.label == p.worker_label) else {
-            let known: Vec<String> = self.workers.iter().map(|w| w.label.clone()).collect();
-            return RunWorkerOutput {
-                ok: false,
-                model_used: None,
-                worker_report: None,
-                changes: None,
-                verify: None,
-                error: Some(format!(
-                    "unknown worker_label '{}'; configured workers: {}",
-                    p.worker_label,
-                    known.join(", ")
-                )),
-            };
+            return RunWorkerOutput::failed(format!(
+                "unknown worker_label '{}'; configured workers: {} (`lineup` shows their models)",
+                p.worker_label,
+                self.worker_labels()
+            ));
         };
 
-        let ladder = &worker.ladder;
         let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_WORKER_TIMEOUT_SECS));
         let prompt = p.prompt.clone();
         let cwd_for_req = cwd.clone();
 
+        // One write worker at a time per repository, from the snapshot below
+        // to the verifier's last command.
+        let turn = self.write_turn(&cwd);
+        let _turn = turn.lock().await;
+        // The tree as the worker finds it — whatever is uncommitted in it now
+        // is someone else's work, not this worker's.
+        let tree_before = off_the_runtime({
+            let cwd = cwd.clone();
+            move || {
+                let snapshots = TreeSnapshots::open(&cwd).ok()?;
+                let before = snapshots.take().ok()?;
+                Some((snapshots, before))
+            }
+        })
+        .await;
+
         // SECURITY: write:true, advisory:false — never exposed as a parameter.
         let fo = run_with_failover(
-            ladder,
+            &worker.ladder,
             &p.worker_label,
             move |model| RunRequest {
                 prompt: prompt.clone(),
@@ -525,7 +459,7 @@ impl McpServer {
                 write: true,
             },
             self.quota.as_ref(),
-            &self.health,
+            &call_health(),
             timeout,
         )
         .await;
@@ -533,14 +467,20 @@ impl McpServer {
         let fo = match fo {
             Ok(fo) => fo,
             Err(e) => {
+                let error = e.to_string();
+                let transcript_id = self.save_transcript(
+                    "worker",
+                    &serde_json::json!({
+                        "kind": "worker",
+                        "task": p.prompt,
+                        "worker": p.worker_label,
+                        "failed": error,
+                    }),
+                );
                 return RunWorkerOutput {
-                    ok: false,
-                    model_used: None,
-                    worker_report: None,
-                    changes: None,
-                    verify: None,
-                    error: Some(e.to_string()),
-                }
+                    transcript_id,
+                    ..RunWorkerOutput::failed(error)
+                };
             }
         };
 
@@ -549,13 +489,34 @@ impl McpServer {
         // that did nothing must not be accepted), here a git failure degrades to
         // `None` on purpose: the attached conductor reviews diffs itself and may
         // legitimately point a worker at a non-git cwd. Best-effort context.
-        let changes = capture_changes(&cwd).ok();
+        let changes = off_the_runtime({
+            let cwd = cwd.clone();
+            move || worker_changes(&cwd, tree_before)
+        })
+        .await;
         let verify_outcome = verify::run_verify(&cwd, self.verify.as_ref()).await;
         let verify = verify_outcome.ran.then_some(VerifyReport {
             ran: verify_outcome.ran,
             passed: verify_outcome.passed,
             summary: verify_outcome.summary,
         });
+
+        let transcript_id = self.save_transcript(
+            "worker",
+            &serde_json::json!({
+                "kind": "worker",
+                "task": p.prompt,
+                "worker": p.worker_label,
+                "model_used": fo.model_used,
+                "summary": fo.outcome.final_text,
+                "changes_chars": changes.as_ref().map(String::len),
+                "verify": verify.as_ref().map(|v| serde_json::json!({
+                    "passed": v.passed,
+                    "summary": v.summary,
+                })),
+                "fallbacks": fo.fallbacks.iter().map(describe_fallback).collect::<Vec<_>>(),
+            }),
+        );
 
         RunWorkerOutput {
             ok: true,
@@ -564,6 +525,7 @@ impl McpServer {
             changes,
             verify,
             error: None,
+            transcript_id,
         }
     }
 
@@ -571,15 +533,7 @@ impl McpServer {
     /// `review_diff` tool is a thin wrapper over this).
     pub async fn review_diff_inner(&self, p: ReviewDiffParams) -> ReviewDiffOutput {
         if p.diff.trim().is_empty() {
-            return ReviewDiffOutput {
-                ok: false,
-                model_used: None,
-                parse_ok: false,
-                has_critical: false,
-                findings: Vec::new(),
-                raw_review: None,
-                error: Some("empty diff: nothing to review".into()),
-            };
+            return ReviewDiffOutput::failed("empty diff: nothing to review");
         }
         // SECURITY: `cwd` is untrusted conductor input — confine to the launch
         // root before the reviewer process runs there (same check as run_worker).
@@ -588,65 +542,72 @@ impl McpServer {
             .map(PathBuf::from)
             .unwrap_or_else(|| self.launch_root.as_ref().clone());
         if !crate::confine::cwd_within_root(&cwd, &self.launch_root) {
-            return ReviewDiffOutput {
-                ok: false,
-                model_used: None,
-                parse_ok: false,
-                has_critical: false,
-                findings: Vec::new(),
-                raw_review: None,
-                error: Some(self.cwd_refusal(&cwd)),
-            };
+            return ReviewDiffOutput::failed(self.cwd_refusal(&cwd));
         }
         let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_REVIEW_TIMEOUT_SECS));
-        let ladder: &[Rung] = &self.reviewer;
+
+        // A reviewer of a different family than the author goes first. With no
+        // author named, the diff is the conductor's own — a Claude session. An
+        // author that is named but cannot be placed is reviewed the same way,
+        // and reported as unknown rather than as checked.
+        let named_author = p
+            .author_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|author| !author.is_empty());
+        let author = named_author.and_then(|author| self.family_of_author(author));
+        let (ladder, same_family_only) = cross_family_ladder(
+            &self.reviewer,
+            &self.workers,
+            author.unwrap_or(CONDUCTOR_FAMILY),
+        );
+        let cross_family = match (named_author, author, same_family_only) {
+            (Some(_), None, _) => "unknown_author",
+            (_, _, true) => "degraded_same_family",
+            _ => "applied",
+        };
 
         // advisory:true, write:false is baked into run_review_ladder — read-only.
-        match run_review_ladder(
+        let reviewed = run_review_ladder(
             &p.diff,
-            ladder,
-            &self.health,
+            &ladder,
+            &call_health(),
             self.quota.as_ref(),
             cwd,
             timeout,
         )
-        .await
-        {
-            Ok((result, _fallbacks)) => {
-                let parse_ok = result.verdict.is_some();
-                let has_critical = result.verdict.as_ref().is_some_and(|v| v.has_critical());
-                let findings = result
-                    .verdict
-                    .map(|v| {
-                        v.findings
-                            .into_iter()
-                            .map(|f| FindingOut {
-                                severity: severity_str(&f.severity).into(),
-                                file: f.file,
-                                description: f.description,
-                            })
-                            .collect()
+        .await;
+        let (result, _fallbacks) = match reviewed {
+            Ok(reviewed) => reviewed,
+            Err(e) => return ReviewDiffOutput::failed(e.to_string()),
+        };
+
+        let transcript_id = self.save_transcript("review", &result.transcript);
+        let parse_ok = result.verdict.is_some();
+        let has_critical = result.verdict.as_ref().is_some_and(|v| v.has_critical());
+        let findings = result
+            .verdict
+            .map(|v| {
+                v.findings
+                    .into_iter()
+                    .map(|f| FindingOut {
+                        severity: severity_str(&f.severity).into(),
+                        file: f.file,
+                        description: f.description,
                     })
-                    .unwrap_or_default();
-                ReviewDiffOutput {
-                    ok: true,
-                    model_used: result.model_used,
-                    parse_ok,
-                    has_critical,
-                    findings,
-                    raw_review: Some(result.raw_review),
-                    error: None,
-                }
-            }
-            Err(e) => ReviewDiffOutput {
-                ok: false,
-                model_used: None,
-                parse_ok: false,
-                has_critical: false,
-                findings: Vec::new(),
-                raw_review: None,
-                error: Some(e.to_string()),
-            },
+                    .collect()
+            })
+            .unwrap_or_default();
+        ReviewDiffOutput {
+            ok: true,
+            model_used: result.model_used,
+            parse_ok,
+            has_critical,
+            findings,
+            raw_review: Some(result.raw_review),
+            error: None,
+            transcript_id,
+            cross_family: Some(cross_family.to_string()),
         }
     }
 
@@ -654,13 +615,7 @@ impl McpServer {
     /// tests (the `council_run` tool is a thin wrapper over this).
     pub async fn council_run_inner(&self, p: CouncilRunParams) -> CouncilRunOutput {
         if p.question.trim().is_empty() {
-            return CouncilRunOutput {
-                ok: false,
-                synthesis: None,
-                answers: Vec::new(),
-                failed_members: Vec::new(),
-                error: Some("empty question: nothing to ask the council".into()),
-            };
+            return CouncilRunOutput::failed("empty question: nothing to ask the council");
         }
         // SECURITY: `cwd` is untrusted conductor input — confine to the launch
         // root before council members run there (same check as run_worker).
@@ -669,13 +624,7 @@ impl McpServer {
             .map(PathBuf::from)
             .unwrap_or_else(|| self.launch_root.as_ref().clone());
         if !crate::confine::cwd_within_root(&cwd, &self.launch_root) {
-            return CouncilRunOutput {
-                ok: false,
-                synthesis: None,
-                answers: Vec::new(),
-                failed_members: Vec::new(),
-                error: Some(self.cwd_refusal(&cwd)),
-            };
+            return CouncilRunOutput::failed(self.cwd_refusal(&cwd));
         }
         let timeout = Duration::from_secs(p.timeout_secs.unwrap_or(DEFAULT_COUNCIL_TIMEOUT_SECS));
         let members: Vec<CouncilMember> = self
@@ -687,80 +636,89 @@ impl McpServer {
             })
             .collect();
         let chairman = self.chairman.as_ref().clone();
-        let health = ModelHealth::with_retry(RetryConfig::prod());
 
-        match run_council(
+        let outcome = run_council(
             &p.question,
             members,
             chairman,
             self.quota.as_ref(),
             cwd,
             timeout,
-            &health,
+            &call_health(),
         )
-        .await
-        {
-            Ok(outcome) => CouncilRunOutput {
-                ok: true,
-                synthesis: Some(outcome.synthesis),
-                answers: outcome
-                    .answers
-                    .into_iter()
-                    .map(|(_, member, answer)| AnswerOut { member, answer })
-                    .collect(),
-                failed_members: outcome.failed_members,
-                error: None,
-            },
-            Err(e) => CouncilRunOutput {
-                ok: false,
-                synthesis: None,
-                answers: Vec::new(),
-                failed_members: Vec::new(),
-                error: Some(e.to_string()),
-            },
+        .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => return CouncilRunOutput::failed(e.to_string()),
+        };
+
+        let transcript_id = self.save_transcript("council", &outcome.transcript);
+        CouncilRunOutput {
+            ok: true,
+            synthesis: Some(outcome.synthesis),
+            answers: outcome
+                .answers
+                .into_iter()
+                .map(|(_, member, answer)| AnswerOut { member, answer })
+                .collect(),
+            failed_members: outcome.failed_members,
+            error: None,
+            fallbacks: outcome.fallbacks.iter().map(describe_fallback).collect(),
+            transcript_id,
         }
     }
 }
 
-/// A compact, size-capped digest of a transcript JSON: task, outcome, summary,
-/// and per-subtask titles + summaries. Robust to missing fields / varied kinds.
-fn digest_transcript(val: &serde_json::Value) -> String {
-    let str_field = |k: &str| val.get(k).and_then(|v| v.as_str()).unwrap_or("");
-    let mut s = String::new();
-    let task = str_field("task");
-    if !task.is_empty() {
-        s.push_str(&format!("task: {task}\n"));
-    }
-    if let Some(c) = val.get("completed").and_then(|v| v.as_array()) {
-        s.push_str(&format!("completed: {} subtask(s)\n", c.len()));
-    }
-    let halted = str_field("halted");
-    if !halted.is_empty() {
-        s.push_str(&format!("halted: {halted}\n"));
-    }
-    let failed = str_field("failed");
-    if !failed.is_empty() {
-        s.push_str(&format!("failed: {failed}\n"));
-    }
-    let summary = str_field("summary");
-    if !summary.is_empty() {
-        s.push_str(&format!("summary: {summary}\n"));
-    }
-    if let Some(subs) = val.get("subtasks").and_then(|v| v.as_array()) {
-        for st in subs {
-            let title = st.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let sm = st.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-            if !title.is_empty() || !sm.is_empty() {
-                s.push_str(&format!("- {title}: {sm}\n"));
-            }
-        }
-    }
-    if s.chars().count() > PAGE_IN_DIGEST_CAP {
-        let capped: String = s.chars().take(PAGE_IN_DIGEST_CAP).collect();
-        format!("{capped}…[truncated]")
-    } else {
-        s
-    }
+/// What the worker itself changed: the difference between the tree as it
+/// found it (`tree_before`: the snapshots and the one taken before it ran) and
+/// the tree now. Falls back to everything uncommitted when the tree could not
+/// be snapshotted, and to `None` outside a git repository.
+fn worker_changes(
+    cwd: &std::path::Path,
+    tree_before: Option<(TreeSnapshots, String)>,
+) -> Option<String> {
+    let own = tree_before.and_then(|(snapshots, before)| {
+        let after = snapshots.take().ok()?;
+        snapshots.changes_between(&before, &after).ok()
+    });
+    own.or_else(|| capture_changes(cwd).ok())
+}
+
+/// Runs blocking git work on a thread of its own, so a slow repository does
+/// not stall the other tool calls this server is answering. `None` if that
+/// thread could not finish — the callers treat it as "nothing captured".
+async fn off_the_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
+    tokio::task::spawn_blocking(work).await.ok().flatten()
+}
+
+/// The failure memory for one tool call. The server lives as long as the
+/// session that started it — hours — while "this model is dead", "this rung is
+/// throttled" and "this CLI is signed out" are true only until someone fixes
+/// them. Remembering them across calls would keep a provider skipped long
+/// after the user signed back in.
+fn call_health() -> ModelHealth {
+    ModelHealth::with_retry(RetryConfig::prod())
+}
+
+/// A ladder's models as "provider/model", in the order they are tried.
+fn ladder_models(ladder: &[Rung]) -> Vec<String> {
+    ladder
+        .iter()
+        .map(|rung| {
+            format!(
+                "{}/{}",
+                rung.candidate.provider.as_str(),
+                rung.candidate.model
+            )
+        })
+        .collect()
+}
+
+/// One model demotion in words: "from → to (why)".
+fn describe_fallback(fallback: &Fallback) -> String {
+    format!("{} → {} ({})", fallback.from, fallback.to, fallback.reason)
 }
 
 fn severity_str(s: &Severity) -> &'static str {
@@ -777,27 +735,32 @@ impl ServerHandler for McpServer {
         // ServerInfo is #[non_exhaustive] — build from Default, then set fields.
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.instructions = Some(
+        info.instructions = Some(format!(
             "Consilium attached-conductor MCP server. You are the conductor: decompose the \
              task yourself, delegate self-contained subtasks to workers via `run_worker`, and \
              check `quota_status` to route to the freest provider. Workers edit real files and \
              return diffs + build/test results. Use `review_diff` for a read-only audit of a diff \
              by the configured reviewer, `council_run` for a read-only worker-council \
              synthesis by the configured chairman, `search_recall` to query past runs, and \
-             `page_in` to load a past run by id."
-                .to_string(),
-        );
+             `page_in` to load a past run by id. Configured workers (`worker_label` values): {}. \
+             `lineup` shows each worker's models, the chairman and the reviewer.",
+            self.worker_labels()
+        ));
         info
     }
 }
 
 /// Serve the attached-conductor MCP server over stdio until the client
 /// disconnects. Loads config + the shared quota store and blocks.
-pub async fn serve_stdio(config: Config, quota: QuotaStore) -> anyhow::Result<()> {
+pub async fn serve_stdio(
+    config: Config,
+    quota: QuotaStore,
+    config_source: Option<String>,
+) -> anyhow::Result<()> {
     use rmcp::transport::stdio;
     use rmcp::ServiceExt;
 
-    let server = McpServer::new(config, quota);
+    let server = McpServer::new(config, quota).with_config_source(config_source);
     let running = server.serve(stdio()).await?;
     running.waiting().await?;
     Ok(())

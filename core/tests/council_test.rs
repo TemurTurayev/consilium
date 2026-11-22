@@ -297,3 +297,66 @@ async fn council_member_falls_back_to_second_model() {
         "fallbacks should record the failed model"
     );
 }
+
+/// A council that answered through a fallback is not the council that was
+/// configured. The outcome must say which model each answer and the synthesis
+/// came from, and which demotions happened on the way.
+#[tokio::test]
+async fn the_outcome_says_which_models_answered() {
+    let store = QuotaStore::open_in_memory().unwrap();
+    let health = ModelHealth::new();
+    let rung = |model: &str, adapter: ScriptedAdapter| Rung {
+        candidate: ModelCandidate {
+            provider: Provider::Codex,
+            model: model.into(),
+        },
+        adapter: Arc::new(adapter),
+    };
+    let members = vec![CouncilMember {
+        label: "codex-a".into(),
+        ladder: vec![
+            rung(
+                "a",
+                ScriptedAdapter::failing(Provider::Codex, "upstream exploded"),
+            ),
+            rung(
+                "b",
+                ScriptedAdapter::ok_with_text(Provider::Codex, "use sqlite"),
+            ),
+        ],
+    }];
+    let chairman = solo_ladder(
+        Provider::Claude,
+        "chair",
+        ScriptedAdapter::ok_with_text(Provider::Claude, "final"),
+    );
+
+    let outcome = run_council(
+        "which db?",
+        members,
+        chairman,
+        &store,
+        std::env::temp_dir(),
+        Duration::from_secs(30),
+        &health,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.answered_by,
+        [("codex-a".to_string(), "codex/b".to_string())]
+    );
+    assert_eq!(outcome.chairman_model, "claude/chair");
+    assert!(
+        outcome
+            .fallbacks
+            .iter()
+            .any(|f| f.from == "codex/a" && f.to == "codex/b"),
+        "{:?}",
+        outcome.fallbacks
+    );
+    // and the saved record carries the same
+    assert_eq!(outcome.transcript["answers"][0]["model_used"], "codex/b");
+    assert_eq!(outcome.transcript["chairman_model"], "claude/chair");
+}

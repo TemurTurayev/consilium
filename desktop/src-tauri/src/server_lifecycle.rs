@@ -2,11 +2,11 @@
 //! workspace, tearing down the previous run on restart, and reporting state
 //! back to the UI via `get_server_state`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use consilium::config::Config;
+use consilium::config_files::ConfigFiles;
 use consilium::quota::QuotaStore;
 use consilium::server::{serve_on, ServerState};
 use tokio::net::TcpListener;
@@ -35,23 +35,6 @@ pub struct DesktopState {
     pub server: Mutex<Option<Arc<RunningServer>>>,
 }
 
-/// Resolve which config file to load for a workspace: workspace-local
-/// `consilium.config.json` if present, else `~/.consilium/consilium.config.json`,
-/// else defaults (via `Config::load(None)`).
-fn resolve_config_path(workspace: &Path) -> Option<PathBuf> {
-    let workspace_config = workspace.join("consilium.config.json");
-    if workspace_config.is_file() {
-        return Some(workspace_config);
-    }
-    let home_config = dirs::home_dir().map(|h| h.join(".consilium").join("consilium.config.json"));
-    if let Some(path) = &home_config {
-        if path.is_file() {
-            return Some(path.clone());
-        }
-    }
-    None
-}
-
 /// Start (or restart) the embedded server against `workspace`. Aborts any
 /// previously running server task first. Returns the bound `http://…` URL on
 /// success.
@@ -65,11 +48,11 @@ pub async fn start_server(state: &Arc<DesktopState>, workspace: PathBuf) -> anyh
         }
     }
 
-    let config_path = resolve_config_path(&workspace);
-    let config_path_str = config_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
-    let config = Config::load(config_path.as_deref())?;
+    // The same layering as the CLI and the MCP server: built-in defaults, then
+    // `~/.consilium/consilium.config.json`, then the workspace's own file.
+    let config_files = ConfigFiles::locate(&workspace);
+    let config_path_str = config_files.describe();
+    let config = config_files.load()?;
 
     let quota = QuotaStore::open(&usage_db_path())?;
 

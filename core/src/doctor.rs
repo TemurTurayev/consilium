@@ -91,6 +91,7 @@ pub fn probe_label(kind: FailureKind) -> &'static str {
         FailureKind::ModelUnavailable => "unavailable",
         FailureKind::RateLimited => "rate-limited",
         FailureKind::Transient => "transient failure",
+        FailureKind::Unauthenticated => "not signed in",
     }
 }
 
@@ -284,12 +285,13 @@ pub(crate) fn remediation_hint(detail: &str) -> &'static str {
     } else if d.contains("no longer supported") || d.contains("ineligible") || d.contains("migrate")
     {
         "provider tier looks deprecated — migrate this CLI's auth (a supported tier or API key)"
-    } else if d.contains("401")
+    } else if d.starts_with(probe_label(FailureKind::Unauthenticated))
+        || d.contains("401")
         || d.contains("authenticat")
         || d.contains("unauthor")
         || d.contains("credential")
     {
-        "re-authenticate this CLI — Claude: run `claude setup-token` then export CLAUDE_CODE_OAUTH_TOKEN; others: re-login — then re-run"
+        "re-authenticate this CLI — Claude: run `claude setup-token` and save the token as `export CLAUDE_CODE_OAUTH_TOKEN=…` in ~/.consilium/secrets.env (read by Consilium wherever it runs, a desktop app included); others: re-login — then re-run"
     } else if d.contains("rate") && d.contains("limit") {
         "rate-limited — wait and retry, or reduce concurrency"
     } else if d.contains("no output") || d.contains("produced no") {
@@ -302,19 +304,7 @@ pub(crate) fn remediation_hint(detail: &str) -> &'static str {
 /// How much of a CLI's error text a status line shows.
 pub(crate) const DETAIL_DISPLAY_CHARS: usize = 320;
 
-/// A CLI error squeezed onto one line for a status listing: runs of whitespace
-/// (including newlines) become single spaces, and anything beyond `max_chars`
-/// characters is cut with an ellipsis. Provider CLIs answer with multi-line
-/// text — a pretty-printed JSON blob, or a reason followed by a long model
-/// list — which otherwise buries the status lines around it.
-pub(crate) fn one_line(detail: &str, max_chars: usize) -> String {
-    let flat = detail.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max_chars {
-        return flat;
-    }
-    let kept: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
-    format!("{}…", kept.trim_end())
-}
+pub(crate) use crate::text::one_line;
 
 pub fn print_preflight(report: &ModelProbeReport) {
     println!("── session preflight ──");
@@ -408,6 +398,18 @@ mod tests {
         assert_eq!(probe_label(FailureKind::ModelUnavailable), "unavailable");
         assert_eq!(probe_label(FailureKind::RateLimited), "rate-limited");
         assert_eq!(probe_label(FailureKind::Transient), "transient failure");
+        assert_eq!(probe_label(FailureKind::Unauthenticated), "not signed in");
+    }
+
+    /// A terminal has the Claude token from the shell profile; a desktop app
+    /// does not. The hint must name the one place that works for both.
+    #[test]
+    fn remediation_hint_for_a_signed_out_claude_names_the_secrets_file() {
+        let hint = remediation_hint(
+            "not signed in: Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+        );
+        assert!(hint.contains("claude setup-token"), "{hint}");
+        assert!(hint.contains("~/.consilium/secrets.env"), "{hint}");
     }
 
     #[test]

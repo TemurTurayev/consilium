@@ -81,6 +81,10 @@ pub struct ModelHealth {
     /// rung this run.
     cold: Arc<Mutex<HashSet<(Provider, String)>>>,
     rate_limit_hits: Arc<Mutex<HashMap<(Provider, String), u32>>>,
+    /// Providers whose CLI turned out not to be signed in. Unlike `dead` this
+    /// is about the provider, not one model: no rung of it can answer until
+    /// the operator signs in, so all of them are skipped for the rest of the run.
+    signed_out: Arc<Mutex<HashSet<Provider>>>,
     retry: RetryConfig,
 }
 
@@ -95,6 +99,7 @@ impl ModelHealth {
             dead: Arc::default(),
             cold: Arc::default(),
             rate_limit_hits: Arc::default(),
+            signed_out: Arc::default(),
             retry,
         }
     }
@@ -109,6 +114,13 @@ impl ModelHealth {
             .lock()
             .unwrap()
             .contains(&(provider, model.to_string()))
+    }
+    /// Record that a provider's CLI is not signed in (see `signed_out`).
+    pub fn mark_signed_out(&self, provider: Provider) {
+        self.signed_out.lock().unwrap().insert(provider);
+    }
+    pub fn is_signed_out(&self, provider: Provider) -> bool {
+        self.signed_out.lock().unwrap().contains(&provider)
     }
     /// True once a rung has been tripped cold by the rate-limit circuit-breaker.
     pub fn is_cold(&self, provider: Provider, model: &str) -> bool {
@@ -176,17 +188,136 @@ fn classify_attempt(
     }
 }
 
+/// How much of a CLI's own explanation a failure reason carries.
+const FAILURE_DETAIL_CHARS: usize = 240;
+
+/// Why a rung is not even attempted, if the run already knows it cannot answer.
+fn skip_reason(health: &ModelHealth, candidate: &ModelCandidate) -> Option<String> {
+    let ModelCandidate { provider, model } = candidate;
+    if health.is_signed_out(*provider) {
+        Some(format!("{} is not signed in", provider.as_str()))
+    } else if health.is_dead(*provider, model) {
+        Some("known-dead this run".to_string())
+    } else if health.is_cold(*provider, model) {
+        Some("rate-limit-cold this run".to_string())
+    } else {
+        None
+    }
+}
+
+/// Runs one rung, retrying it in place while that can help. Transient (a
+/// transient Failed event, a spawn error or a timeout) AND RateLimited get up
+/// to `max_retries` same-rung retries with exponential backoff before demoting
+/// — a brief throttle/blip shouldn't burn the rung. This matters most for the
+/// conductor, whose ladder is single Claude-family: an instant demote+bail
+/// under throttle killed whole runs. ModelUnavailable and Unauthenticated are
+/// never retried: the same call cannot come out differently.
+///
+/// The attempt's Result is captured WITHOUT `?` so a spawn/launch Err demotes
+/// to the next rung instead of aborting the entire ladder.
+async fn attempt_with_retries(
+    rung: &Rung,
+    build_req: &impl Fn(Option<String>) -> RunRequest,
+    quota: &QuotaStore,
+    health: &ModelHealth,
+    timeout: Duration,
+) -> (anyhow::Result<RunOutcome>, Option<FailureKind>) {
+    let attempt = || {
+        let req = build_req(Some(rung.candidate.model.clone()));
+        run_to_completion(rung.adapter.clone(), req, quota, timeout)
+    };
+    let mut result = attempt().await;
+    let mut kind = classify_attempt(&rung.adapter, &result);
+    let mut retries = 0u32;
+    while matches!(
+        kind,
+        Some(FailureKind::Transient | FailureKind::RateLimited)
+    ) && retries < health.retry.max_retries
+    {
+        // A genuine TimedOut (classified Transient) is unlikely to recover on
+        // retry, and EACH retry costs a full `timeout` — cap it at one retry
+        // regardless of max_retries so a hung rung demotes promptly. Rate
+        // limits and transient network blips still get the full retry budget.
+        if retries >= 1 && matches!(&result, Ok(o) if o.status == RunStatus::TimedOut) {
+            break;
+        }
+        let backoff = health.retry.backoff_for(retries);
+        if !backoff.is_zero() {
+            tokio::time::sleep(backoff).await;
+        }
+        result = attempt().await;
+        kind = classify_attempt(&rung.adapter, &result);
+        retries += 1;
+    }
+    (result, kind)
+}
+
+/// Remembers what a rung's failure means for the rest of the run: a missing
+/// model is dead, a signed-out CLI takes its whole provider with it, repeated
+/// throttling trips the circuit-breaker. A rate-limited, timed-out or
+/// spawn-failed rung is NOT marked dead.
+fn remember_failure(
+    health: &ModelHealth,
+    label: &str,
+    candidate: &ModelCandidate,
+    kind: FailureKind,
+) {
+    let ModelCandidate { provider, model } = candidate;
+    match kind {
+        FailureKind::ModelUnavailable => health.mark_dead(*provider, model),
+        FailureKind::Unauthenticated => health.mark_signed_out(*provider),
+        FailureKind::RateLimited => {
+            if health.record_rate_limit(*provider, model) {
+                eprintln!(
+                    "🧊 {label}: {} tripped the rate-limit circuit-breaker — cold for the rest of the run",
+                    key(candidate)
+                );
+            }
+        }
+        FailureKind::Transient => {}
+    }
+}
+
+/// A failed attempt in words: what kind of failure it was, then what the CLI
+/// itself said, on one line. "transient failure" alone left the operator
+/// nothing to act on.
+fn describe_failure(
+    kind: FailureKind,
+    result: &anyhow::Result<RunOutcome>,
+    timeout: Duration,
+) -> String {
+    let reason = match kind {
+        FailureKind::ModelUnavailable => "model unavailable",
+        FailureKind::RateLimited => "rate limited",
+        FailureKind::Transient => "transient failure",
+        FailureKind::Unauthenticated => "not signed in",
+    };
+    let said = match result {
+        Ok(outcome) => match &outcome.status {
+            RunStatus::Failed(error) => error.clone(),
+            RunStatus::TimedOut => format!("timed out after {}s", timeout.as_secs()),
+            RunStatus::Completed => String::new(),
+        },
+        Err(error) => error.to_string(),
+    };
+    let said = crate::text::one_line(&said, FAILURE_DETAIL_CHARS);
+    if said.is_empty() {
+        reason.to_string()
+    } else {
+        format!("{reason}: {said}")
+    }
+}
+
 /// Runs a role's ladder with failover. `build_req` takes the rung's model
-/// (Some) and returns the RunRequest for that attempt. Demotes on
-/// ModelUnavailable (marks dead). Transient AND RateLimited retry on the SAME
-/// rung up to `health`'s `RetryConfig.max_retries` with exponential backoff
-/// before demoting (a brief throttle/blip shouldn't burn the rung) — covering a
-/// transient/rate-limited Failed event AND a spawn/launch Err. A rung attempt
-/// NEVER propagates with `?`: a spawn
+/// (Some) and returns the RunRequest for that attempt. A rung the run already
+/// knows cannot answer is skipped (see `skip_reason`); the others are run with
+/// same-rung retries where those can help (see `attempt_with_retries`), and
+/// what each failure means is remembered for the rest of the run (see
+/// `remember_failure`). A rung attempt NEVER propagates with `?`: a spawn
 /// error demotes to the next rung rather than aborting the whole ladder. Every
 /// rung failure is logged loudly to stderr (demotions also recorded in
-/// `fallbacks`); the bail carries every rung's failure reason. Errors only when
-/// every rung is exhausted.
+/// `fallbacks`) with the CLI's own explanation; the bail carries every rung's
+/// failure reason. Errors only when every rung is exhausted.
 pub async fn run_with_failover(
     ladder: &[Rung],
     label: &str,
@@ -200,118 +331,56 @@ pub async fn run_with_failover(
     }
     let mut fallbacks: Vec<Fallback> = Vec::new();
     let mut reasons: Vec<String> = Vec::new();
-    let n = ladder.len();
 
     for (i, rung) in ladder.iter().enumerate() {
-        let model = &rung.candidate.model;
-        let provider = rung.candidate.provider;
-
-        // Skip models already known dead, or tripped cold by the rate-limit
-        // circuit-breaker, this run.
-        let skip = if health.is_dead(provider, model) {
-            Some("known-dead")
-        } else if health.is_cold(provider, model) {
-            Some("rate-limit-cold")
-        } else {
-            None
-        };
-        if let Some(sr) = skip {
-            reasons.push(format!("{} {sr}", key(&rung.candidate)));
-            if let Some(next) = ladder.get(i + 1) {
-                let fb = Fallback {
-                    from: key(&rung.candidate),
-                    to: key(&next.candidate),
-                    reason: format!("{label}: {} is {sr} this run", key(&rung.candidate)),
+        let candidate = &rung.candidate;
+        let failure = match skip_reason(health, candidate) {
+            Some(skipped) => skipped,
+            None => {
+                let (result, kind) =
+                    attempt_with_retries(rung, &build_req, quota, health, timeout).await;
+                let Some(kind) = kind else {
+                    return Ok(FailoverResult {
+                        model_used: key(candidate),
+                        outcome: result
+                            .expect("classify_attempt returned None only for Ok(Completed)"),
+                        rung_used: i,
+                        fallbacks,
+                    });
                 };
-                eprintln!("↳ {label} fell back: {} → {} ({sr})", fb.from, fb.to);
+                remember_failure(health, label, candidate, kind);
+                describe_failure(kind, &result, timeout)
+            }
+        };
+
+        reasons.push(format!("{} ({failure})", key(candidate)));
+        match ladder.get(i + 1) {
+            Some(next) => {
+                let fb = Fallback {
+                    from: key(candidate),
+                    to: key(&next.candidate),
+                    reason: format!("{label}: {} ({failure})", key(candidate)),
+                };
+                eprintln!("↳ {label} fell back: {} → {} ({failure})", fb.from, fb.to);
                 fallbacks.push(fb);
-            } else {
-                eprintln!("✗ {label}: {} failed ({sr})", key(&rung.candidate));
             }
-            continue;
-        }
-
-        let attempt = |adapter: Arc<dyn Adapter>| {
-            let req = build_req(Some(model.clone()));
-            run_to_completion(adapter, req, quota, timeout)
-        };
-
-        // First attempt — capture the Result WITHOUT `?` so a spawn/launch Err
-        // demotes to the next rung instead of aborting the entire ladder.
-        let mut result: anyhow::Result<RunOutcome> = attempt(rung.adapter.clone()).await;
-        let mut kind = classify_attempt(&rung.adapter, &result);
-
-        // Transient (transient Failed event OR spawn-err OR timeout) AND
-        // RateLimited get up to `max_retries` same-rung retries with exponential
-        // backoff before demoting — a brief throttle/blip shouldn't burn the
-        // rung. This matters most for the conductor, whose ladder is single
-        // Claude-family: an instant demote+bail under throttle killed whole runs.
-        // ModelUnavailable is terminal (dead) and never retried here.
-        let mut retries = 0u32;
-        while matches!(
-            kind,
-            Some(FailureKind::Transient) | Some(FailureKind::RateLimited)
-        ) && retries < health.retry.max_retries
-        {
-            // A genuine TimedOut (classified Transient) is unlikely to recover on
-            // retry, and EACH retry costs a full `timeout` — cap it at one retry
-            // regardless of max_retries so a hung rung demotes promptly. Rate
-            // limits and transient network blips still get the full retry budget.
-            if retries >= 1 && matches!(&result, Ok(o) if o.status == RunStatus::TimedOut) {
-                break;
-            }
-            let backoff = health.retry.backoff_for(retries);
-            if !backoff.is_zero() {
-                tokio::time::sleep(backoff).await;
-            }
-            result = attempt(rung.adapter.clone()).await;
-            kind = classify_attempt(&rung.adapter, &result);
-            retries += 1;
-        }
-
-        // Success on this rung → done.
-        let Some(kind) = kind else {
-            return Ok(FailoverResult {
-                model_used: key(&rung.candidate),
-                outcome: result.expect("classify_attempt returned None only for Ok(Completed)"),
-                rung_used: i,
-                fallbacks,
-            });
-        };
-
-        // Failure → mark dead only on ModelUnavailable (NOT rate-limited,
-        // timed-out, or spawn-err), record a loud failure line + the demotion.
-        if kind == FailureKind::ModelUnavailable {
-            health.mark_dead(provider, model);
-        } else if kind == FailureKind::RateLimited && health.record_rate_limit(provider, model) {
-            eprintln!(
-                "🧊 {label}: {} tripped the rate-limit circuit-breaker — cold for the rest of the run",
-                key(&rung.candidate)
-            );
-        }
-        let reason = match kind {
-            FailureKind::ModelUnavailable => "model unavailable",
-            FailureKind::RateLimited => "rate limited",
-            FailureKind::Transient => "transient failure",
-        };
-        reasons.push(format!("{} ({reason})", key(&rung.candidate)));
-        if let Some(next) = ladder.get(i + 1) {
-            let fb = Fallback {
-                from: key(&rung.candidate),
-                to: key(&next.candidate),
-                reason: format!("{label}: {} ({reason})", key(&rung.candidate)),
-            };
-            eprintln!("↳ {label} fell back: {} → {} ({reason})", fb.from, fb.to);
-            fallbacks.push(fb);
-        } else {
             // Terminal rung: no successor to demote to, but the failure is still
             // logged loudly (the docstring promises every failure is loud).
-            eprintln!("✗ {label}: {} failed ({reason})", key(&rung.candidate));
+            None => eprintln!("✗ {label}: {} failed ({failure})", key(candidate)),
         }
     }
 
+    let sign_in_hint = if ladder
+        .iter()
+        .any(|rung| health.is_signed_out(rung.candidate.provider))
+    {
+        " — run `consilium auth` to see how to sign in"
+    } else {
+        ""
+    };
     anyhow::bail!(
-        "{label}: all {n} model rungs failed: {}",
+        "{label}: all {} model rungs failed: {}{sign_in_hint}",
+        ladder.len(),
         reasons.join("; ")
     );
 }

@@ -3,8 +3,10 @@
 use crate::adapters::RunRequest;
 use crate::config::{ConductorMemoryConfig, VerifyConfig};
 use crate::event::AgentEvent;
+use crate::family::ModelFamily;
 use crate::orchestrator::changes::{capture_changed_files, capture_changes};
 use crate::orchestrator::council::CouncilMember;
+use crate::orchestrator::cross_family::{author_family, cross_family_ladder};
 use crate::orchestrator::operator;
 use crate::orchestrator::progress;
 use crate::orchestrator::resilience::{run_with_failover, Fallback, ModelHealth, Rung};
@@ -463,12 +465,12 @@ pub async fn run_conduct(
                         .await
                     };
 
-                    let (worker_text, worker_failed_msg) = match worker_result {
+                    let (worker_text, worker_failed_msg, worker_rung) = match worker_result {
                         Ok(fo) => {
                             all_fallbacks.extend(fo.fallbacks);
-                            (fo.outcome.final_text, None)
+                            (fo.outcome.final_text, None, Some(fo.rung_used))
                         }
-                        Err(e) => (String::new(), Some(e.to_string())),
+                        Err(e) => (String::new(), Some(e.to_string()), None),
                     };
 
                     if let Some(err_msg) = worker_failed_msg {
@@ -715,7 +717,7 @@ pub async fn run_conduct(
                                         arbiter.as_ref(),
                                         cross_family,
                                         &workers,
-                                        worker_providers[worker_idx],
+                                        author_family(worker, worker_rung),
                                         attempt_num,
                                         &mut attempts,
                                         &mut all_fallbacks,
@@ -1060,7 +1062,7 @@ async fn run_review_gate(
     arbiter: Option<&RoleHandle>,
     cross_family: bool,
     workers: &[CouncilMember],
-    worker_provider: crate::event::Provider,
+    author: ModelFamily,
     attempt_num: usize,
     attempts: &mut Vec<serde_json::Value>,
     all_fallbacks: &mut Vec<Fallback>,
@@ -1075,7 +1077,7 @@ async fn run_review_gate(
     // Cross-family review (Finding 7): front the reviewer with a different family
     // than the worker that produced the diff.
     let (review_ladder, cf_marker): (Vec<Rung>, Option<&str>) = if cross_family {
-        let (l, degraded) = cross_family_ladder(&reviewer.ladder, workers, worker_provider);
+        let (l, degraded) = cross_family_ladder(&reviewer.ladder, workers, author);
         (
             l,
             Some(if degraded {
@@ -1156,7 +1158,7 @@ async fn run_review_gate(
     let arb_history = mem_history(mem_on, attempts.as_slice(), hist_cap);
     // Cross-family arbiter (Finding 7): same rule as the reviewer.
     let arb_ladder = if cross_family {
-        cross_family_ladder(&arb.ladder, workers, worker_provider).0
+        cross_family_ladder(&arb.ladder, workers, author).0
     } else {
         arb.ladder.clone()
     };
@@ -1224,44 +1226,6 @@ async fn run_review_gate(
             }
         }
     }
-}
-
-/// Cross-family review ladder (Finding 7): a reviewer/arbiter ladder whose front
-/// is a DIFFERENT model family than `worker_provider`. Order: the role's own
-/// different-family rungs, then different-family worker primaries (borrowed as
-/// fallbacks so a single-rung same-family reviewer still gets a cross-family
-/// option), then the role's same-family rungs last (fail-open if the
-/// cross-family models are all dead at runtime). Returns `(ladder, degraded)`,
-/// where `degraded` = no different-family option existed at all (front is
-/// same-family) — the review still runs, just same-family, and is marked.
-fn cross_family_ladder(
-    role_ladder: &[Rung],
-    workers: &[CouncilMember],
-    worker_provider: crate::event::Provider,
-) -> (Vec<Rung>, bool) {
-    let mut out: Vec<Rung> = role_ladder
-        .iter()
-        .filter(|r| r.candidate.provider != worker_provider)
-        .cloned()
-        .collect();
-    for w in workers {
-        if let Some(first) = w.ladder.first() {
-            if first.candidate.provider != worker_provider {
-                out.push(first.clone());
-            }
-        }
-    }
-    for r in role_ladder
-        .iter()
-        .filter(|r| r.candidate.provider == worker_provider)
-    {
-        out.push(r.clone());
-    }
-    let degraded = out
-        .first()
-        .map(|r| r.candidate.provider == worker_provider)
-        .unwrap_or(true);
-    (out, degraded)
 }
 
 // ─── ConductorMemory: ledger + attempt history ───────────────────────────────
@@ -1743,116 +1707,6 @@ mod tests {
         let files = vec!["a".to_string()];
         assert!(mem_blackboard(false, &entries, &files, 100).is_none());
         assert!(mem_blackboard(true, &entries, &files, 100).is_some());
-    }
-
-    // ── cross-family review ──────────────────────────────────────────────────
-    struct StubAdapter;
-    impl crate::adapters::Adapter for StubAdapter {
-        fn provider(&self) -> crate::event::Provider {
-            crate::event::Provider::Claude
-        }
-        fn cli_binary(&self) -> &'static str {
-            "stub"
-        }
-        fn build_command(&self, _req: &crate::adapters::RunRequest) -> tokio::process::Command {
-            tokio::process::Command::new("true")
-        }
-        fn parse_line(&self, _line: &str) -> Vec<crate::event::AgentEvent> {
-            Vec::new()
-        }
-    }
-    fn cf_rung(p: crate::event::Provider, model: &str) -> Rung {
-        Rung {
-            candidate: crate::config::ModelCandidate {
-                provider: p,
-                model: model.into(),
-            },
-            adapter: std::sync::Arc::new(StubAdapter),
-        }
-    }
-    fn cf_member(p: crate::event::Provider, label: &str) -> CouncilMember {
-        CouncilMember {
-            label: label.into(),
-            ladder: vec![cf_rung(p, "m")],
-        }
-    }
-
-    #[test]
-    fn cross_family_fronts_a_different_family() {
-        use crate::event::Provider;
-        // reviewer = single Codex rung; worker = Codex; pool has a Gemini worker.
-        let (l, degraded) = cross_family_ladder(
-            &[cf_rung(Provider::Codex, "rev")],
-            &[
-                cf_member(Provider::Codex, "w1"),
-                cf_member(Provider::Gemini, "w2"),
-            ],
-            Provider::Codex,
-        );
-        assert!(!degraded);
-        assert_eq!(
-            l[0].candidate.provider,
-            Provider::Gemini,
-            "front must be cross-family"
-        );
-        assert!(
-            l.iter().any(|r| r.candidate.provider == Provider::Codex),
-            "same-family reviewer kept as a fallback (fail-open)"
-        );
-    }
-
-    #[test]
-    fn cross_family_degrades_when_single_family() {
-        use crate::event::Provider;
-        let (l, degraded) = cross_family_ladder(
-            &[cf_rung(Provider::Codex, "rev")],
-            &[cf_member(Provider::Codex, "w1")],
-            Provider::Codex,
-        );
-        assert!(degraded, "no other family available → degraded");
-        assert_eq!(
-            l[0].candidate.provider,
-            Provider::Codex,
-            "still runs same-family (fail-open, never blocks the review)"
-        );
-    }
-
-    #[test]
-    fn cross_family_noop_when_reviewer_already_different() {
-        use crate::event::Provider;
-        // reviewer = Claude, worker = Codex → already cross-family.
-        let (l, degraded) = cross_family_ladder(
-            &[cf_rung(Provider::Claude, "rev")],
-            &[cf_member(Provider::Codex, "w1")],
-            Provider::Codex,
-        );
-        assert!(!degraded);
-        assert_eq!(l[0].candidate.provider, Provider::Claude);
-    }
-
-    #[test]
-    fn cross_family_reorders_multi_rung_stably() {
-        use crate::event::Provider;
-        // A multi-family reviewer ladder; worker = Codex. Different-family rungs
-        // move to the front (stable), the same-family rung is appended last.
-        let ladder = vec![
-            cf_rung(Provider::Codex, "a"),
-            cf_rung(Provider::Claude, "b"),
-            cf_rung(Provider::Gemini, "c"),
-        ];
-        let (l, degraded) = cross_family_ladder(&ladder, &[], Provider::Codex);
-        assert!(!degraded);
-        assert_eq!(
-            l[0].candidate.provider,
-            Provider::Claude,
-            "stable: Claude first"
-        );
-        assert_eq!(l[1].candidate.provider, Provider::Gemini, "then Gemini");
-        assert_eq!(
-            l.last().unwrap().candidate.provider,
-            Provider::Codex,
-            "same-family appended last (fail-open)"
-        );
     }
 
     #[test]

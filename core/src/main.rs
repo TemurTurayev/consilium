@@ -88,6 +88,10 @@ enum Command {
         /// Skip the wizard: write the recommended council non-interactively (CI/scripts).
         #[arg(long)]
         yes: bool,
+        /// Write your own council to ~/.consilium/consilium.config.json, which
+        /// applies in every directory, instead of this project's file.
+        #[arg(long)]
+        global: bool,
     },
     /// Find the best model each provider can run on your account (a few
     /// ~1-token probes per provider) and, with --write, update
@@ -255,9 +259,14 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if models {
-                let config = consilium::config::Config::load(Some(std::path::Path::new(
-                    "consilium.config.json",
-                )))?;
+                let files = consilium::config_files::ConfigFiles::locate(&std::env::current_dir()?);
+                let config = files.load()?;
+                println!(
+                    "config: {}",
+                    files
+                        .describe()
+                        .unwrap_or_else(|| "built-in defaults (no config file)".to_string())
+                );
                 let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
                 let report = consilium::doctor::preflight(&config, &store).await;
                 consilium::doctor::print_preflight(&report);
@@ -296,8 +305,8 @@ async fn main() -> anyhow::Result<()> {
             use consilium::event::Provider;
             use consilium::models::{self, TopModel};
 
-            let config_path = std::path::Path::new("consilium.config.json");
-            let config = consilium::config::Config::load(Some(config_path))?;
+            let files = consilium::config_files::ConfigFiles::locate(&std::env::current_dir()?);
+            let config = files.load()?;
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
 
             println!("── best model each provider can run on this account ──");
@@ -333,16 +342,28 @@ async fn main() -> anyhow::Result<()> {
 
             let changes = models::planned_changes(&config, &chosen);
             if changes.is_empty() {
-                println!("\nconsilium.config.json is up to date.");
+                println!("\nyour configuration is up to date.");
             } else {
                 println!("\nmodels to switch (retired, or not available on this account):");
                 for c in &changes {
                     println!("  • {}/{} → {}", c.provider.as_str(), c.from, c.to);
                 }
                 if write {
-                    let upgraded = models::upgrade_config(&config, &chosen);
-                    std::fs::write(config_path, upgraded.to_pretty_json()?)?;
-                    println!("\n✓ updated {}.", config_path.display());
+                    // Each file is fixed where it is. With no file at all, the
+                    // upgraded built-in lineup becomes this project's config.
+                    let updated = if files.existing().is_empty() {
+                        let target =
+                            std::path::PathBuf::from(consilium::config_files::PROJECT_CONFIG_FILE);
+                        let upgraded = models::upgrade_config(&config, &chosen);
+                        std::fs::write(&target, upgraded.to_pretty_json()?)?;
+                        vec![target]
+                    } else {
+                        models::upgrade_files(&files, &chosen)?
+                    };
+                    println!();
+                    for file in updated {
+                        println!("✓ updated {}.", file.display());
+                    }
                 } else {
                     println!("\nrun `consilium models --write` to apply.");
                 }
@@ -435,24 +456,13 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Council { question, timeout } => {
-            use consilium::orchestrator::council::CouncilMember;
             use consilium::orchestrator::resilience::{ModelHealth, RetryConfig};
             use consilium::orchestrator::{council, roles, transcript::TranscriptStore};
 
-            let config = consilium::config::Config::load(Some(std::path::Path::new(
-                "consilium.config.json",
-            )))?;
+            let config = consilium::config_files::load_effective()?;
             print_staleness_hint(&config);
             let chairman_ladder = roles::resolve_ladder(&config.roles.chairman);
-            let members: Vec<CouncilMember> = config
-                .roles
-                .workers
-                .iter()
-                .map(|role| CouncilMember {
-                    label: format!("{}-{}", role.provider.as_str(), role.model),
-                    ladder: roles::resolve_ladder(role),
-                })
-                .collect();
+            let members = roles::resolve_workers(&config.roles.workers);
 
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             let health = ModelHealth::with_retry(RetryConfig::prod());
@@ -518,9 +528,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("nothing to review: the diff is empty");
             }
 
-            let config = consilium::config::Config::load(Some(std::path::Path::new(
-                "consilium.config.json",
-            )))?;
+            let config = consilium::config_files::load_effective()?;
             print_staleness_hint(&config);
             // The reviewer's full ladder, like council and conduct: a retired
             // or plan-gated primary falls through to the next rung instead of
@@ -575,13 +583,10 @@ async fn main() -> anyhow::Result<()> {
             timeout,
         } => {
             use consilium::orchestrator::conduct::{run_conduct, ConductDeps, RoleHandle};
-            use consilium::orchestrator::council::CouncilMember;
             use consilium::orchestrator::resilience::{ModelHealth, RetryConfig};
             use consilium::orchestrator::{roles, transcript::TranscriptStore};
 
-            let config = consilium::config::Config::load(Some(std::path::Path::new(
-                "consilium.config.json",
-            )))?;
+            let config = consilium::config_files::load_effective()?;
             print_staleness_hint(&config);
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             if !no_preflight {
@@ -607,15 +612,7 @@ async fn main() -> anyhow::Result<()> {
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
             let cwd = std::env::current_dir()?;
 
-            let workers: Vec<CouncilMember> = config
-                .roles
-                .workers
-                .iter()
-                .map(|role| CouncilMember {
-                    label: format!("{}-{}", role.provider.as_str(), role.model),
-                    ladder: roles::resolve_ladder(role),
-                })
-                .collect();
+            let workers = roles::resolve_workers(&config.roles.workers);
 
             let health = ModelHealth::with_retry(RetryConfig::prod());
             let deps = ConductDeps {
@@ -691,12 +688,9 @@ async fn main() -> anyhow::Result<()> {
         } => {
             use consilium::orchestrator::auto::{run_auto, AutoDeps};
             use consilium::orchestrator::conduct::{ConductDeps, RoleHandle};
-            use consilium::orchestrator::council::CouncilMember;
             use consilium::orchestrator::{roles, transcript::TranscriptStore};
 
-            let config = consilium::config::Config::load(Some(std::path::Path::new(
-                "consilium.config.json",
-            )))?;
+            let config = consilium::config_files::load_effective()?;
             print_staleness_hint(&config);
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             if !no_preflight {
@@ -722,25 +716,9 @@ async fn main() -> anyhow::Result<()> {
             let transcripts = TranscriptStore::new(TranscriptStore::default_base()?);
             let cwd = std::env::current_dir()?;
 
-            let workers: Vec<CouncilMember> = config
-                .roles
-                .workers
-                .iter()
-                .map(|role| CouncilMember {
-                    label: format!("{}-{}", role.provider.as_str(), role.model),
-                    ladder: roles::resolve_ladder(role),
-                })
-                .collect();
+            let workers = roles::resolve_workers(&config.roles.workers);
 
-            let council_members: Vec<CouncilMember> = config
-                .roles
-                .workers
-                .iter()
-                .map(|role| CouncilMember {
-                    label: format!("{}-{}", role.provider.as_str(), role.model),
-                    ladder: roles::resolve_ladder(role),
-                })
-                .collect();
+            let council_members = roles::resolve_workers(&config.roles.workers);
 
             let deps = AutoDeps {
                 conduct: ConductDeps {
@@ -832,14 +810,27 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Command::Init { force, yes } => {
+        Command::Init { force, yes, global } => {
             use std::io::IsTerminal;
-            let target = std::env::current_dir()?.join("consilium.config.json");
+            let target = if global {
+                let file = consilium::config_files::user_config_path().ok_or_else(|| {
+                    anyhow::anyhow!("$HOME is not set; cannot locate ~/.consilium")
+                })?;
+                if let Some(dir) = file.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                file
+            } else {
+                std::env::current_dir()?.join(consilium::config_files::PROJECT_CONFIG_FILE)
+            };
             // Non-interactive when --yes, or when stdin isn't a TTY (CI/pipes) —
             // never hang a wizard waiting on input that won't come.
             if yes || !std::io::stdin().is_terminal() {
                 if target.exists() && !force {
-                    eprintln!("consilium.config.json already exists; use --force to overwrite");
+                    eprintln!(
+                        "{} already exists; use --force to overwrite",
+                        target.display()
+                    );
                     std::process::exit(1);
                 }
                 let roles = consilium::recommend::recommend_roles(&consilium::catalog::catalog())?;
@@ -847,7 +838,8 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::write(&target, cfg.to_pretty_json()?)?;
                 let n_roles = 2 + cfg.roles.workers.len() + 1 + 1;
                 println!(
-                    "wrote consilium.config.json ({n_roles} roles; edit model ladders as needed)"
+                    "wrote {} ({n_roles} roles; edit model ladders as needed)",
+                    target.display()
                 );
                 println!("Next: `consilium auth` checks the CLIs are signed in; `consilium models --write` then switches this lineup to the models your plans include.");
                 println!("Then run your first task:  consilium conduct \"add a hello() function with a test\"");
@@ -860,16 +852,14 @@ async fn main() -> anyhow::Result<()> {
             // The MCP server owns stdout for JSON-RPC; logs already go to stderr
             // (see the subscriber setup). Load config + the shared quota store
             // and serve over stdio until the client disconnects.
-            let config = consilium::config::Config::load(Some(std::path::Path::new(
-                "consilium.config.json",
-            )))?;
+            let files = consilium::config_files::ConfigFiles::locate(&std::env::current_dir()?);
+            let config = files.load()?;
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
-            consilium::mcp::serve_stdio(config, store).await?;
+            consilium::mcp::serve_stdio(config, store, files.describe()).await?;
         }
         Command::Serve { addr, timeout } => {
-            let config = consilium::config::Config::load(Some(std::path::Path::new(
-                "consilium.config.json",
-            )))?;
+            let files = consilium::config_files::ConfigFiles::locate(&std::env::current_dir()?);
+            let config = files.load()?;
             let store = consilium::quota::QuotaStore::open(&quota_db_path()?)?;
             let socket_addr: std::net::SocketAddr = addr
                 .parse()
@@ -879,7 +869,7 @@ async fn main() -> anyhow::Result<()> {
                 config,
                 store,
                 std::time::Duration::from_secs(timeout),
-                Some("consilium.config.json".to_string()),
+                files.describe(),
             )
             .await?;
         }
@@ -894,7 +884,6 @@ async fn main() -> anyhow::Result<()> {
         } => {
             use consilium::config::VerifyConfig;
             use consilium::orchestrator::conduct::{ConductDeps, RoleHandle};
-            use consilium::orchestrator::council::CouncilMember;
             use consilium::orchestrator::eval::{self, EvalDeps};
             use consilium::orchestrator::resilience::Rung;
             use consilium::orchestrator::roles;
@@ -911,9 +900,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let config = consilium::config::Config::load(Some(std::path::Path::new(
-                "consilium.config.json",
-            )))?;
+            let config = consilium::config_files::load_effective()?;
             struct ConfigEvalDeps {
                 config: consilium::config::Config,
             }
@@ -930,16 +917,7 @@ async fn main() -> anyhow::Result<()> {
                     verify: Option<VerifyConfig>,
                     cross_family: bool,
                 ) -> ConductDeps {
-                    let workers = self
-                        .config
-                        .roles
-                        .workers
-                        .iter()
-                        .map(|role| CouncilMember {
-                            label: format!("{}-{}", role.provider.as_str(), role.model),
-                            ladder: roles::resolve_ladder(role),
-                        })
-                        .collect();
+                    let workers = roles::resolve_workers(&self.config.roles.workers);
                     ConductDeps {
                         conductor: RoleHandle {
                             ladder: roles::resolve_ladder(&self.config.roles.conductor),

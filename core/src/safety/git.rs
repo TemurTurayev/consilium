@@ -1416,6 +1416,15 @@ fn static_args(args: &[&str]) -> Vec<OsString> {
 }
 
 fn run_git(cwd: &Path, args: Vec<OsString>) -> std::io::Result<Output> {
+    hardened_git(cwd).args(&args).output()
+}
+
+/// A `git` command in `cwd` with everything that could make it run someone
+/// else's code, or act somewhere else, switched off: the repository's hooks
+/// and fsmonitor, the pager, the user's and the system's configuration, and
+/// every `GIT_*` variable inherited from the environment. The caller appends
+/// the subcommand and its arguments.
+pub(crate) fn hardened_git(cwd: &Path) -> Command {
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut command = Command::new("git");
     command
@@ -1424,7 +1433,6 @@ fn run_git(cwd: &Path, args: Vec<OsString>) -> std::io::Result<Output> {
         .arg("-c")
         .arg("core.fsmonitor=false")
         .arg("--no-pager")
-        .args(&args)
         .current_dir(cwd)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", null_device)
@@ -1452,7 +1460,7 @@ fn run_git(cwd: &Path, args: Vec<OsString>) -> std::io::Result<Output> {
     ] {
         command.env_remove(name);
     }
-    command.output()
+    command
 }
 
 fn required_git_output(cwd: &Path, args: Vec<OsString>, operation: &str) -> Result<Output> {

@@ -37,6 +37,12 @@ impl Adapter for CodexAdapter {
         let e = error.to_ascii_lowercase();
         if e.contains("model is not supported") {
             FailureKind::ModelUnavailable
+        } else if e.contains("401 unauthorized: missing bearer") {
+            // The API's answer to a codex with no sign-in at all (codex-cli
+            // 0.160.1). Checked before the rate limit: the message ends in
+            // random request ids that can spell "429". Any other 401 — a
+            // tool's, an MCP server's — is not codex's own sign-in.
+            FailureKind::Unauthenticated
         } else if e.contains("usage limit") || e.contains("rate limit") || e.contains("429") {
             FailureKind::RateLimited
         } else {
@@ -298,5 +304,47 @@ mod tests {
             CodexAdapter.classify_failure(error),
             FailureKind::ModelUnavailable
         );
+    }
+
+    /// Real codex-cli 0.160.1 output with no saved sign-in (recorded
+    /// 2026-11-22 against an empty CODEX_HOME; the ids are replaced): first the reconnect notices,
+    /// then the turn's failure.
+    #[test]
+    fn classifies_a_signed_out_codex_as_unauthenticated() {
+        let lines = [
+            r#"{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: wss://api.openai.com/v1/responses, cf-ray: 0123456789abcdef-XXX)"}"#,
+            r#"{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses, cf-ray: 0123456789abcdef-XXX, request id: req_0123456789abcdef0123456789abcdef"}}"#,
+        ];
+        for line in lines {
+            let events = CodexAdapter.parse_line(line);
+            let Some(AgentEvent::Failed { error }) = events.first() else {
+                panic!("expected Failed, got {events:?}");
+            };
+            assert_eq!(
+                CodexAdapter.classify_failure(error),
+                FailureKind::Unauthenticated,
+                "{error}"
+            );
+        }
+    }
+
+    /// Request ids are random hex. One that happens to contain "429" must not
+    /// turn a sign-out into a rate limit.
+    #[test]
+    fn a_request_id_cannot_disguise_the_sign_out() {
+        let error = "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses, cf-ray: 0123456789abcdef-XXX, request id: req_0123456789abc429ef0123456789abcdef";
+        assert_eq!(
+            CodexAdapter.classify_failure(error),
+            FailureKind::Unauthenticated
+        );
+    }
+
+    /// Only the API's "no credentials at all" answer is a sign-out. Any other
+    /// 401 — a tool's, an MCP server's — is not codex's own sign-in.
+    #[test]
+    fn a_401_that_is_not_codexs_own_missing_sign_in_is_transient() {
+        let error =
+            "process exited with exit status: 1; stderr tail: mcp server github: 401 Unauthorized";
+        assert_eq!(CodexAdapter.classify_failure(error), FailureKind::Transient);
     }
 }

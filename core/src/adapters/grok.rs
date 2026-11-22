@@ -1,4 +1,4 @@
-use super::{Adapter, FailureKind, RunRequest};
+use super::{asked_to_sign_in, Adapter, FailureKind, RunRequest};
 use crate::event::{AgentEvent, Provider};
 use serde_json::{Map, Value};
 use tokio::process::Command;
@@ -10,17 +10,24 @@ use tokio::process::Command;
 /// adapter takes).
 ///
 /// Headless usage: `grok -p "<prompt>" --output-format streaming-json
-/// [--permission-mode acceptEdits]`, which emits one JSON object per
-/// line (NDJSON). **The exact event schema is BETA per xAI's own docs and may
-/// churn** — `parse_line`/`parse_final` below are deliberately defensive:
-/// they key off plausible field shapes (`text`/`content`, a tool name, a
-/// `stopReason`) rather than a fixed `type` tag, and silently ignore
-/// anything they don't recognize instead of erroring. Recorded real output
-/// (`script/record_fixtures.sh`) should replace these assumptions once the
-/// CLI is actually installed somewhere — see the synthetic fixtures under
-/// `tests/fixtures/grok/` for exactly what shape is currently assumed.
+/// [--permission-mode acceptEdits]`, which emits one JSON object per line.
+/// What a real run looks like (grok 1.0.92, recorded 2026-11-22 —
+/// `tests/fixtures/grok/recorded/basic.jsonl`): the answer streams as
+/// `{"type":"text","data":"…"}` deltas and reasoning as `"thought"` deltas;
+/// a tool call is `{"type":"tool_call","toolName":…,"rawInput":…}`; and the
+/// turn closes with `{"type":"end","stopReason":…,"usage":{…}}`, which holds
+/// the run's total usage but no text. So `parse_line` reports tool calls,
+/// usage and errors as they arrive, and `parse_final` joins the deltas into
+/// whole messages and completes the run with the answer.
 ///
-/// Permission gating (verified against grok 0.2.87): write (worker) runs get
+/// The schema is BETA per xAI's own docs, so the older shapes this adapter
+/// was first written against are still understood (a `text`/`content` field,
+/// a `tool` name, `stopReason` and the answer on one line — the documented
+/// `--output-format json` envelope), and anything unrecognised is ignored
+/// rather than treated as an error. The fixtures directly under
+/// `tests/fixtures/grok/` are synthetic and cover those older shapes.
+///
+/// Permission gating (verified against grok 0.2.87 and 1.0.92): write (worker) runs get
 /// `--permission-mode acceptEdits` — auto-approve file edits only, the same
 /// mode name claude uses — never `--always-approve` (approve-everything).
 /// Advisory (read-only deliberation) runs pass no permission flag at all and
@@ -83,8 +90,23 @@ fn usage_event(obj: &Map<String, Value>) -> Option<AgentEvent> {
 /// and codex (`item.type` on `item.completed`) use, generalized since Grok's
 /// exact tag is undocumented.
 fn tool_call(obj: &Map<String, Value>, whole: &Value) -> Option<AgentEvent> {
-    let name = obj
-        .get("tool")
+    let name = tool_name(obj)?;
+    let detail = obj
+        .get("rawInput")
+        .or_else(|| obj.get("input"))
+        .or_else(|| obj.get("args"))
+        .or_else(|| obj.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| whole.clone());
+    Some(AgentEvent::ToolCall {
+        name: name.to_string(),
+        detail: detail.to_string(),
+    })
+}
+
+/// The tool a tool-shaped object names — see [`tool_call`].
+fn tool_name(obj: &Map<String, Value>) -> Option<&str> {
+    obj.get("tool")
         .or_else(|| obj.get("toolName"))
         .and_then(Value::as_str)
         .or_else(|| {
@@ -95,17 +117,80 @@ fn tool_call(obj: &Map<String, Value>, whole: &Value) -> Option<AgentEvent> {
                 None
             }
         })
-        .filter(|s| !s.is_empty())?;
-    let detail = obj
-        .get("input")
-        .or_else(|| obj.get("args"))
-        .or_else(|| obj.get("arguments"))
-        .cloned()
-        .unwrap_or_else(|| whole.clone());
-    Some(AgentEvent::ToolCall {
-        name: name.to_string(),
-        detail: detail.to_string(),
-    })
+        .filter(|s| !s.is_empty())
+}
+
+/// The fragment of text a streamed delta carries (grok 1.0.92):
+/// `{"type":"text","data":"…"}` for the answer, `"thought"` for reasoning.
+fn delta(obj: &Map<String, Value>) -> Option<(&str, &str)> {
+    let kind = obj.get("type")?.as_str()?;
+    let data = obj.get("data")?.as_str()?;
+    matches!(kind, "text" | "thought").then_some((kind, data))
+}
+
+/// What grok said over one streamed turn, put back together from its deltas.
+#[derive(Debug, Default, PartialEq)]
+struct StreamedTurn {
+    /// What it said before each tool call, in order.
+    narration: Vec<String>,
+    /// What it said after its last tool call: the answer.
+    answer: Option<String>,
+}
+
+impl StreamedTurn {
+    fn read(lines: &[Map<String, Value>]) -> Self {
+        let mut narration = Vec::new();
+        let mut current = String::new();
+        for obj in lines {
+            if let Some(("text", data)) = delta(obj) {
+                current.push_str(data);
+            } else if tool_name(obj).is_some() && !current.is_empty() {
+                narration.push(std::mem::take(&mut current));
+            }
+        }
+        Self {
+            narration,
+            answer: Some(current).filter(|text| !text.is_empty()),
+        }
+    }
+
+    fn said_anything(&self) -> bool {
+        self.answer.is_some() || !self.narration.is_empty()
+    }
+
+    /// Each message whole, in the order grok said them.
+    fn into_messages(self) -> impl Iterator<Item = AgentEvent> {
+        self.narration
+            .into_iter()
+            .chain(self.answer)
+            .map(|text| AgentEvent::Message { text })
+    }
+
+    /// Each message whole, then the run's completion with the answer.
+    fn into_events(self) -> Vec<AgentEvent> {
+        let completed = AgentEvent::Completed {
+            result: self.answer.clone(),
+        };
+        self.into_messages()
+            .chain(std::iter::once(completed))
+            .collect()
+    }
+}
+
+/// How grok's error opens when it has no saved sign-in (grok 1.0.92, recorded
+/// 2026-11-22 — `tests/fixtures/grok/recorded/error_signed_out.jsonl`).
+/// Lower-cased, as `classify_failure` compares it.
+const NOT_SIGNED_IN: &str = "not signed in.";
+
+/// What older grok printed instead, before waiting — with no time limit — for
+/// a device sign-in (grok 0.2.87, recorded 2026-11-22). Kept so that an
+/// outdated CLI is stopped rather than waited on.
+const SIGN_IN_PROMPT: &str = "To sign in, open this URL in your browser";
+
+impl GrokAdapter {
+    fn asked_to_sign_in(&self, error: &str) -> bool {
+        asked_to_sign_in(self.cli_binary(), self.sign_in_prompts(), error)
+    }
 }
 
 impl Adapter for GrokAdapter {
@@ -117,8 +202,12 @@ impl Adapter for GrokAdapter {
         "grok"
     }
 
+    fn sign_in_prompts(&self) -> &'static [&'static str] {
+        &[SIGN_IN_PROMPT]
+    }
+
     fn build_command(&self, req: &RunRequest) -> Command {
-        // Flags verified against the real CLI (grok 0.2.87, 2026-07-08):
+        // Flags verified against the real CLI (grok 0.2.87, 2026-07-08; 1.0.92, 2026-11-22):
         // `-p/--single`, `--output-format streaming-json`, `-m/--model`,
         // `--permission-mode <default|acceptEdits|auto|dontAsk|bypassPermissions|plan>`.
         // NOTE: `--no-auto-update` (assumed from pre-release research) does NOT
@@ -170,14 +259,18 @@ impl Adapter for GrokAdapter {
         }
 
         if is_terminal_marker(obj) {
-            let mut events = Vec::new();
-            if let Some(usage) = usage_event(obj) {
-                events.push(usage);
-            }
-            events.push(AgentEvent::Completed {
-                result: text_field(obj),
-            });
-            return events;
+            // The line that ends a turn carries its total usage. It carries the
+            // answer too in the `--output-format json` envelope, but not when
+            // streaming (grok 1.0.92): there the answer came as deltas, and
+            // `parse_final` — which sees them all — completes the run.
+            let answer = text_field(obj).map(|text| AgentEvent::Completed { result: Some(text) });
+            return usage_event(obj).into_iter().chain(answer).collect();
+        }
+
+        // A streamed delta (grok 1.0.92: `{"type":"text","data":"…"}`, and
+        // `thought` for reasoning) is a fragment of a message, not a message.
+        if delta(obj).is_some() {
+            return Vec::new();
         }
 
         if let Some(ev) = tool_call(obj, &value) {
@@ -192,29 +285,34 @@ impl Adapter for GrokAdapter {
     }
 
     fn parse_final(&self, full_output: &str) -> Vec<AgentEvent> {
-        // parse_line already emits Completed for any line carrying a terminal
-        // marker; re-scanning here would double it up. Only fall back to
-        // salvaging a result when NO line in the whole stream looked terminal
-        // (e.g. the CLI dropped to non-streaming `--output-format json`, or the
-        // beta NDJSON shape drifted away from `stopReason`/`done`/`final`).
-        let saw_terminal = full_output.lines().any(|line| {
-            serde_json::from_str::<Value>(line.trim())
-                .ok()
-                .and_then(|v| v.as_object().map(is_terminal_marker))
-                .unwrap_or(false)
-        });
-        if saw_terminal {
+        let lines: Vec<Map<String, Value>> = full_output
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+            .filter_map(|value| value.as_object().cloned())
+            .collect();
+        // `parse_line` already completed the run if the line that ended the
+        // turn carried the answer; a second Completed would double it up.
+        if lines
+            .iter()
+            .any(|obj| is_terminal_marker(obj) && text_field(obj).is_some())
+        {
             return Vec::new();
         }
-
-        full_output
-            .lines()
+        let streamed = StreamedTurn::read(&lines);
+        if lines.iter().any(is_terminal_marker) {
+            return streamed.into_events();
+        }
+        // Deltas with no end after them: the stream was cut off. What grok
+        // had said is reported; the run is not completed.
+        if streamed.said_anything() {
+            return streamed.into_messages().collect();
+        }
+        // Neither deltas nor a line that ended the turn: the CLI dropped to
+        // some other shape. Salvage the last object that carries text.
+        lines
+            .iter()
             .rev()
-            .find_map(|line| {
-                let value: Value = serde_json::from_str(line.trim()).ok()?;
-                let obj = value.as_object()?;
-                text_field(obj)
-            })
+            .find_map(text_field)
             .map(|text| vec![AgentEvent::Completed { result: Some(text) }])
             .unwrap_or_default()
     }
@@ -224,30 +322,19 @@ impl Adapter for GrokAdapter {
         // Unambiguous "this model doesn't exist" phrasing only — anything
         // fuzzier (context-length complaints, generic 4xx) must NOT trip this,
         // mirroring codex::classify_failure's context-length carve-out.
-        if e.contains("model not found")
+        if e.starts_with(NOT_SIGNED_IN) || self.asked_to_sign_in(error) {
+            FailureKind::Unauthenticated
+        } else if e.contains("model not found")
             || e.contains("unknown model")
             || e.contains("deprecated")
             || e.contains("does not exist")
         {
             FailureKind::ModelUnavailable
-        } else if e.contains("unauthorized")
-            || e.contains("401")
-            || e.contains("403")
-            || e.contains("login")
-            || e.contains("expired")
-            || e.contains("subscription required")
-        {
-            // Auth-shaped: the cached browser-OAuth token is missing/stale.
-            // None of claude/codex/gemini's classify_failure carve out a
-            // dedicated auth FailureKind either (there isn't one — see
-            // adapters::mod::FailureKind) — every adapter's auth-shaped
-            // strings fall into the generic Transient bucket here, because
-            // re-login clears the condition on the next run rather than
-            // marking the model permanently dead. The user-facing "needs
-            // login" signal is a separate pipeline (`crate::auth::is_auth_failure`,
-            // `consilium auth`/`consilium doctor`), not this one.
-            FailureKind::Transient
         } else {
+            // Everything else is retried — including other auth-shaped text
+            // ("401", "expired", "subscription required"): no real grok output
+            // for a rejected sign-in has been recorded yet, and guessing wrong
+            // would skip the whole provider. `consilium auth` reads those.
             FailureKind::Transient
         }
     }
@@ -421,6 +508,8 @@ mod tests {
         );
     }
 
+    /// Guesses at how grok words a rejected sign-in — none recorded from the
+    /// real CLI, so none may skip the provider.
     #[test]
     fn classifies_auth_shaped_strings_as_transient() {
         for msg in [
@@ -471,28 +560,97 @@ mod tests {
         );
     }
 
-    /// Runs only when real fixtures have been recorded via script/record_fixtures.sh.
+    /// Real grok 1.0.92 output for a turn that reads a file, then answers
+    /// (recorded 2026-11-22; paths, ids and signatures replaced, the list of
+    /// the machine's own commands cut). Not the shape this adapter was first
+    /// written against: the answer arrives as `text` deltas and the closing
+    /// `end` event carries none.
+    const RECORDED: &str = include_str!("../../tests/fixtures/grok/recorded/basic.jsonl");
+
+    const RECORDED_ANSWER: &str = "The file hello.txt contains a single line that reads \"The launch code is PINEAPPLE-42.\" That is the entire contents of the file.";
+
+    /// Everything a session reports for `raw`: line by line, then at the end.
+    fn run_events(raw: &str) -> Vec<AgentEvent> {
+        let mut events = parse_all(raw);
+        events.extend(GrokAdapter.parse_final(raw));
+        events
+    }
+
     #[test]
-    fn parses_recorded_real_output_if_present() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/grok/recorded/basic.jsonl"
+    fn a_recorded_run_completes_once_with_the_streamed_answer() {
+        let completed: Vec<Option<String>> = run_events(RECORDED)
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::Completed { result } => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed, [Some(RECORDED_ANSWER.to_string())]);
+    }
+
+    /// One message per stretch of text — what grok said before its tool call,
+    /// then the answer — never one per token, and never its reasoning.
+    #[test]
+    fn a_recorded_run_reports_each_message_whole() {
+        let messages: Vec<String> = run_events(RECORDED)
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::Message { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "I'll read `hello.txt` and then summarize it in two sentences.",
+                RECORDED_ANSWER
+            ]
         );
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            eprintln!("skipped: no recorded fixture");
-            return;
-        };
-        if raw.trim().is_empty() {
-            eprintln!("skipped: empty recorded fixture");
-            return;
-        }
-        let events = parse_all(&raw);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Message { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Completed { .. })));
+    }
+
+    /// grok reports usage after each model call and again, summed, when the
+    /// turn ends. Counting both would double the bill.
+    #[test]
+    fn a_recorded_run_counts_its_tokens_once() {
+        let usage: Vec<(u64, u64)> = run_events(RECORDED)
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                } => Some((input_tokens, output_tokens)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage, [(44250, 323)]);
+    }
+
+    #[test]
+    fn a_recorded_run_reports_its_tool_call_with_the_input_alone() {
+        let calls: Vec<(String, String)> = run_events(RECORDED)
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolCall { name, detail } => Some((name, detail)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [(
+                "read_file".to_string(),
+                r#"{"target_file":"/work/hello.txt"}"#.to_string()
+            )]
+        );
+    }
+
+    /// A turn that ends without having said anything is still over.
+    #[test]
+    fn a_streamed_turn_with_no_text_completes_without_a_result() {
+        let raw = r#"{"type":"end","stopReason":"end_turn","sessionId":"session-1"}"#;
+        assert!(matches!(
+            run_events(raw).as_slice(),
+            [AgentEvent::Completed { result: None }]
+        ));
     }
 
     fn first_failure(raw: &str) -> String {
@@ -527,5 +685,71 @@ mod tests {
         let error = first_failure(raw);
         assert!(error.contains("outdated"), "got: {error}");
         assert_eq!(GrokAdapter.classify_failure(&error), FailureKind::Transient);
+    }
+
+    /// Real grok 0.2.87 stderr with no saved sign-in (recorded 2026-11-22
+    /// against an empty home folder; the one-time code is blanked). grok
+    /// starts a device sign-in and waits for it with no time limit.
+    const SIGNED_OUT_STDERR: &str = "\nTo sign in, open this URL in your browser:\n\n  https://accounts.x.ai/oauth2/device?user_code=XXXX-XXXX\n\nConfirm this code in your browser:\n\n  XXXX-XXXX\n\nOnly continue with a code you requested. Don't share it with anyone.\n\nWaiting for authorization...\n";
+
+    #[test]
+    fn groks_sign_in_prompt_is_what_a_signed_out_grok_prints() {
+        assert!(GrokAdapter
+            .sign_in_prompts()
+            .iter()
+            .any(|prompt| SIGNED_OUT_STDERR.contains(prompt)));
+    }
+
+    /// grok 0.2.87 never gave up by itself; this is what a run stopped from
+    /// outside (a timeout) fails with.
+    #[test]
+    fn classifies_a_signed_out_grok_0_2_87_as_unauthenticated() {
+        let error = format!(
+            "process exited with signal: 15 (SIGTERM); stderr tail: {}",
+            SIGNED_OUT_STDERR.trim()
+        );
+        assert_eq!(
+            GrokAdapter.classify_failure(&error),
+            FailureKind::Unauthenticated
+        );
+    }
+
+    /// Real grok 1.0.92 output with no saved sign-in (recorded 2026-11-22
+    /// against an empty home folder): it no longer waits — it fails at once
+    /// and says so.
+    #[test]
+    fn recorded_signed_out_grok_is_unauthenticated() {
+        let raw = include_str!("../../tests/fixtures/grok/recorded/error_signed_out.jsonl");
+        let error = first_failure(raw);
+        assert!(error.starts_with("Not signed in."), "got: {error}");
+        assert_eq!(
+            GrokAdapter.classify_failure(&error),
+            FailureKind::Unauthenticated
+        );
+        assert!(crate::auth::is_auth_failure(&error));
+    }
+
+    /// grok's own words further on in stderr are something a working grok
+    /// logged — a worker editing this very file, say — not a sign-out.
+    #[test]
+    fn groks_prompt_quoted_later_in_stderr_is_no_sign_out() {
+        let error = format!(
+            "process exited with exit status: 1; stderr tail: edited grok.rs{SIGNED_OUT_STDERR}"
+        );
+        assert_eq!(GrokAdapter.classify_failure(&error), FailureKind::Transient);
+    }
+
+    /// Deltas with no `end` after them: the stream was cut off. What grok had
+    /// said so far is reported, but a run that died mid-answer is never a
+    /// completed one.
+    #[test]
+    fn a_stream_cut_off_before_its_end_is_not_a_completed_run() {
+        let raw =
+            "{\"type\":\"text\",\"data\":\"The answer\"}\n{\"type\":\"text\",\"data\":\" is\"}\n";
+        let events = run_events(raw);
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Message { text }] if text == "The answer is"),
+            "got: {events:?}"
+        );
     }
 }

@@ -216,6 +216,13 @@ impl Adapter for SequencedAdapter {
     fn cli_binary(&self) -> &'static str {
         "sh"
     }
+    /// The real per-provider classification, as `ScriptedAdapter` does it — a
+    /// sequence of responses must not change how a failure is routed.
+    fn classify_failure(&self, error: &str) -> FailureKind {
+        self.steps
+            .first()
+            .map_or(FailureKind::Transient, |step| step.classify_failure(error))
+    }
     fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
         debug_assert!(
             !self.steps.is_empty(),
@@ -295,6 +302,11 @@ impl Adapter for RecordingAdapter {
     }
     fn cli_binary(&self) -> &'static str {
         "sh"
+    }
+    /// The wrapped adapter's (real, per-provider) classification — recording a
+    /// call must not change how its failure is routed.
+    fn classify_failure(&self, error: &str) -> FailureKind {
+        self.inner.classify_failure(error)
     }
     fn build_command(&self, req: &RunRequest) -> tokio::process::Command {
         {

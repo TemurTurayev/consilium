@@ -98,6 +98,7 @@ pub async fn run_review(
         "kind": "review",
         "diff_bytes": diff.len(),
         "diff_preview": diff_preview,
+        "model_used": model_used,
         "raw_review": outcome.final_text,
         "parse_ok": verdict.is_some(),
     });
@@ -148,6 +149,7 @@ pub async fn run_review_ladder(
         "kind": "review",
         "diff_bytes": diff.len(),
         "diff_preview": diff_preview,
+        "model_used": model_used,
         "raw_review": outcome.final_text,
         "parse_ok": verdict.is_some(),
     });

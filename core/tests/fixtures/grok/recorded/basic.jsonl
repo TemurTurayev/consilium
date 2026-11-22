@@ -1,0 +1,110 @@
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","send_feedback","web_search","web_fetch","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","context"]}
+{"type":"thought","data":"The"}
+{"type":"thought","data":" user"}
+{"type":"thought","data":" wants"}
+{"type":"thought","data":" me"}
+{"type":"thought","data":" to"}
+{"type":"thought","data":" read"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" file"}
+{"type":"thought","data":" hello"}
+{"type":"thought","data":".txt"}
+{"type":"thought","data":" in"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" current"}
+{"type":"thought","data":" folder"}
+{"type":"thought","data":" and"}
+{"type":"thought","data":" then"}
+{"type":"thought","data":" answer"}
+{"type":"thought","data":" in"}
+{"type":"thought","data":" two"}
+{"type":"thought","data":" full"}
+{"type":"thought","data":" sentences"}
+{"type":"thought","data":" what"}
+{"type":"thought","data":" it"}
+{"type":"thought","data":" says"}
+{"type":"thought","data":"."}
+{"type":"thought","data":" Let"}
+{"type":"thought","data":" me"}
+{"type":"thought","data":" read"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" file"}
+{"type":"thought","data":"."}
+{"type":"text","data":"I'll"}
+{"type":"text","data":" read"}
+{"type":"text","data":" `"}
+{"type":"text","data":"hello"}
+{"type":"text","data":".txt"}
+{"type":"text","data":"`"}
+{"type":"text","data":" and"}
+{"type":"text","data":" then"}
+{"type":"text","data":" summarize"}
+{"type":"text","data":" it"}
+{"type":"text","data":" in"}
+{"type":"text","data":" two"}
+{"type":"text","data":" sentences"}
+{"type":"text","data":"."}
+{"type":"usage","usage":{"input_tokens":22023,"output_tokens":181,"cache_read_input_tokens":5504,"cache_creation_input_tokens":0,"reasoning_tokens":31},"signature":"redacted"}
+{"type":"tool_call","toolCallId":"call-1","title":"read_file","kind":"read","status":"pending","toolName":"read_file","rawInput":{"target_file":"/work/hello.txt"},"content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"call-1","status":null,"content":[],"rawOutput":null,"locations":[{"path":"/work/hello.txt"}]}
+{"type":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"1→The launch code is PINEAPPLE-42.\n"}}],"rawOutput":{"type":"ReadFile","FileContent":{"content":"1→The launch code is PINEAPPLE-42.\n","content_concise":"1→The launch code is PINEAPPLE-42.\n","absolute_path":"/work/hello.txt","offset":null,"raw_output":"The launch code is PINEAPPLE-42.\n","total_lines":1}},"locations":[]}
+{"type":"thought","data":"The"}
+{"type":"thought","data":" file"}
+{"type":"thought","data":" says"}
+{"type":"thought","data":" \""}
+{"type":"thought","data":"The"}
+{"type":"thought","data":" launch"}
+{"type":"thought","data":" code"}
+{"type":"thought","data":" is"}
+{"type":"thought","data":" P"}
+{"type":"thought","data":"INE"}
+{"type":"thought","data":"APPLE"}
+{"type":"thought","data":"-"}
+{"type":"thought","data":"42"}
+{"type":"thought","data":".\""}
+{"type":"thought","data":" The"}
+{"type":"thought","data":" user"}
+{"type":"thought","data":" asked"}
+{"type":"thought","data":" me"}
+{"type":"thought","data":" to"}
+{"type":"thought","data":" answer"}
+{"type":"thought","data":" in"}
+{"type":"thought","data":" two"}
+{"type":"thought","data":" full"}
+{"type":"thought","data":" sentences"}
+{"type":"thought","data":" what"}
+{"type":"thought","data":" it"}
+{"type":"thought","data":" says"}
+{"type":"thought","data":".\n"}
+{"type":"text","data":"The"}
+{"type":"text","data":" file"}
+{"type":"text","data":" hello"}
+{"type":"text","data":".txt"}
+{"type":"text","data":" contains"}
+{"type":"text","data":" a"}
+{"type":"text","data":" single"}
+{"type":"text","data":" line"}
+{"type":"text","data":" that"}
+{"type":"text","data":" reads"}
+{"type":"text","data":" \""}
+{"type":"text","data":"The"}
+{"type":"text","data":" launch"}
+{"type":"text","data":" code"}
+{"type":"text","data":" is"}
+{"type":"text","data":" P"}
+{"type":"text","data":"INE"}
+{"type":"text","data":"APPLE"}
+{"type":"text","data":"-"}
+{"type":"text","data":"42"}
+{"type":"text","data":".\""}
+{"type":"text","data":" That"}
+{"type":"text","data":" is"}
+{"type":"text","data":" the"}
+{"type":"text","data":" entire"}
+{"type":"text","data":" contents"}
+{"type":"text","data":" of"}
+{"type":"text","data":" the"}
+{"type":"text","data":" file"}
+{"type":"text","data":"."}
+{"type":"usage","usage":{"input_tokens":22227,"output_tokens":142,"cache_read_input_tokens":5504,"cache_creation_input_tokens":0,"reasoning_tokens":112},"signature":"redacted"}
+{"type":"end","stopReason":"end_turn","sessionId":"session-1","requestId":"request-1","cwd":"/work","usage":{"input_tokens":44250,"cache_read_input_tokens":11008,"cache_creation_input_tokens":0,"output_tokens":323,"reasoning_tokens":143,"total_tokens":55581},"num_turns":2,"total_cost_usd":0.095942,"total_cost_usd_ticks":959420000,"modelUsage":{"grok-4.7":{"inputTokens":44250,"outputTokens":323,"cacheReadInputTokens":11008,"cacheCreationInputTokens":0,"modelCalls":2,"costUSD":0.095942}}}

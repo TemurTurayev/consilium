@@ -4,6 +4,9 @@ use tokio::process::Command;
 
 pub struct ClaudeAdapter;
 
+/// The built-in tools a deliberation run may use: read-only ones.
+const DELIBERATION_TOOLS: &str = "Read,Grep,Glob";
+
 impl Adapter for ClaudeAdapter {
     fn provider(&self) -> Provider {
         Provider::Claude
@@ -11,6 +14,12 @@ impl Adapter for ClaudeAdapter {
 
     fn cli_binary(&self) -> &'static str {
         "claude"
+    }
+
+    /// The long-lived token `claude setup-token` prints — what a headless
+    /// `claude -p` signs in with when it has no interactive login of its own.
+    fn credential_env(&self) -> &'static [&'static str] {
+        &["CLAUDE_CODE_OAUTH_TOKEN"]
     }
 
     fn build_command(&self, req: &RunRequest) -> Command {
@@ -24,11 +33,26 @@ impl Adapter for ClaudeAdapter {
         if let Some(model) = req.explicit_model() {
             cmd.arg("--model").arg(model);
         }
-        // `advisory` has no per-flag effect for this CLI (no codex-style
-        // trusted-dir refusal to opt out of); the field is read by sessions::spawn's
-        // invariant check only.
+        // Never the user's own MCP servers: a nested run would start all of
+        // them again (a chat bot, a browser, Consilium's own server), pay for
+        // their tool lists on every call, and hand an unattended agent the
+        // user's connectors.
+        cmd.arg("--strict-mcp-config");
         if req.write {
             cmd.arg("--permission-mode").arg("acceptEdits");
+        }
+        // Deliberation answers a question and may read the code it is about —
+        // nothing more. `--safe-mode` drops plugins, hooks, skills and
+        // CLAUDE.md, which only distract here (a SessionStart hook can redirect
+        // the model outright). A write run keeps them: it edits the user's
+        // project and should follow that project's instructions.
+        // `--tools` takes a list, so it goes last — nothing may follow it that
+        // could be read as one more tool name.
+        // Flags verified against Claude Code 2.1.292 (2026-11-22).
+        if req.advisory {
+            cmd.arg("--safe-mode")
+                .arg("--tools")
+                .arg(DELIBERATION_TOOLS);
         }
         cmd.current_dir(&req.cwd);
         cmd
@@ -40,6 +64,13 @@ impl Adapter for ClaudeAdapter {
             || e.contains("issue with the selected model")
         {
             FailureKind::ModelUnavailable
+        } else if e.contains("please run /login")
+            || (e.contains("failed to authenticate") && e.contains("api error"))
+        {
+            // The CLI's own wording only (see the tests for the recorded
+            // strings): this verdict skips every Claude rung for the run, so
+            // an error that merely talks about logging in must not earn it.
+            FailureKind::Unauthenticated
         } else if e.contains("rate limit") || e.contains("usage limit") {
             FailureKind::RateLimited
         } else {
@@ -197,6 +228,53 @@ mod tests {
         assert!(!args.contains(&"--permission-mode".to_string()));
     }
 
+    fn has_flag(args: &[String], flag: &str) -> bool {
+        args.iter().any(|a| a == flag)
+    }
+
+    /// A nested `claude -p` used to start every MCP server the user has — a
+    /// Telegram bot, a browser, Consilium's own server again — and paid for
+    /// their tool lists on each call (measured 2026-11-22 on Claude Code
+    /// 2.1.292: 51k input tokens for "Reply with: ok", 18k without them).
+    #[test]
+    fn no_run_starts_the_users_mcp_servers() {
+        for (advisory, write) in [(false, false), (true, false), (false, true)] {
+            assert!(
+                has_flag(&command_args(advisory, write), "--strict-mcp-config"),
+                "advisory={advisory} write={write}"
+            );
+        }
+    }
+
+    /// Deliberation is a question and an answer. Plugins, hooks and skills
+    /// only get in the way — a SessionStart hook can tell the model to do
+    /// something else entirely — and nothing but reading is needed (4k input
+    /// tokens instead of 18k, same measurement).
+    #[test]
+    fn a_deliberation_run_is_bare_and_can_only_read() {
+        let args = command_args(true, false);
+        assert!(has_flag(&args, "--safe-mode"));
+        assert!(args.windows(2).any(|w| w == ["--tools", "Read,Grep,Glob"]));
+    }
+
+    /// `--tools` takes a list: anything after it that is not a flag would be
+    /// read as one more tool name. It must come last, far from the prompt.
+    #[test]
+    fn the_tool_list_cannot_swallow_another_argument() {
+        let args = command_args(true, false);
+        assert_eq!(&args[..2], ["-p", "hi"]);
+        assert_eq!(args.last().map(String::as_str), Some("Read,Grep,Glob"));
+    }
+
+    /// A worker edits the user's project, so the project's own instructions
+    /// and settings still apply to it, and it keeps its full tool set.
+    #[test]
+    fn a_write_run_keeps_project_customizations_and_all_tools() {
+        let args = command_args(false, true);
+        assert!(!has_flag(&args, "--safe-mode"));
+        assert!(!has_flag(&args, "--tools"));
+    }
+
     #[test]
     fn usage_sums_cache_tokens() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"abc123","usage":{"input_tokens":6,"cache_creation_input_tokens":100,"cache_read_input_tokens":10,"output_tokens":6}}"#;
@@ -217,6 +295,41 @@ mod tests {
             ClaudeAdapter.classify_failure(e),
             FailureKind::ModelUnavailable
         );
+    }
+
+    /// Both strings are what Claude Code 2.1.292 really prints for a headless
+    /// run with no usable sign-in (recorded 2026-11-22): the first with a stale
+    /// host session in the environment, the second with a clean one.
+    #[test]
+    fn classifies_a_missing_sign_in_as_unauthenticated() {
+        for error in [
+            "Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+            "Not logged in · Please run /login",
+        ] {
+            assert_eq!(
+                ClaudeAdapter.classify_failure(error),
+                FailureKind::Unauthenticated,
+                "{error}"
+            );
+        }
+    }
+
+    /// Being signed out takes every Claude rung out of the run, so only the
+    /// CLI's own wording may say so — not an error that merely talks about
+    /// logging in (a failing test, a hook's stderr, the task itself).
+    #[test]
+    fn an_error_that_only_mentions_logging_in_is_not_a_sign_out() {
+        for error in [
+            "test failed: expected the banner 'You are not logged in'",
+            "hook error: failed to authenticate with the package registry",
+            "process exited with exit status: 1; stderr tail: login required for npm publish",
+        ] {
+            assert_eq!(
+                ClaudeAdapter.classify_failure(error),
+                FailureKind::Transient,
+                "{error}"
+            );
+        }
     }
 
     #[test]

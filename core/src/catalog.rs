@@ -14,7 +14,8 @@ use crate::event::Provider;
 pub enum AuthMethod {
     /// The CLI runs its own interactive login (`codex login`, `agy` login).
     CliLogin,
-    /// A headless token the user exports (`claude setup-token` → env var).
+    /// A headless token (`claude setup-token`) kept in the environment or in
+    /// `~/.consilium/secrets.env` (see `crate::secrets`).
     SetupToken,
     /// A raw API key stored in `~/.consilium/secrets.env` (future providers).
     ApiKey,
@@ -118,14 +119,14 @@ pub fn catalog() -> Vec<CatalogEntry> {
             (5, 6, 5, 6),
             "mid",
         ),
-        // Beta: the Grok Build CLI's headless event schema is unstable (see
-        // adapters::grok's doc comment) and its token accounting is unverified
-        // against real output — scored modestly below every other provider's
-        // corresponding role so it never displaces the curated default lineup
-        // (see recommend::tests::full_catalog_reproduces_the_curated_default_lineup),
+        // Beta: xAI still calls the Grok Build CLI's headless event schema
+        // unstable (see adapters::grok's doc comment) — scored modestly below
+        // every other provider's corresponding role so it never displaces the
+        // curated default lineup (see
+        // recommend::tests::full_catalog_reproduces_the_curated_default_lineup),
         // but is still available as an explicit choice once authed. `grok-4.7`
-        // is what `grok models` lists; it has not been run end to end (the
-        // installed 0.2.87 CLI is refused by xAI until it is updated).
+        // is what `grok models` lists, and has answered and chaired a council
+        // end to end (grok 1.0.92, 2026-11-22).
         entry(
             Provider::Grok,
             "grok-4.7",

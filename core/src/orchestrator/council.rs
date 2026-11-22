@@ -37,6 +37,12 @@ pub struct CouncilOutcome {
     /// (anonymized label, member label, answer text)
     pub answers: Vec<(String, String, String)>,
     pub failed_members: Vec<String>,
+    /// Which model each answer came from: (member label, "provider/model").
+    pub answered_by: Vec<(String, String)>,
+    /// The model that wrote the synthesis ("provider/model").
+    pub chairman_model: String,
+    /// Every model demotion during the run, across all three stages.
+    pub fallbacks: Vec<Fallback>,
     pub transcript: serde_json::Value,
 }
 
@@ -82,6 +88,7 @@ pub async fn run_council(
     let results = futures::future::join_all(futures).await;
 
     let mut answers: Vec<(String, String, String)> = Vec::new(); // (anon label, member label, text)
+    let mut answered_by: Vec<(String, String)> = Vec::new(); // (member label, "provider/model")
     let mut failed_members: Vec<String> = Vec::new();
     for (label, result) in member_labels.iter().zip(results) {
         match result {
@@ -89,6 +96,7 @@ pub async fn run_council(
                 all_fallbacks.extend(fo.fallbacks);
                 if !fo.outcome.final_text.is_empty() {
                     answers.push((String::new(), label.clone(), fo.outcome.final_text));
+                    answered_by.push((label.clone(), fo.model_used));
                 } else {
                     failed_members.push(label.clone());
                 }
@@ -179,13 +187,20 @@ pub async fn run_council(
     )
     .await?;
     all_fallbacks.extend(synthesis_result.fallbacks);
+    let chairman_model = synthesis_result.model_used;
     let synthesis_outcome = synthesis_result.outcome;
+    let model_of = |member: &str| {
+        answered_by
+            .iter()
+            .find(|(label, _)| label == member)
+            .map(|(_, model)| model.as_str())
+    };
 
     let transcript = serde_json::json!({
         "kind": "council",
         "question": question,
         "answers": answers.iter().map(|(anon, member, text)| serde_json::json!({
-            "anon_label": anon, "member": member, "text": text
+            "anon_label": anon, "member": member, "model_used": model_of(member), "text": text
         })).collect::<Vec<_>>(),
         "failed_members": failed_members,
         "reviews": reviews,
@@ -196,6 +211,7 @@ pub async fn run_council(
             })).collect::<Vec<_>>()),
         })).collect::<Vec<_>>(),
         "synthesis": synthesis_outcome.final_text,
+        "chairman_model": chairman_model,
         "fallbacks": all_fallbacks.iter().map(|fb| serde_json::json!({
             "from": fb.from,
             "to": fb.to,
@@ -207,6 +223,9 @@ pub async fn run_council(
         synthesis: synthesis_outcome.final_text,
         answers,
         failed_members,
+        answered_by,
+        chairman_model,
+        fallbacks: all_fallbacks,
         transcript,
     })
 }

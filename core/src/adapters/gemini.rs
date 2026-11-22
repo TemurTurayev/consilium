@@ -1,4 +1,4 @@
-use super::{Adapter, FailureKind, RunRequest};
+use super::{asked_to_sign_in, Adapter, FailureKind, RunRequest};
 use crate::event::{AgentEvent, Provider};
 use tokio::process::Command;
 
@@ -16,6 +16,10 @@ use tokio::process::Command;
 /// `--dangerously-skip-permissions` so the agent applies file edits unattended.
 pub struct GeminiAdapter;
 
+/// What agy prints first when it has no saved sign-in, before it opens the
+/// browser and waits 60 s for one (agy 1.5.14, recorded 2026-11-22).
+const SIGN_IN_PROMPT: &str = "Authentication required. Please visit the URL to log in";
+
 impl Adapter for GeminiAdapter {
     fn provider(&self) -> Provider {
         Provider::Gemini
@@ -25,8 +29,17 @@ impl Adapter for GeminiAdapter {
         "agy"
     }
 
+    fn sign_in_prompts(&self) -> &'static [&'static str] {
+        &[SIGN_IN_PROMPT]
+    }
+
     fn classify_failure(&self, error: &str) -> FailureKind {
         let e = error.to_ascii_lowercase();
+        // Checked first: the sign-in URL agy prints carries random tokens that
+        // can spell any of the markers below.
+        if asked_to_sign_in(self.cli_binary(), self.sign_in_prompts(), error) {
+            return FailureKind::Unauthenticated;
+        }
         // "invalid model selection … is not recognized as a known model" is what
         // agy 1.5 prints for a retired/unknown `--model` (see the recorded
         // fixture); the older phrasings are kept for earlier CLI versions.
@@ -176,6 +189,57 @@ mod tests {
     fn unknown_error_is_transient() {
         assert_eq!(
             GeminiAdapter.classify_failure("some unexpected failure"),
+            FailureKind::Transient
+        );
+    }
+
+    /// Real agy 1.5.14 stderr with no saved sign-in (recorded 2026-11-22
+    /// against an empty home folder; the sign-in URL is shortened). agy opens
+    /// the browser and waits 60 s — neither a retry nor another agy model can
+    /// succeed.
+    const SIGNED_OUT_STDERR: &str = "Authentication required. Please visit the URL to log in:\n  https://accounts.google.com/o/oauth2/auth?access_type=offline&code_challenge=CHALLENGE&state=STATE\n\nWaiting for authentication (timeout 60s)...\nOr, paste the authorization code here and press Enter:\n\nError: authentication failed or timed out\n";
+
+    #[test]
+    fn agys_sign_in_prompt_is_what_a_signed_out_agy_prints_first() {
+        assert!(GeminiAdapter
+            .sign_in_prompts()
+            .iter()
+            .any(|prompt| SIGNED_OUT_STDERR.starts_with(prompt)));
+    }
+
+    #[test]
+    fn classifies_a_signed_out_agy_as_unauthenticated() {
+        let error = format!("process exited with exit status: 1; stderr tail: {SIGNED_OUT_STDERR}");
+        assert_eq!(
+            GeminiAdapter.classify_failure(&error),
+            FailureKind::Unauthenticated
+        );
+    }
+
+    /// The sign-in URL carries random tokens. One that happens to spell "404"
+    /// or "429" must not turn a sign-out into a dead model or a rate limit.
+    #[test]
+    fn a_sign_in_url_cannot_disguise_the_sign_out() {
+        for noise in ["404", "429", "quota"] {
+            let stderr = SIGNED_OUT_STDERR.replace("STATE", noise);
+            let error = format!("process exited with exit status: 1; stderr tail: {stderr}");
+            assert_eq!(
+                GeminiAdapter.classify_failure(&error),
+                FailureKind::Unauthenticated,
+                "{noise}"
+            );
+        }
+    }
+
+    /// agy's own words further on in stderr are something a working agy
+    /// logged — a worker editing this very file, say — not a sign-out.
+    #[test]
+    fn agys_prompt_quoted_later_in_stderr_is_no_sign_out() {
+        let error = format!(
+            "process exited with exit status: 1; stderr tail: edited gemini.rs\n{SIGNED_OUT_STDERR}"
+        );
+        assert_eq!(
+            GeminiAdapter.classify_failure(&error),
             FailureKind::Transient
         );
     }

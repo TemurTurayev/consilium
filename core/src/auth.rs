@@ -50,6 +50,7 @@ pub fn is_auth_failure(detail: &str) -> bool {
         || d.contains("credential")
         || d.contains("setup-token")
         || d.contains("not logged in")
+        || d.contains("not signed in")
         || d.contains("please log in")
         || d.contains("login")
 }
@@ -74,7 +75,7 @@ pub fn classify(found: bool, probe: Option<(bool, &str)>) -> ProviderAuth {
 /// The login command to get a provider authenticated (the "guide" half).
 pub fn login_command(p: Provider) -> &'static str {
     match p {
-        Provider::Claude => "run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN=<token> (add it to your shell profile so it persists)",
+        Provider::Claude => "run `claude setup-token`, then save the token as a line `export CLAUDE_CODE_OAUTH_TOKEN=<token>` in ~/.consilium/secrets.env (chmod 600) — Consilium reads that file wherever it runs, a desktop app included",
         Provider::Codex => "run `codex login`",
         Provider::Gemini => "run `agy` once and sign in with Google (it shares the Antigravity app's sign-in)",
         Provider::Grok => "run `grok login` and complete the browser sign-in (needs an X Premium+ / SuperGrok subscription)",
@@ -149,6 +150,16 @@ pub async fn auth_report(quota: &QuotaStore) -> Vec<(Provider, ProviderAuth)> {
 mod tests {
     use super::*;
 
+    /// "Add it to your shell profile" only reaches a terminal. Consilium also
+    /// runs under desktop apps, which never read the profile — the guidance
+    /// must name the file Consilium reads itself.
+    #[test]
+    fn claude_login_guidance_names_the_secrets_file() {
+        let guide = login_command(Provider::Claude);
+        assert!(guide.contains("claude setup-token"), "{guide}");
+        assert!(guide.contains("~/.consilium/secrets.env"), "{guide}");
+    }
+
     #[test]
     fn cli_binary_maps_each_provider() {
         assert_eq!(cli_binary(Provider::Claude), "claude");
@@ -169,6 +180,11 @@ mod tests {
         assert!(is_auth_failure("Your token has expired"));
         assert!(is_auth_failure("session expired"));
         // non-auth failures must not be mis-classified
+        // what a run fails with when its CLI stopped to wait for a sign-in
+        assert!(is_auth_failure(&crate::adapters::sign_in_failure(
+            "grok",
+            "To sign in, open this URL in your browser:"
+        )));
         assert!(!is_auth_failure("rate limit exceeded"));
         assert!(!is_auth_failure("connection timed out"));
     }
