@@ -3,7 +3,7 @@
 use super::names::{is_kind, list, model_name, text};
 use super::CouncilRow;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The highest score a council reviewer can give.
 const TOP_SCORE: f64 = 10.0;
@@ -15,6 +15,34 @@ struct Scored {
     peer_score: Option<f64>,
     /// Scored highest outright among that council's answers.
     best: bool,
+    /// How different it was from the other answers; `None` when it had none
+    /// to be compared with.
+    voice: Option<Voice>,
+}
+
+/// What a model brought to one council that nobody else did.
+struct Voice {
+    /// The share of its words that are in no other member's answer.
+    own_words: f64,
+    /// The share of those that the synthesis kept; `None` when it had no
+    /// words of its own, or the council has no synthesis on record.
+    kept: Option<f64>,
+}
+
+/// A word shorter than this says nothing about who wrote it ("the", "and").
+const MIN_WORD_CHARS: usize = 4;
+
+/// Words are compared by this many leading characters, so that "validates"
+/// and "validation" — or two cases of one Russian noun — are one word.
+const STEM_CHARS: usize = 5;
+
+/// The words of a text, as they are compared: lower-case stems of the ones
+/// long enough to mean something.
+fn words(text: &str) -> BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() >= MIN_WORD_CHARS)
+        .map(|word| word.to_lowercase().chars().take(STEM_CHARS).collect())
+        .collect()
 }
 
 pub(super) fn rows(runs: &[Value]) -> Vec<CouncilRow> {
@@ -48,12 +76,29 @@ pub(super) fn rows(runs: &[Value]) -> Vec<CouncilRow> {
 
 fn row(model: String, all: &[Scored]) -> CouncilRow {
     let scores: Vec<f64> = all.iter().filter_map(|scored| scored.peer_score).collect();
+    let voices: Vec<&Voice> = all
+        .iter()
+        .filter_map(|scored| scored.voice.as_ref())
+        .collect();
     CouncilRow {
         model,
         answers: count(all.len()),
         scored: count(scores.len()),
         peer_score: mean(&scores),
         best_answer: count(all.iter().filter(|scored| scored.best).count()),
+        compared: count(voices.len()),
+        own_words: mean(
+            &voices
+                .iter()
+                .map(|voice| voice.own_words)
+                .collect::<Vec<_>>(),
+        ),
+        kept: mean(
+            &voices
+                .iter()
+                .filter_map(|voice| voice.kept)
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -63,6 +108,8 @@ struct Answer<'a> {
     anon: String,
     member: &'a str,
     model: String,
+    /// The words of what it said.
+    words: BTreeSet<String>,
 }
 
 /// Each answer of one council with what the other members made of it.
@@ -75,6 +122,7 @@ fn scored_answers(run: &Value) -> Vec<Scored> {
                 anon: anon_label(text(answer, "anon_label")?),
                 member,
                 model: model_name(text(answer, "model_used"), member),
+                words: words(text(answer, "text").unwrap_or_default()),
             })
         })
         .collect();
@@ -93,15 +141,47 @@ fn scored_answers(run: &Value) -> Vec<Scored> {
         .filter(|score| **score == top)
         .count();
     let contested = peer_scores.iter().flatten().count() > 1;
+    let synthesis = words(text(run, "synthesis").unwrap_or_default());
+    let voices: Vec<Option<Voice>> = (0..answers.len())
+        .map(|index| voice(index, &answers, &synthesis))
+        .collect();
     answers
         .into_iter()
         .zip(peer_scores)
-        .map(|(answer, peer_score)| Scored {
+        .zip(voices)
+        .map(|((answer, peer_score), voice)| Scored {
             model: answer.model,
             peer_score,
             best: contested && at_top == 1 && peer_score == Some(top),
+            voice,
         })
         .collect()
+}
+
+/// What answer `index` said that none of the others did, and how much of
+/// that the synthesis kept. Two members that say the same add nothing to
+/// each other: what a model brings to a council is what only it said.
+fn voice(index: usize, answers: &[Answer<'_>], synthesis: &BTreeSet<String>) -> Option<Voice> {
+    let own = &answers.get(index)?.words;
+    let others: BTreeSet<&String> = answers
+        .iter()
+        .enumerate()
+        .filter(|(other, _)| *other != index)
+        .flat_map(|(_, answer)| &answer.words)
+        .collect();
+    if own.is_empty() || others.is_empty() {
+        return None;
+    }
+    let only_here: Vec<&String> = own.iter().filter(|word| !others.contains(word)).collect();
+    let kept = only_here
+        .iter()
+        .filter(|word| synthesis.contains(**word))
+        .count();
+    Some(Voice {
+        own_words: only_here.len() as f64 / own.len() as f64,
+        kept: (!only_here.is_empty() && !synthesis.is_empty())
+            .then(|| kept as f64 / only_here.len() as f64),
+    })
 }
 
 /// The scores `answer` got from a different model than the one that wrote

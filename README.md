@@ -228,6 +228,12 @@ them, review findings as a second model ruled on them, the rulings each model
 gave, and worker subtasks accepted on the first try. Where there is enough to
 go on, it names who stands out.
 
+A council is an ensemble, and a member that only repeats the others adds
+nothing to it — however good its answers. So the council table also shows
+*own words*, the share of what a model said that no other member said, and
+*kept*, how much of that the chairman's synthesis used. Both compare words,
+not ideas: read them as a hint about which voice is different, not as a grade.
+
 It is a scoreboard for you, to choose the lineup — not for the models.
 Consilium never puts a ranking into a prompt: a model shown a ranking learns
 which number to raise, and every number here that could be raised by saying

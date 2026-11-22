@@ -12,6 +12,7 @@ const MIN_FIELD: usize = 2;
 pub(super) fn of(standings: &Standings) -> Vec<Nomination> {
     [
         best_answers(&standings.council),
+        own_voice(&standings.council),
         sharpest_eye(&standings.reviewers),
         most_false_alarms(&standings.reviewers),
         cleanest_work(&standings.workers),
@@ -45,6 +46,28 @@ fn best_answers(rows: &[CouncilRow]) -> Option<Nomination> {
             because: format!(
                 "{score:.1}/10 from the other members over {} answers",
                 row.scored
+            ),
+        })
+}
+
+/// The member whose answers overlap least with everyone else's: in a council,
+/// as in any ensemble, a voice that only repeats the others adds nothing.
+fn own_voice(rows: &[CouncilRow]) -> Option<Nomination> {
+    let compared: Vec<(&CouncilRow, f64)> = rows
+        .iter()
+        .filter(|row| row.compared >= MIN_SAMPLE)
+        .filter_map(|row| Some((row, row.own_words?)))
+        .collect();
+    field(compared)
+        .into_iter()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(row, share)| Nomination {
+            title: "Most its own voice".to_string(),
+            model: row.model.clone(),
+            because: format!(
+                "{:.0}% of what it said nobody else said, over {} answers",
+                share * 100.0,
+                row.compared
             ),
         })
 }

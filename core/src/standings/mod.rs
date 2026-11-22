@@ -55,6 +55,17 @@ pub struct CouncilRow {
     pub peer_score: Option<f64>,
     /// Councils in which its answer was scored highest outright.
     pub best_answer: u32,
+    /// Answers given alongside at least one other member's — the ones the
+    /// two measures below could be taken on.
+    pub compared: u32,
+    /// How much of what the model said no other member said: the share of
+    /// its words that appear in nobody else's answer, averaged over its
+    /// answers. Words, not ideas — a rough measure of how different a voice
+    /// it is on the council.
+    pub own_words: Option<f64>,
+    /// How much of that — of what only this model said — the chairman's
+    /// synthesis kept. Different is only worth something when it is used.
+    pub kept: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]

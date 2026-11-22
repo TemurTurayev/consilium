@@ -43,8 +43,9 @@ fn section(title: &str, header: &[&str], rows: Vec<(String, Vec<String>)>) -> Op
 
 fn council(standings: &Standings) -> Option<String> {
     section(
-        "council answers — scored 1–10 by the other members (never by their own author)",
-        &["answers", "scored", "peer score", "best"],
+        "council answers — scored 1–10 by the other members (never by their own author);\n\
+         own words: how much of what it said nobody else said; kept: how much of that the synthesis used",
+        &["answers", "scored", "peer score", "best", "own words", "kept"],
         standings
             .council
             .iter()
@@ -57,6 +58,8 @@ fn council(standings: &Standings) -> Option<String> {
                     row.scored.to_string(),
                     score,
                     row.best_answer.to_string(),
+                    row.own_words.map_or("–".to_string(), percent),
+                    row.kept.map_or("–".to_string(), percent),
                 ];
                 (row.model.clone(), cells)
             })

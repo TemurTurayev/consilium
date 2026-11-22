@@ -266,6 +266,106 @@ fn a_score_from_nobody_is_not_counted() {
     );
 }
 
+/// A council in which each member said `text`, and the chairman `synthesis`.
+fn spoken(answers: &[(&str, &str)], synthesis: &str) -> Value {
+    json!({
+        "kind": "council",
+        "answers": answers.iter().enumerate().map(|(i, (member, text))| json!({
+            "anon_label": char::from(b'A' + i as u8).to_string(), "member": member, "text": text
+        })).collect::<Vec<_>>(),
+        "scores": [],
+        "synthesis": synthesis,
+    })
+}
+
+/// Two members that say the same add nothing to each other. What a model
+/// brings to a council is what nobody else said — and what of that the
+/// chairman kept.
+#[test]
+fn a_models_own_words_are_those_no_other_member_used() {
+    let run = spoken(
+        &[
+            ("claude-fable", "cache invalidation needs versioned keys"),
+            ("codex-gpt", "cache invalidation needs shorter timeouts"),
+        ],
+        "Use versioned keys and keep the timeouts as they are",
+    );
+    let standings = tally(&[run]);
+    let fable = row(&standings.council, "claude/fable", |r| &r.model);
+    let gpt = row(&standings.council, "codex/gpt", |r| &r.model);
+    // 2 of each one's 5 words are its own
+    assert_eq!((fable.compared, fable.own_words), (1, Some(0.4)));
+    assert_eq!((gpt.compared, gpt.own_words), (1, Some(0.4)));
+    // the synthesis kept both of fable's, and one of gpt's two
+    assert_eq!(fable.kept, Some(1.0));
+    assert_eq!(gpt.kept, Some(0.5));
+}
+
+/// The same word in another form is the same word, and the small ones
+/// everybody uses say nothing about anyone.
+#[test]
+fn words_are_compared_by_their_stem_and_short_ones_left_out() {
+    let run = spoken(
+        &[
+            ("claude-fable", "the validation of an error"),
+            ("codex-gpt", "it validates errors, and so on"),
+        ],
+        "",
+    );
+    let standings = tally(&[run]);
+    let fable = row(&standings.council, "claude/fable", |r| &r.model);
+    assert_eq!(fable.own_words, Some(0.0), "nothing here is its own");
+    assert_eq!(fable.kept, None, "with nothing of its own, nothing to keep");
+}
+
+#[test]
+fn an_answer_with_no_one_to_compare_with_is_not_measured() {
+    let alone = spoken(
+        &[("claude-fable", "cache invalidation needs versioned keys")],
+        "x",
+    );
+    let standings = tally(&[alone]);
+    let fable = row(&standings.council, "claude/fable", |r| &r.model);
+    assert_eq!(
+        (fable.answers, fable.compared, fable.own_words),
+        (1, 0, None)
+    );
+}
+
+#[test]
+fn the_most_different_voice_is_named_when_there_is_enough_to_go_on() {
+    let councils: Vec<Value> = (0..MIN_SAMPLE)
+        .map(|_| {
+            spoken(
+                &[
+                    ("claude-fable", "cache invalidation needs versioned keys"),
+                    (
+                        "codex-gpt",
+                        "cache invalidation needs versioned keys everywhere",
+                    ),
+                    (
+                        "gemini-argon",
+                        "measure first: profile the slow endpoint before caching",
+                    ),
+                ],
+                "Profile the endpoint, then add versioned keys",
+            )
+        })
+        .collect();
+    let nominations = tally(&councils).nominations;
+    let named = nominations
+        .iter()
+        .find(|n| n.title == "Most its own voice")
+        .map(|n| (n.model.as_str(), n.because.as_str()));
+    assert_eq!(
+        named,
+        Some((
+            "gemini/argon",
+            "100% of what it said nobody else said, over 5 answers"
+        ))
+    );
+}
+
 // ── reviews ─────────────────────────────────────────────────────────────────
 
 #[test]
@@ -577,6 +677,7 @@ fn the_table_shows_each_section_that_has_rows_and_how_much_it_rests_on() {
     assert!(text.contains("from 2 saved runs"), "{text}");
     assert!(text.contains("claude/fable"), "{text}");
     assert!(text.contains("8.0"), "{text}");
+    assert!(text.contains("own words"), "{text}");
     assert!(text.contains("50%"), "{text}");
     assert!(
         !text.contains("workers"),
